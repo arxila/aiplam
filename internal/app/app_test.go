@@ -1,0 +1,767 @@
+// =========================================================================
+//
+//   Copyright (c) 2026 Arxila OSS (https://arxila.io)
+//
+//   Licensed under the Apache License, Version 2.0 (the "License");
+//   you may not use this file except in compliance with the License.
+//   You may obtain a copy of the License at
+//
+//       http://www.apache.org/licenses/LICENSE-2.0
+//
+//   Unless required by applicable law or agreed to in writing, software
+//   distributed under the License is distributed on an "AS IS" BASIS,
+//   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+//   implied. See the License for the specific language governing
+//   permissions and limitations under the License.
+//
+// =========================================================================
+
+package app
+
+import (
+	"bytes"
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+
+	"arxila.io/aiplam/internal/config"
+	"arxila.io/aiplam/internal/fsutil"
+	"arxila.io/aiplam/internal/gitinfo"
+)
+
+type env struct {
+	t    *testing.T
+	root string
+	home string
+	app  *App
+}
+
+func newEnv(t *testing.T) *env {
+	t.Helper()
+	root := fsutil.Canonical(t.TempDir())
+	home := filepath.Join(root, "home")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return &env{t: t, root: root, home: home, app: &App{Home: home, Cwd: root, Git: gitinfo.NewReader()}}
+}
+
+// run runs aiplam with args and returns the exit code, stdout and stderr.
+func (e *env) run(args ...string) (int, string, string) {
+	e.t.Helper()
+	var out, errOut bytes.Buffer
+	e.app.Stdout, e.app.Stderr = &out, &errOut
+	e.app.gitWarned = false
+	code := e.app.Run(args)
+	return code, out.String(), errOut.String()
+}
+
+// mustRun runs aiplam and fails the test unless it exits with want.
+func (e *env) mustRun(want int, args ...string) (string, string) {
+	e.t.Helper()
+	code, out, errOut := e.run(args...)
+	if code != want {
+		e.t.Fatalf("aiplam %s: exit %d, want %d\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), code, want, out,
+			errOut)
+	}
+	return out, errOut
+}
+
+// skill creates a skill folder (with a SKILL.md) under dir.
+func (e *env) skill(dir, name string) string {
+	e.t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		e.t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "SKILL.md"), []byte("---\nname: "+name+"\n---\n"), 0o644); err != nil {
+		e.t.Fatal(err)
+	}
+	return path
+}
+
+// playbook creates a playbook folder under root with the given skills in its skills/ subfolder.
+func (e *env) playbook(rel string, skills ...string) string {
+	e.t.Helper()
+	dir := filepath.Join(e.root, rel)
+	if err := os.MkdirAll(filepath.Join(dir, "skills"), 0o755); err != nil {
+		e.t.Fatal(err)
+	}
+	for _, s := range skills {
+		e.skill(filepath.Join(dir, "skills"), s)
+	}
+	return dir
+}
+
+func (e *env) agentsSkills() string { return filepath.Join(e.home, ".agents", "skills") }
+
+// assertLink checks that path is a link to target.
+func (e *env) assertLink(path, target string) {
+	e.t.Helper()
+	state, current, err := fsutil.Inspect(path)
+	if err != nil || state != fsutil.Link || !fsutil.SamePath(current, target) {
+		e.t.Fatalf("%s: want a link to %s, got state %v -> %q (err %v)", path, target, state, current, err)
+	}
+}
+
+func (e *env) assertMissing(path string) {
+	e.t.Helper()
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		e.t.Fatalf("%s should not exist", path)
+	}
+}
+
+func (e *env) config() *config.Config {
+	e.t.Helper()
+	cfg, err := config.Load(e.home, config.DefaultSet)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return cfg
+}
+
+func TestCommandsNeedInit(t *testing.T) {
+	e := newEnv(t)
+	for _, args := range [][]string{{"list"}, {"check"}, {"update", "--all"}, {"add", "x", "."}, {"remove", "x"}} {
+		_, errOut := e.mustRun(ExitFailure, args...)
+		if !strings.Contains(errOut, "aiplam init") {
+			t.Errorf("%v: want a hint to run aiplam init, got %q", args, errOut)
+		}
+	}
+}
+
+func TestInit(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init")
+	if !fsutil.IsDir(filepath.Join(e.home, ".agents")) {
+		t.Fatal("~/.agents not created")
+	}
+	if got := e.config().Targets; len(got) != 1 || got[0] != "~/.agents" {
+		t.Fatalf("targets = %v", got)
+	}
+	_, errOut := e.mustRun(ExitFailure, "init", "--target", "claude")
+	if !strings.Contains(errOut, "already initialized") || !strings.Contains(errOut, "by hand") {
+		t.Fatalf("unexpected message: %s", errOut)
+	}
+
+	e2 := newEnv(t)
+	e2.mustRun(ExitOK, "init", "--target", "agents,claude")
+	if got := e2.config().Targets; len(got) != 2 || got[1] != "~/.claude" {
+		t.Fatalf("targets = %v", got)
+	}
+	if !fsutil.IsDir(filepath.Join(e2.home, ".claude")) {
+		t.Fatal("~/.claude not created")
+	}
+}
+
+func TestAddLinksPrefixedSkillsOnly(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init", "--target", "agents", "--target", "claude")
+	pb := e.playbook("ws/arxila-ai-playbook", "arxila-one", "arxila-two", "other-skill")
+	if err := os.MkdirAll(filepath.Join(pb, "skills", "arxila-noskill"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e.app.Cwd = pb
+	e.mustRun(ExitOK, "add", "arxila", ".")
+
+	for _, target := range []string{".agents", ".claude"} {
+		dir := filepath.Join(e.home, target, "skills")
+		e.assertLink(filepath.Join(dir, "arxila-one"), filepath.Join(pb, "skills", "arxila-one"))
+		e.assertLink(filepath.Join(dir, "arxila-two"), filepath.Join(pb, "skills", "arxila-two"))
+		e.assertMissing(filepath.Join(dir, "other-skill"))
+		e.assertMissing(filepath.Join(dir, "arxila-noskill"))
+	}
+	cfg := e.config()
+	if len(cfg.Playbooks) != 1 || cfg.Playbooks[0].Name != "arxila" || cfg.Playbooks[0].Folder != pb ||
+		cfg.Playbooks[0].Artifacts.Skills.Path != "skills" {
+		t.Fatalf("unexpected config: %+v", cfg.Playbooks)
+	}
+
+	_, errOut := e.mustRun(ExitFailure, "add", "arxila", pb)
+	if !strings.Contains(errOut, "already registered") {
+		t.Fatalf("unexpected message: %s", errOut)
+	}
+}
+
+func TestAddSkillsPathRoot(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init")
+	repo := filepath.Join(e.root, "repo")
+	e.skill(repo, "x-a")
+	e.skill(repo, "y-b")
+	e.mustRun(ExitOK, "add", "x", repo, "--skills-path", ".")
+	e.mustRun(ExitOK, "add", "y", repo, "--skills-path=.")
+	e.assertLink(filepath.Join(e.agentsSkills(), "x-a"), filepath.Join(repo, "x-a"))
+	e.assertLink(filepath.Join(e.agentsSkills(), "y-b"), filepath.Join(repo, "y-b"))
+
+	_, errOut := e.mustRun(ExitFailure, "add", "z", repo)
+	if !strings.Contains(errOut, "--skills-path") {
+		t.Fatalf("want a hint about --skills-path: %s", errOut)
+	}
+}
+
+func TestAddConflictCancelsEverything(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init")
+	pb := e.playbook("p", "x-a", "x-b")
+	// A real folder (an old copy) where x-b must be linked.
+	e.skill(e.agentsSkills(), "x-b")
+	_, errOut := e.mustRun(ExitFailure, "add", "x", pb)
+	if !strings.Contains(errOut, "not a link") || !strings.Contains(errOut, "was not added") {
+		t.Fatalf("unexpected message: %s", errOut)
+	}
+	e.assertMissing(filepath.Join(e.agentsSkills(), "x-a"))
+	if len(e.config().Playbooks) != 0 {
+		t.Fatal("playbook registered despite the conflict")
+	}
+}
+
+func TestSameNameInSeveralFolders(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init")
+	a := e.playbook("one/pb-a", "x-a")
+	b := e.playbook("two/pb-b", "x-b")
+	collide := e.playbook("three/pb-a", "x-c")
+	e.mustRun(ExitOK, "add", "x", a)
+	out, _ := e.mustRun(ExitOK, "add", "x", b)
+	if !strings.Contains(out, "x is now identified as x@pb-a") {
+		t.Fatalf("missing id change notice: %s", out)
+	}
+	_, errOut := e.mustRun(ExitFailure, "add", "x", collide)
+	if !strings.Contains(errOut, "ids would collide") {
+		t.Fatalf("unexpected message: %s", errOut)
+	}
+
+	out, _ = e.mustRun(ExitOK, "list")
+	if !strings.Contains(out, "x@pb-a\n") || !strings.Contains(out, "x@pb-b\n") {
+		t.Fatalf("unexpected list: %s", out)
+	}
+	_, errOut = e.mustRun(ExitFailure, "update", "x")
+	if !strings.Contains(errOut, "several playbooks are named 'x'") {
+		t.Fatalf("unexpected message: %s", errOut)
+	}
+	e.mustRun(ExitOK, "update", "x", b)
+	e.mustRun(ExitOK, "update", "x@pb-a")
+
+	// The same skill name in both folders: the second playbook cannot be added.
+	e.skill(filepath.Join(a, "skills"), "x-dup")
+	e.skill(filepath.Join(b, "skills"), "x-dup")
+	_, errOut = e.mustRun(ExitFailure, "update", "x@pb-a")
+	if !strings.Contains(errOut, "also provided by playbook x@pb-b") {
+		t.Fatalf("unexpected message: %s", errOut)
+	}
+
+	out, _ = e.mustRun(ExitOK, "remove", "x@pb-b")
+	if !strings.Contains(out, "x@pb-a is now identified as x") {
+		t.Fatalf("missing id change notice: %s", out)
+	}
+	e.assertMissing(filepath.Join(e.agentsSkills(), "x-b"))
+	e.mustRun(ExitOK, "update", "x")
+	e.assertLink(filepath.Join(e.agentsSkills(), "x-dup"), filepath.Join(a, "skills", "x-dup"))
+}
+
+func TestAddFailsWhenSkillProvidedByAnotherFolder(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init")
+	a := e.playbook("pb-a", "x-same")
+	b := e.playbook("pb-b", "x-same", "x-other")
+	e.mustRun(ExitOK, "add", "x", a)
+	_, errOut := e.mustRun(ExitFailure, "add", "x", b)
+	if !strings.Contains(errOut, "was not added") {
+		t.Fatalf("unexpected message: %s", errOut)
+	}
+	e.assertMissing(filepath.Join(e.agentsSkills(), "x-other"))
+	if n := len(e.config().Playbooks); n != 1 {
+		t.Fatalf("%d playbooks registered", n)
+	}
+}
+
+func TestUpdate(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init")
+	pb := e.playbook("p", "x-a", "x-b")
+	e.mustRun(ExitOK, "add", "x", pb)
+	unrelated := filepath.Join(e.agentsSkills(), "personal")
+	if err := fsutil.CreateLink(unrelated, e.root); err != nil {
+		t.Fatal(err)
+	}
+
+	e.skill(filepath.Join(pb, "skills"), "x-c")
+	if err := os.RemoveAll(filepath.Join(pb, "skills", "x-a")); err != nil {
+		t.Fatal(err)
+	}
+	e.app.Cwd = filepath.Join(pb) // update with no arguments: the playbook of the current folder
+	out, _ := e.mustRun(ExitOK, "update")
+	if !strings.Contains(out, "+ ") || !strings.Contains(out, "- ") {
+		t.Fatalf("unexpected output: %s", out)
+	}
+	e.assertMissing(filepath.Join(e.agentsSkills(), "x-a"))
+	e.assertLink(filepath.Join(e.agentsSkills(), "x-c"), filepath.Join(pb, "skills", "x-c"))
+	e.assertLink(unrelated, e.root)
+
+	out, _ = e.mustRun(ExitOK, "update", "--all")
+	if !strings.Contains(out, "up to date") {
+		t.Fatalf("unexpected output: %s", out)
+	}
+
+	// A conflict cancels the whole update.
+	e.skill(filepath.Join(pb, "skills"), "x-d")
+	e.skill(filepath.Join(pb, "skills"), "x-e")
+	if err := fsutil.CreateLink(filepath.Join(e.agentsSkills(), "x-e"), e.root); err != nil {
+		t.Fatal(err)
+	}
+	_, errOut := e.mustRun(ExitFailure, "update", "x")
+	if !strings.Contains(errOut, "cancelled") {
+		t.Fatalf("unexpected message: %s", errOut)
+	}
+	e.assertMissing(filepath.Join(e.agentsSkills(), "x-d"))
+
+	e.app.Cwd = e.root
+	_, errOut = e.mustRun(ExitFailure, "update")
+	if !strings.Contains(errOut, "no playbook is registered for the current folder") {
+		t.Fatalf("unexpected message: %s", errOut)
+	}
+}
+
+func TestLongestPrefixWins(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init")
+	pb := e.playbook("p", "x-a", "x-y-b")
+	skills := filepath.Join(pb, "skills")
+	e.mustRun(ExitOK, "add", "x", pb)
+	e.assertLink(filepath.Join(e.agentsSkills(), "x-y-b"), filepath.Join(skills, "x-y-b"))
+
+	// x-y takes over x-y-b, whose link stays in place.
+	e.mustRun(ExitOK, "add", "x-y", pb)
+	out, _ := e.mustRun(ExitOK, "list", "--json")
+	var list listOutput
+	if err := json.Unmarshal([]byte(out), &list); err != nil {
+		t.Fatal(err)
+	}
+	names := map[string][]string{}
+	for _, p := range list.Playbooks {
+		for _, s := range p.Artifacts.Skills.Items {
+			names[p.ID] = append(names[p.ID], s.Name)
+		}
+	}
+	if strings.Join(names["x"], ",") != "x-a" || strings.Join(names["x-y"], ",") != "x-y-b" {
+		t.Fatalf("unexpected ownership: %v", names)
+	}
+	e.mustRun(ExitOK, "check")
+
+	// Removing x leaves x-y's links alone.
+	e.mustRun(ExitOK, "remove", "x")
+	e.assertMissing(filepath.Join(e.agentsSkills(), "x-a"))
+	e.assertLink(filepath.Join(e.agentsSkills(), "x-y-b"), filepath.Join(skills, "x-y-b"))
+
+	// Removing x-y while x is registered leaves the link to x, which owns it again.
+	e.mustRun(ExitOK, "add", "x", pb)
+	e.mustRun(ExitOK, "remove", "x-y")
+	e.assertLink(filepath.Join(e.agentsSkills(), "x-y-b"), filepath.Join(skills, "x-y-b"))
+	e.mustRun(ExitOK, "check")
+
+	e.mustRun(ExitOK, "remove", pb)
+	e.assertMissing(filepath.Join(e.agentsSkills(), "x-y-b"))
+	e.assertMissing(filepath.Join(e.agentsSkills(), "x-a"))
+	if n := len(e.config().Playbooks); n != 0 {
+		t.Fatalf("%d playbooks still registered", n)
+	}
+	if !fsutil.IsDir(filepath.Join(skills, "x-a")) {
+		t.Fatal("remove deleted playbook content")
+	}
+}
+
+func TestRemoveKeepsRealFolders(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init")
+	pb := e.playbook("p", "x-a")
+	e.mustRun(ExitOK, "add", "x", pb)
+	copyDir := e.skill(e.agentsSkills(), "x-copy")
+	e.mustRun(ExitOK, "remove", "x")
+	if !fsutil.IsDir(copyDir) {
+		t.Fatal("a real folder was removed")
+	}
+	_, errOut := e.mustRun(ExitFailure, "remove", "x")
+	if !strings.Contains(errOut, "no playbook is registered") {
+		t.Fatalf("unexpected message: %s", errOut)
+	}
+}
+
+func TestCheck(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init")
+	pb := e.playbook("p", "x-a")
+	e.mustRun(ExitOK, "add", "x", pb)
+	out, _ := e.mustRun(ExitOK, "check")
+	if !strings.Contains(out, "Everything is up to date") {
+		t.Fatalf("unexpected output: %s", out)
+	}
+
+	e.skill(filepath.Join(pb, "skills"), "x-new")
+	if err := fsutil.CreateLink(filepath.Join(e.agentsSkills(), "dangling"), filepath.Join(e.root, "gone")); err != nil {
+		t.Fatal(err)
+	}
+	_, errOut := e.mustRun(ExitFailure, "check")
+	if !strings.Contains(errOut, "would link") || !strings.Contains(errOut, "broken link") {
+		t.Fatalf("unexpected warnings: %s", errOut)
+	}
+	e.assertMissing(filepath.Join(e.agentsSkills(), "x-new")) // check changes nothing
+
+	// A broken link into the playbook is removed by update.
+	if err := os.RemoveAll(filepath.Join(pb, "skills", "x-a")); err != nil {
+		t.Fatal(err)
+	}
+	_, errOut = e.mustRun(ExitFailure, "check")
+	if !strings.Contains(errOut, "would remove") {
+		t.Fatalf("unexpected warnings: %s", errOut)
+	}
+	e.mustRun(ExitOK, "update", "x")
+	e.assertMissing(filepath.Join(e.agentsSkills(), "x-a"))
+}
+
+func TestCheckInvalidConfig(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init")
+	file := config.File(e.home, config.DefaultSet)
+	for _, content := range []string{
+		"targets: [~/.agents]\nunknown: 1\n",
+		"targets: []\n",
+		"targets: [~/.agents]\nplaybooks:\n  - name: 'x@y'\n    folder: relative\n    artifacts:\n      skills:\n        path: skills\n",
+		"targets: [~/.agents\n",
+	} {
+		if err := os.WriteFile(file, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		e.mustRun(ExitFailure, "check")
+		_, errOut := e.mustRun(ExitFailure, "list")
+		if !strings.Contains(errOut, "default.yaml") {
+			t.Fatalf("list should point to the config file for %q: %s", content, errOut)
+		}
+	}
+}
+
+func TestListJSONAndVersions(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init")
+	pb := e.playbook("p", "x-a")
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", pb, "-c", "user.name=t", "-c", "user.email=t@example.com",
+			"-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("init", "-q", "-b", "main")
+	git("add", ".")
+	git("commit", "-q", "-m", "first")
+	e.mustRun(ExitOK, "add", "x", pb)
+
+	readList := func() listOutput {
+		out, _ := e.mustRun(ExitOK, "list", "--json")
+		var list listOutput
+		if err := json.Unmarshal([]byte(out), &list); err != nil {
+			t.Fatalf("invalid JSON: %v\n%s", err, out)
+		}
+		return list
+	}
+	list := readList()
+	if len(list.Playbooks) != 1 {
+		t.Fatalf("unexpected list: %+v", list)
+	}
+	p := list.Playbooks[0]
+	if p.ID != "x" || p.Name != "x" || p.Folder != pb || p.Label != "branch: main" || !p.Version.Known ||
+		len(p.Artifacts.Skills.Items) != 1 || !p.Artifacts.Skills.Items[0].Installed {
+		t.Fatalf("unexpected playbook: %+v", p)
+	}
+
+	git("tag", "v1.0.0")
+	git("tag", "x-1.0.0")
+	git("checkout", "-q", "--detach", "v1.0.0")
+	if got := readList().Playbooks[0].Label; got != "tags: v1.0.0, x-1.0.0" {
+		t.Fatalf("label = %q", got)
+	}
+	out, _ := e.mustRun(ExitOK, "list")
+	if !strings.Contains(out, "version: tags: v1.0.0, x-1.0.0") {
+		t.Fatalf("unexpected list: %s", out)
+	}
+
+	e.app.Git = &gitinfo.Reader{}
+	code, out, errOut := e.run("list")
+	if code != ExitOK || !strings.Contains(out, "version: unknown") || !strings.Contains(errOut, "git was not found") {
+		t.Fatalf("unexpected output without git: %s / %s", out, errOut)
+	}
+}
+
+func TestUsageErrors(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitUsage)
+	e.mustRun(ExitUsage, "frobnicate")
+	e.mustRun(ExitUsage, "init", "--bogus")
+	e.mustRun(ExitOK, "init")
+	e.mustRun(ExitUsage, "add", "x")
+	e.mustRun(ExitUsage, "add", "x@y", ".")
+	e.mustRun(ExitUsage, "update", "--all", "x")
+	e.mustRun(ExitUsage, "remove")
+	out, _ := e.mustRun(ExitOK, "add", "--help")
+	if !strings.Contains(out, "Usage: aiplam add") {
+		t.Fatalf("unexpected help: %s", out)
+	}
+	out, _ = e.mustRun(ExitOK, "--version")
+	if !strings.HasPrefix(out, "aiplam ") {
+		t.Fatalf("unexpected version: %s", out)
+	}
+}
+
+func TestSets(t *testing.T) {
+	e := newEnv(t)
+	out, _ := e.mustRun(ExitOK, "sets")
+	if !strings.Contains(out, "aiplam init") {
+		t.Fatalf("unexpected output: %s", out)
+	}
+	e.mustRun(ExitOK, "init")
+	work := filepath.Join(e.root, "work-target")
+	_, errOut := e.mustRun(ExitFailure, "list", "--set", "work")
+	if !strings.Contains(errOut, "set 'work' is not initialized") || !strings.Contains(errOut, "init --set work") {
+		t.Fatalf("unexpected message: %s", errOut)
+	}
+	e.mustRun(ExitOK, "-s", "work", "init", "--target", work)
+	if _, err := config.Load(e.home, "work"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Each set has its own playbooks and targets.
+	pb := e.playbook("p", "x-a")
+	e.mustRun(ExitOK, "add", "x", pb, "-s", "work")
+	e.assertLink(filepath.Join(work, "skills", "x-a"), filepath.Join(pb, "skills", "x-a"))
+	e.assertMissing(filepath.Join(e.agentsSkills(), "x-a"))
+	if n := len(e.config().Playbooks); n != 0 {
+		t.Fatalf("default set has %d playbooks", n)
+	}
+	e.mustRun(ExitOK, "add", "x", pb)
+	e.assertLink(filepath.Join(e.agentsSkills(), "x-a"), filepath.Join(pb, "skills", "x-a"))
+
+	var list listOutput
+	out, _ = e.mustRun(ExitOK, "list", "--json", "--set=work")
+	if err := json.Unmarshal([]byte(out), &list); err != nil || list.Set != "work" || len(list.Targets) != 1 ||
+		list.Targets[0] != work {
+		t.Fatalf("unexpected list: %v %s", err, out)
+	}
+	out, _ = e.mustRun(ExitOK, "sets")
+	if !strings.Contains(out, "default (default)") || !strings.Contains(out, "work") {
+		t.Fatalf("unexpected sets: %s", out)
+	}
+	e.mustRun(ExitOK, "check", "-s", "work")
+	e.mustRun(ExitOK, "remove", "x", "-s", "work")
+	e.assertMissing(filepath.Join(work, "skills", "x-a"))
+	e.assertLink(filepath.Join(e.agentsSkills(), "x-a"), filepath.Join(pb, "skills", "x-a"))
+
+	// Sets cannot share targets.
+	_, errOut = e.mustRun(ExitFailure, "init", "--set", "other", "--target", "agents")
+	if !strings.Contains(errOut, "already belongs to set 'default'") {
+		t.Fatalf("unexpected message: %s", errOut)
+	}
+	if err := os.WriteFile(config.File(e.home, "work"), []byte("targets: [~/.agents]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, errOut = e.mustRun(ExitFailure, "update", "--all")
+	if !strings.Contains(errOut, "also listed by set 'work'") {
+		t.Fatalf("unexpected message: %s", errOut)
+	}
+	_, errOut = e.mustRun(ExitFailure, "check")
+	if !strings.Contains(errOut, "also listed by set 'work'") {
+		t.Fatalf("unexpected message: %s", errOut)
+	}
+	e.mustRun(ExitOK, "list")
+
+	e.mustRun(ExitUsage, "list", "--set")
+	e.mustRun(ExitUsage, "list", "--set", "../x")
+	e.mustRun(ExitUsage, "list", "-s", "a.b")
+}
+
+func TestShortOptions(t *testing.T) {
+	e := newEnv(t)
+	claude := filepath.Join(e.home, ".claude")
+	e.mustRun(ExitOK, "init", "-t", "agents", "-t=claude")
+	if got := e.config().Targets; len(got) != 2 || got[1] != "~/.claude" {
+		t.Fatalf("targets = %v", got)
+	}
+	work := filepath.Join(e.root, "work")
+	e.mustRun(ExitOK, "init", "-s", "work", "-t", work)
+
+	pb := filepath.Join(e.root, "flat")
+	e.skill(pb, "x-a")
+	e.mustRun(ExitOK, "add", "x", pb, "-sp", ".")
+	e.assertLink(filepath.Join(claude, "skills", "x-a"), filepath.Join(pb, "x-a"))
+	e.mustRun(ExitOK, "add", "x", pb, "-sp=.", "-s", "work")
+	e.assertLink(filepath.Join(work, "skills", "x-a"), filepath.Join(pb, "x-a"))
+	e.mustRun(ExitOK, "update", "--all", "-s", "work")
+	e.mustRun(ExitOK, "list", "-s", "work")
+	e.mustRun(ExitOK, "check", "-s", "work")
+	e.mustRun(ExitOK, "remove", "x", "-s", "work")
+
+	_, errOut := e.mustRun(ExitUsage, "add", "y", pb, "-x")
+	if !strings.Contains(errOut, "unknown option: -x") {
+		t.Fatalf("unexpected message: %s", errOut)
+	}
+	e.mustRun(ExitUsage, "list", "-t", "agents") // -t is an option of init only
+	e.mustRun(ExitUsage, "add", "y", pb, "-sp")
+}
+
+func TestVersion(t *testing.T) {
+	e := newEnv(t)
+	for _, arg := range []string{"-v", "--version", "version"} {
+		out, _ := e.mustRun(ExitOK, arg)
+		if out != "aiplam "+Version+"\n" {
+			t.Fatalf("%s: unexpected output %q", arg, out)
+		}
+	}
+	_, errOut := e.mustRun(ExitUsage)
+	if !strings.Contains(errOut, "aiplam "+Version+" - AI Playbook Manager\n"+Copyright) {
+		t.Fatalf("unexpected help: %s", errOut)
+	}
+}
+
+func TestPlaybookBehindSymlink(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init")
+	pb := e.playbook("p", "x-a")
+	e.mustRun(ExitOK, "add", "x", pb)
+
+	// Move the playbook and leave a link at its old path: its links still lead to its skills.
+	moved := filepath.Join(e.root, "moved")
+	if err := os.Rename(pb, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(moved, pb); err != nil {
+		t.Skipf("cannot create symbolic links: %v", err)
+	}
+	out, _ := e.mustRun(ExitOK, "update", "x")
+	if !strings.Contains(out, "up to date") {
+		t.Fatalf("unexpected output: %s", out)
+	}
+	e.mustRun(ExitOK, "check")
+	e.app.Cwd = moved // the real folder selects the playbook registered through the link
+	e.mustRun(ExitOK, "update")
+	e.mustRun(ExitOK, "remove", "x")
+	e.assertMissing(filepath.Join(e.agentsSkills(), "x-a"))
+}
+
+func TestFolderWithTilde(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init")
+	pb := filepath.Join(e.home, "playbooks", "p")
+	e.skill(filepath.Join(pb, "skills"), "x-a")
+	content := "targets: [~/.agents]\nplaybooks:\n  - name: x\n    folder: ~/playbooks/p\n    artifacts:\n" +
+		"      skills:\n        path: skills\n"
+	if err := os.WriteFile(config.File(e.home, config.DefaultSet), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e.mustRun(ExitOK, "update", "x")
+	e.assertLink(filepath.Join(e.agentsSkills(), "x-a"), filepath.Join(pb, "skills", "x-a"))
+	e.mustRun(ExitOK, "check")
+	e.mustRun(ExitOK, "remove", pb)
+	e.assertMissing(filepath.Join(e.agentsSkills(), "x-a"))
+}
+
+func TestArtifactsStayInsidePlaybook(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init")
+	pb := e.playbook("p", "x-a")
+	other := e.playbook("other", "x-b")
+	for _, sp := range []string{"..", "../other/skills", "skills/../..", filepath.Join(e.root, "other")} {
+		e.mustRun(ExitUsage, "add", "x", pb, "-sp", sp)
+	}
+
+	// A skills folder, or a skill folder, that leads outside the playbook through a link is not used.
+	if err := os.Symlink(filepath.Join(other, "skills"), filepath.Join(pb, "linked")); err != nil {
+		t.Skipf("cannot create symbolic links: %v", err)
+	}
+	_, errOut := e.mustRun(ExitFailure, "add", "x", pb, "-sp", "linked")
+	if !strings.Contains(errOut, "outside the playbook folder") {
+		t.Fatalf("unexpected message: %s", errOut)
+	}
+	if err := os.Symlink(filepath.Join(other, "skills", "x-b"), filepath.Join(pb, "skills", "x-b")); err != nil {
+		t.Fatal(err)
+	}
+	e.mustRun(ExitOK, "add", "x", pb)
+	e.assertLink(filepath.Join(e.agentsSkills(), "x-a"), filepath.Join(pb, "skills", "x-a"))
+	e.assertMissing(filepath.Join(e.agentsSkills(), "x-b"))
+
+	// A hand-edited skills path leading outside is a configuration error.
+	content := "targets: [~/.agents]\nplaybooks:\n  - name: x\n    folder: " + pb + "\n    artifacts:\n" +
+		"      skills:\n        path: ../other/skills\n"
+	if err := os.WriteFile(config.File(e.home, config.DefaultSet), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, errOut = e.mustRun(ExitFailure, "check")
+	if !strings.Contains(errOut, "inside the playbook folder") {
+		t.Fatalf("unexpected message: %s", errOut)
+	}
+}
+
+func TestSetNameCase(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init", "-s", "work")
+	if _, err := os.Stat(config.File(e.home, "Work")); err != nil {
+		t.Skip("the file system distinguishes case: Work and work are different sets")
+	}
+	pb := e.playbook("p", "x-a")
+	e.mustRun(ExitOK, "add", "x", pb, "-s", "Work")
+	e.mustRun(ExitOK, "check", "-s", "Work")
+}
+
+func TestFailedAddIsUndone(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a folder the current user cannot write to")
+	}
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init", "-t", "agents,claude")
+	pb := e.playbook("p", "x-a")
+	locked := filepath.Join(e.home, ".claude", "skills")
+	if err := os.MkdirAll(locked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(locked, 0o755)
+
+	_, errOut := e.mustRun(ExitFailure, "add", "x", pb)
+	if !strings.Contains(errOut, "undone") || !strings.Contains(errOut, "not registered") {
+		t.Fatalf("unexpected message: %s", errOut)
+	}
+	e.assertMissing(filepath.Join(e.agentsSkills(), "x-a"))
+	if n := len(e.config().Playbooks); n != 0 {
+		t.Fatalf("%d playbooks registered", n)
+	}
+}
+
+func TestMessagesUseSetAndHome(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init", "-s", "work")
+	pb := e.playbook("p", "x-a")
+	if err := os.MkdirAll(filepath.Join(e.agentsSkills(), "x-a"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, errOut := e.mustRun(ExitFailure, "add", "x", pb, "-s", "work")
+	if !strings.Contains(errOut, "'~"+string(filepath.Separator)+".agents") {
+		t.Fatalf("conflict should show ~ paths: %s", errOut)
+	}
+	if err := os.RemoveAll(filepath.Join(e.agentsSkills(), "x-a")); err != nil {
+		t.Fatal(err)
+	}
+	e.mustRun(ExitOK, "add", "x", pb, "-s", "work")
+	e.skill(filepath.Join(pb, "skills"), "x-b")
+	_, errOut = e.mustRun(ExitFailure, "check", "-s", "work")
+	if !strings.Contains(errOut, "'aiplam update x --set work' would link") {
+		t.Fatalf("hint should name the set: %s", errOut)
+	}
+}
