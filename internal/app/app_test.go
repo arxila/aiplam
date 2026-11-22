@@ -156,7 +156,7 @@ func TestInit(t *testing.T) {
 	e := newEnv(t)
 	e.mustRun(ExitUsage, "init")                  // a folder (or --global) is required
 	e.mustRun(ExitUsage, "init", ".", "-g")       // not both
-	e.mustRun(ExitUsage, "init", "-r", e.home)    // the folder is an argument
+	e.mustRun(ExitUsage, "init", "-b", e.home)    // the folder is an argument
 	e.mustRun(ExitUsage, "init", "-g", "-t", "x") // unknown type
 	e.mustRun(ExitFailure, "init", filepath.Join(e.root, "missing"))
 	e.mustRun(ExitOK, "init", "-g") // agents by default
@@ -533,7 +533,7 @@ func TestListJSONAndVersions(t *testing.T) {
 	}
 	p := list.Sets[0].Playbooks[0]
 	if p.ID != "x" || p.Name != "x" || p.Folder != pb || p.Label != "branch: main" || !p.Version.Known ||
-		len(p.Artifacts.Skills.Items) != 1 || !p.Artifacts.Skills.Items[0].Installed {
+		len(p.Artifacts.Skills.Items) != 1 || !p.Artifacts.Skills.Items[0].Linked {
 		t.Fatalf("unexpected playbook: %+v", p)
 	}
 
@@ -607,7 +607,7 @@ func TestSets(t *testing.T) {
 	var list listOutput
 	out, _ = e.mustRun(ExitOK, "list", "--json", "--set=work")
 	if err := json.Unmarshal([]byte(out), &list); err != nil || len(list.Sets) != 1 || list.Sets[0].Name != "work" ||
-		list.Sets[0].Enabled || list.Sets[0].Playbooks[0].Artifacts.Skills.Items[0].Installed {
+		list.Sets[0].Enabled || list.Sets[0].Playbooks[0].Artifacts.Skills.Items[0].Linked {
 		t.Fatalf("unexpected list: %v %s", err, out)
 	}
 
@@ -877,7 +877,7 @@ func TestPlaybookBehindSymlink(t *testing.T) {
 	e.assertMissing(filepath.Join(e.agentsSkills(), "x-a"))
 }
 
-func TestFoldersAreRelativeToRoot(t *testing.T) {
+func TestFoldersAreRelativeToBase(t *testing.T) {
 	e := newEnv(t)
 	e.mustRun(ExitOK, "init", "-g", "-t", "agents")
 	inside := filepath.Join(e.home, "playbooks", "p")
@@ -999,7 +999,7 @@ func TestMessagesUseSetAndHome(t *testing.T) {
 	}
 }
 
-func TestRoots(t *testing.T) {
+func TestBaseFolders(t *testing.T) {
 	e := newEnv(t)
 	e.mustRun(ExitOK, "init", "-g", "-t", "agents,claude")
 	project := filepath.Join(e.root, "project")
@@ -1013,20 +1013,22 @@ func TestRoots(t *testing.T) {
 	// Outside any configuration, commands use the home folder's.
 	e.app.Cwd = module
 	out, _ := e.mustRun(ExitOK, "list")
-	if !strings.Contains(out, "Root: ~\n") {
+	if !strings.Contains(out, "Base folder: ~\n") {
 		t.Fatalf("unexpected list: %s", out)
 	}
 
 	// A project configuration, found from its subfolders.
 	out, _ = e.mustRun(ExitOK, "init", project)
-	if strings.Contains(out, "git repository") || !strings.Contains(out, "higher-level configurations exist (~)") {
+	if strings.Contains(out, "git repository") ||
+		!strings.Contains(out, "the home folder is also being used as a base folder for playbook management, and "+
+			"agents always read") {
 		t.Fatalf("unexpected notes: %s", out) // not inside a repository; outside home, so home is a higher level
 	}
 	if !fsutil.IsDir(filepath.Join(project, ".agents")) || fsutil.IsDir(filepath.Join(project, ".claude")) {
 		t.Fatal("init should create the .agents folder only")
 	}
 	out, _ = e.mustRun(ExitOK, "add", "x", pb)
-	if !strings.HasPrefix(out, "Root: "+project+"\n") {
+	if !strings.HasPrefix(out, "Base folder: "+project+"\n") {
 		t.Fatalf("unexpected output: %s", out)
 	}
 	projectSkills := filepath.Join(project, ".agents", "skills")
@@ -1036,14 +1038,14 @@ func TestRoots(t *testing.T) {
 		t.Fatalf("set = %+v (%v)", f, err)
 	}
 
-	// --global and --root choose the configuration explicitly.
+	// --global and --base choose the configuration explicitly.
 	e.mustRun(ExitOK, "add", "z", other, "-g")
 	e.assertLink(filepath.Join(e.agentsSkills(), "z-a"), filepath.Join(other, "skills", "z-a"))
 	e.app.Cwd = e.root
-	e.mustRun(ExitOK, "add", "y", pb, "--root", project)
+	e.mustRun(ExitOK, "add", "y", pb, "--base", project)
 	e.assertLink(filepath.Join(projectSkills, "y-a"), filepath.Join(pb, "skills", "y-a"))
-	e.mustRun(ExitUsage, "list", "-r", project, "-g")
-	_, errOut := e.mustRun(ExitFailure, "list", "-r", module)
+	e.mustRun(ExitUsage, "list", "-b", project, "-g")
+	_, errOut := e.mustRun(ExitFailure, "list", "-b", module)
 	if !strings.Contains(errOut, "aiplam init") {
 		t.Fatalf("unexpected message: %s", errOut)
 	}
@@ -1052,7 +1054,7 @@ func TestRoots(t *testing.T) {
 	// the other.
 	e.app.Cwd = module
 	_, errOut = e.mustRun(ExitFailure, "add", "z", other)
-	if !strings.Contains(errOut, "higher-level configuration") || !strings.Contains(errOut, "--root <its folder>") ||
+	if !strings.Contains(errOut, "higher-level base folder") || !strings.Contains(errOut, "--base <basefolder>") ||
 		strings.Contains(errOut, "what is in the way") {
 		t.Fatalf("unexpected message: %s", errOut)
 	}
@@ -1065,35 +1067,37 @@ func TestRoots(t *testing.T) {
 	e.mustRun(ExitOK, "remove", "x", "-g")
 	e.mustRun(ExitOK, "check")
 
-	// list --levels shows every level, nearest first.
-	out, _ = e.mustRun(ExitOK, "list", "--levels", "--json")
+	// list --all shows every level, nearest first.
+	out, _ = e.mustRun(ExitOK, "list", "--all", "--json")
 	var levels []listOutput
 	if err := json.Unmarshal([]byte(out), &levels); err != nil {
 		t.Fatalf("invalid JSON: %v\n%s", err, out)
 	}
-	if len(levels) != 2 || levels[0].Root != project || levels[1].Root != e.home ||
+	if len(levels) != 2 || levels[0].Base != project || levels[1].Base != e.home ||
 		strings.Join(levels[1].Types, ",") != "agents,claude" {
 		t.Fatalf("unexpected levels: %+v", levels)
 	}
-	out, _ = e.mustRun(ExitOK, "list", "--levels")
-	if strings.Count(out, "Root: ") != 2 {
+	out, _ = e.mustRun(ExitOK, "list", "--all")
+	if strings.Count(out, "Base folder: ") != 2 {
 		t.Fatalf("unexpected list: %s", out)
 	}
-	e.mustRun(ExitUsage, "list", "--levels", "-s", "default")
+	e.mustRun(ExitUsage, "list", "--all", "-s", "default")
 
 	// A nested configuration inside a git repository.
 	if err := os.Mkdir(filepath.Join(project, ".git"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	out, _ = e.mustRun(ExitOK, "init", ".", "-t", "claude")
-	if !strings.Contains(out, "git repository") || !strings.Contains(out, "higher-level configurations exist") ||
+	if !strings.Contains(out, "git repository") ||
+		!strings.Contains(out, "higher-level base folders exist: the home folder") ||
+		!strings.Contains(out, "whose agents configuration folders some agents read too") ||
 		!strings.Contains(out, "/.claude/skills/<name>-*") ||
 		!strings.Contains(out, "'"+filepath.Join(module, ".gitignore")+"'") {
 		t.Fatalf("unexpected notes: %s", out)
 	}
-	// Only agent folders of the same type collide: z is in ~/.claude, x only in the project's .agents.
+	// Only agents configuration folders of the same type collide: z is in ~/.claude, x only in the project's .agents.
 	_, errOut = e.mustRun(ExitFailure, "add", "z", other)
-	if !strings.Contains(errOut, "same type of a higher-level configuration") {
+	if !strings.Contains(errOut, "higher-level base folder") {
 		t.Fatalf("unexpected message: %s", errOut)
 	}
 	e.mustRun(ExitOK, "add", "x", pb)
@@ -1101,7 +1105,7 @@ func TestRoots(t *testing.T) {
 	e.mustRun(ExitOK, "check")
 }
 
-func TestRootDiscoveryAndHints(t *testing.T) {
+func TestBaseDiscoveryAndHints(t *testing.T) {
 	e := newEnv(t)
 	e.mustRun(ExitOK, "init", "-g", "-t", "agents")
 	project := filepath.Join(e.root, "project")
@@ -1113,31 +1117,31 @@ func TestRootDiscoveryAndHints(t *testing.T) {
 	}
 	pb := e.playbook("p", "x-a")
 
-	// init from another folder: suggested commands name the new root folder.
+	// init from another folder: suggested commands name the new base folder.
 	e.app.Cwd = elsewhere
 	out, _ := e.mustRun(ExitOK, "init", project)
-	if !strings.Contains(out, "'aiplam add <name> <folder> --root "+project+"'") {
-		t.Fatalf("hint should name the root folder: %s", out)
+	if !strings.Contains(out, "'aiplam add <name> <playbookfolder> --base "+project+"'") {
+		t.Fatalf("hint should name the base folder: %s", out)
 	}
 	_, errOut := e.mustRun(ExitFailure, "init", project)
-	if !strings.Contains(errOut, "'aiplam type --root "+project+"'") {
-		t.Fatalf("hint should name the root folder: %s", errOut)
+	if !strings.Contains(errOut, "'aiplam type --base "+project+"'") {
+		t.Fatalf("hint should name the base folder: %s", errOut)
 	}
-	out, _ = e.mustRun(ExitOK, "set", "add", "work", "-r", project)
-	if !strings.Contains(out, "'aiplam set enable work --root "+project+"'") {
-		t.Fatalf("hint should name the root folder: %s", out)
+	out, _ = e.mustRun(ExitOK, "set", "add", "work", "-b", project)
+	if !strings.Contains(out, "'aiplam set enable work --base "+project+"'") {
+		t.Fatalf("hint should name the base folder: %s", out)
 	}
 
-	// From inside a linked skill, the root folder is the one above the link, not the playbook's.
+	// From inside a linked skill, the base folder is the one above the link, not the playbook's.
 	e.app.Cwd = project
 	e.mustRun(ExitOK, "add", "x", pb)
 	e.app.Cwd = filepath.Join(project, ".agents", "skills", "x-a")
 	out, _ = e.mustRun(ExitOK, "list")
-	if !strings.HasPrefix(out, "Root: "+project+"\n") {
+	if !strings.HasPrefix(out, "Base folder: "+project+"\n") {
 		t.Fatalf("unexpected list: %s", out)
 	}
 
-	// A .aiplam folder makes a root folder, even without its configuration.
+	// A .aiplam folder makes a base folder, even without its configuration.
 	empty := filepath.Join(e.root, "empty")
 	if err := os.MkdirAll(filepath.Join(empty, ".aiplam"), 0o755); err != nil {
 		t.Fatal(err)
@@ -1149,7 +1153,7 @@ func TestRootDiscoveryAndHints(t *testing.T) {
 	}
 	e.mustRun(ExitOK, "init", ".")
 
-	// list --levels reports a higher level it cannot read and lists the others.
+	// list --all reports a higher level it cannot read and lists the others.
 	nested := filepath.Join(project, "nested")
 	if err := os.MkdirAll(nested, 0o755); err != nil {
 		t.Fatal(err)
@@ -1159,8 +1163,8 @@ func TestRootDiscoveryAndHints(t *testing.T) {
 	if err := os.WriteFile(config.InstallFile(project), []byte("types: [nope]\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	out, errOut = e.mustRun(ExitFailure, "list", "--levels")
-	if !strings.Contains(out, "Root: "+nested) || !strings.Contains(out, "Root: ~") ||
+	out, errOut = e.mustRun(ExitFailure, "list", "--all")
+	if !strings.Contains(out, "Base folder: "+nested) || !strings.Contains(out, "Base folder: ~") ||
 		!strings.Contains(errOut, config.InstallName+".yaml") {
 		t.Fatalf("unexpected list: %s / %s", out, errOut)
 	}

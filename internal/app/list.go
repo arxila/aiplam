@@ -31,24 +31,34 @@ import (
 	"arxila.io/aiplam/internal/playbook"
 )
 
-const listUsage = `Usage: aiplam list [--levels] [--json] [--set SET]
+const listUsage = `Usage: aiplam list [--all] [--json] [--set SET]
 
-Lists the playbooks registered in the enabled sets, or in the set given with --set (id, name, folder and checked-out
-version: its tags, or else its branch) and, for each, the artifacts it provides. For enabled sets, it marks the
-artifacts not installed in every agent folder ('aiplam update' installs them).
+Lists the playbooks of the enabled sets, and for each:
+  - its id, name and playbook folder;
+  - its version: the tags of the checked-out commit, or else its branch;
+  - its artifacts, by kind (such as skills), marking those not linked from every agents configuration folder
+    ('aiplam update' links them).
 
-  --levels        also list the higher-level configurations, whose agent folders agents may read too: those of the
-                  parents of the root folder, nearest first, and that of the home folder (when the root folder is
-                  not inside it)
-  --json          print the information as JSON, for other tools (with --levels, an array with one item per level)
-  -s, --set SET   the set (default: the enabled sets)
+Options:
+  --all           also list the higher-level base folders, nearest first:
+                    - the parents of the base folder that are base folders as well: some agents read their
+                      agents configuration folders too;
+                    - the home folder, if it is also being used as a base folder for playbook management: agents
+                      always read its agents configuration folders.
+  --json          print JSON, for other tools (with --all, an array with one item per base folder)
+  -s, --set SET   list set SET instead (default: the enabled sets)
+
+Examples:
+  aiplam list
+  aiplam list --all
+  aiplam list --set acme --json
 `
 
 type listOutput struct {
-	Root    string    `json:"root"`
-	Types   []string  `json:"types"`
-	Folders []string  `json:"folders"`
-	Sets    []listSet `json:"sets"`
+	Base          string    `json:"base"`
+	Types         []string  `json:"types"`
+	AgentsFolders []string  `json:"agentsConfigurationFolders"`
+	Sets          []listSet `json:"sets"`
 }
 
 type listSet struct {
@@ -80,34 +90,34 @@ type listSkills struct {
 type listSkill struct {
 	Name      string   `json:"name"`
 	Source    string   `json:"source"`
-	Installed bool     `json:"installed"`
+	Linked    bool     `json:"linked"`
 	MissingIn []string `json:"missingIn"`
 }
 
 func (a *App) cmdList(args []string) error {
-	p, err := parseArgs(args, nil, []string{"json", "levels"})
+	p, err := parseArgs(args, nil, []string{"json", "all"})
 	if err != nil {
 		return err
 	}
 	if len(p.positional) > 0 {
 		return usagef("unexpected argument: %s", p.positional[0])
 	}
-	levels, asJSON := p.bools["levels"], p.bools["json"]
+	levels, asJSON := p.bools["all"], p.bools["json"]
 	if levels && a.Set != "" {
-		return usagef("--levels cannot be used with --set")
+		return usagef("--all cannot be used with --set")
 	}
-	a.rootShown = true // the root folder is part of the listing
-	roots := []string{a.Root}
+	a.baseShown = true // the base folder is part of the listing
+	bases := []string{a.Base}
 	if levels {
-		roots = append(roots, config.Ancestors(a.Root, a.Home)...)
+		bases = append(bases, config.Ancestors(a.Base, a.Home)...)
 	}
 	outs := []listOutput{}
-	notInstalled, failed := false, false
-	root0, rootArg0, global0 := a.Root, a.rootArg, a.global
-	for i, root := range roots {
+	notLinked, failed := false, false
+	base0, baseArg0, global0 := a.Base, a.baseArg, a.global
+	for i, base := range bases {
 		if i > 0 {
-			// Commands suggested for a higher level must name its root folder.
-			a.Root, a.rootArg, a.global = root, root, false
+			// Commands suggested for a higher level must name its base folder.
+			a.Base, a.baseArg, a.global = base, base, false
 		}
 		st, err := a.load()
 		if err != nil && i == 0 {
@@ -116,12 +126,12 @@ func (a *App) cmdList(args []string) error {
 		if err != nil {
 			// A higher level that cannot be read: report it and list the others.
 			if !errors.Is(err, errSilent) {
-				a.errorf("the configuration of '%s' cannot be listed: %s", a.pretty(root), err)
+				a.errorf("the configuration of '%s' cannot be listed: %s", a.pretty(base), err)
 			}
 			failed = true
 			continue
 		}
-		out := listOutput{Root: root, Types: st.inst.Types, Folders: st.targets, Sets: []listSet{}}
+		out := listOutput{Base: base, Types: st.inst.Types, AgentsFolders: st.targets, Sets: []listSet{}}
 		for _, set := range st.sets {
 			out.Sets = append(out.Sets, a.listSet(set, st.targets))
 		}
@@ -131,11 +141,11 @@ func (a *App) cmdList(args []string) error {
 				a.printf("\n----------------------------------------\n")
 			}
 			if a.printListing(st, out) {
-				notInstalled = true
+				notLinked = true
 			}
 		}
 	}
-	a.Root, a.rootArg, a.global = root0, rootArg0, global0
+	a.Base, a.baseArg, a.global = base0, baseArg0, global0
 	if asJSON {
 		enc := json.NewEncoder(a.Stdout)
 		enc.SetIndent("", "  ")
@@ -151,8 +161,8 @@ func (a *App) cmdList(args []string) error {
 		}
 		return nil
 	}
-	if notInstalled {
-		a.printf("\nSome skills are not installed: run '%s', or '%s' for details (with --root for a higher level).\n",
+	if notLinked {
+		a.printf("\nSome artifacts are not linked: run '%s', or '%s' for details (with --base for a higher level).\n",
 			a.hint("update --all"), a.hint("check"))
 	}
 	if failed {
@@ -162,19 +172,19 @@ func (a *App) cmdList(args []string) error {
 }
 
 // printListing prints the listing of a configuration and reports whether any skill of an enabled set is not
-// installed in every agent folder.
+// linked from every agents configuration folder.
 func (a *App) printListing(st *state, out listOutput) bool {
 	var folders []string
-	for _, t := range out.Folders {
+	for _, t := range out.AgentsFolders {
 		folders = append(folders, a.pretty(t))
 	}
-	a.printf("Root: %s\nAgent folders: %s\n", a.pretty(out.Root), strings.Join(folders, ", "))
+	a.printf("Base folder: %s\nAgents configuration folders: %s\n", a.pretty(out.Base), strings.Join(folders, ", "))
 	if len(out.Sets) == 0 {
 		a.printf("\nNo set is enabled: enable one with '%s' ('%s' lists them).\n", a.hint("set enable <set>"),
 			a.hint("set list"))
 		return false
 	}
-	notInstalled := false
+	notLinked := false
 	for i, ls := range out.Sets {
 		set := st.sets[i]
 		a.useSet(st, set)
@@ -184,23 +194,23 @@ func (a *App) printListing(st *state, out listOutput) bool {
 		}
 		a.printf("\nSet %s (%s), %s\n", ls.Name, a.setFile(ls.Name), status)
 		if !ls.Enabled {
-			a.printf("Nothing of this set is installed: %s.\n", a.notEnabledNote(ls.Name))
+			a.printf("Nothing of this set is linked: %s.\n", a.notEnabledNote(ls.Name))
 		}
 		if len(ls.Playbooks) == 0 {
-			a.printf("No playbooks are registered. Register one with '%s'.\n", a.cmd("add <name> <folder>"))
+			a.printf("No playbooks are registered. Register one with '%s'.\n", a.cmd("add <name> <playbookfolder>"))
 			continue
 		}
 		if a.listPlaybooks(ls) {
-			notInstalled = true
+			notLinked = true
 		}
 	}
 	a.hintSet = ""
-	return notInstalled
+	return notLinked
 }
 
-// listPlaybooks prints a set's playbooks and reports whether any of their skills is not installed in every target.
+// listPlaybooks prints a set's playbooks and reports whether any of their artifacts is not linked from every target.
 func (a *App) listPlaybooks(ls listSet) bool {
-	notInstalled := false
+	notLinked := false
 	for _, lp := range ls.Playbooks {
 		a.printf("\n%s\n", lp.ID)
 		a.printf("  name:    %s\n", lp.Name)
@@ -216,19 +226,19 @@ func (a *App) listPlaybooks(ls listSet) bool {
 		}
 		a.printf("\n")
 		for _, s := range lp.Artifacts.Skills.Items {
-			if s.Installed || !ls.Enabled {
+			if s.Linked || !ls.Enabled {
 				a.printf("    %s\n", s.Name)
 				continue
 			}
-			notInstalled = true
+			notLinked = true
 			var where []string
 			for _, t := range s.MissingIn {
 				where = append(where, a.pretty(t))
 			}
-			a.printf("    %s  (not installed in %s)\n", s.Name, strings.Join(where, ", "))
+			a.printf("    %s  (not linked from %s)\n", s.Name, strings.Join(where, ", "))
 		}
 	}
-	return notInstalled
+	return notLinked
 }
 
 // listSet gathers the information of a set's playbooks.
@@ -240,7 +250,7 @@ func (a *App) listSet(set *setState, targets []string) listSet {
 				Items: []listSkill{}}}}
 		switch {
 		case !fsutil.IsDir(e.Dir):
-			lp.Problems = append(lp.Problems, fmt.Sprintf("folder '%s' does not exist", e.Dir))
+			lp.Problems = append(lp.Problems, fmt.Sprintf("playbook folder '%s' does not exist", e.Dir))
 		case !fsutil.IsDir(e.SkillsDir):
 			lp.Problems = append(lp.Problems, fmt.Sprintf("skills folder '%s' does not exist", e.SkillsDir))
 		case !fsutil.Within(e.SkillsDir, e.Dir):
@@ -263,7 +273,7 @@ func (a *App) listSet(set *setState, targets []string) listSet {
 				item := listSkill{Name: s.Name, Source: s.Source, MissingIn: []string{}}
 				for _, t := range targets {
 					if !set.enabled {
-						break // a set that is not enabled has nothing installed
+						break // a set that is not enabled has nothing linked
 					}
 					state, current, err := fsutil.Inspect(filepath.Join(playbook.SkillsFolder(t), s.Name))
 					if err != nil || state != fsutil.Link ||
@@ -271,7 +281,7 @@ func (a *App) listSet(set *setState, targets []string) listSet {
 						item.MissingIn = append(item.MissingIn, t)
 					}
 				}
-				item.Installed = set.enabled && len(item.MissingIn) == 0
+				item.Linked = set.enabled && len(item.MissingIn) == 0
 				lp.Artifacts.Skills.Items = append(lp.Artifacts.Skills.Items, item)
 			}
 		}

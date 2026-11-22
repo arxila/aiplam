@@ -32,14 +32,22 @@ import (
 
 const checkUsage = `Usage: aiplam check [--set SET]
 
-Changes nothing. Checks the format and content of the installation's configuration (.aiplam/aiplam-config.yaml in
-the root folder) and of the enabled sets' files (.aiplam/<set>.yaml), the agent and playbook folders and, for each
-playbook of the enabled sets, whether 'aiplam update' would change anything (links to create or remove) or would be
-cancelled by a conflict. Also reports broken links in the agent folders' skills folders, and links whose skill is
-also in the agent folder of the same type of a higher-level configuration. With --set, it checks that set only
-(and, if it is not enabled, only that it could be). Exits with 1 when anything needs attention.
+Changes nothing. Reports everything that needs attention, and then exits with 1:
+  - problems in the configuration files (aiplam-config.yaml and the sets' files, in the base folder's .aiplam);
+  - missing agents configuration folders and playbook folders;
+  - for each playbook of the enabled sets, the links that 'aiplam update' would create or remove, or the conflicts
+    that would cancel it;
+  - broken links in the agents configuration folders;
+  - links whose artifact is also linked from an agents configuration folder of the same type of a higher-level
+    base folder.
 
-  -s, --set SET   the set to check (default: the enabled sets)
+Options:
+  -s, --set SET   check set SET only (default: the enabled sets); for a set that is not enabled, only whether it
+                  could be enabled
+
+Examples:
+  aiplam check
+  aiplam check --set acme
 `
 
 func (a *App) cmdCheck(args []string) error {
@@ -56,13 +64,13 @@ func (a *App) cmdCheck(args []string) error {
 		a.warnf(format, args...)
 	}
 
-	instFile := a.pretty(config.InstallFile(a.Root))
-	inst, err := config.LoadInstall(a.Root)
+	instFile := a.pretty(config.InstallFile(a.Base))
+	inst, err := config.LoadInstall(a.Base)
 	if errors.Is(err, config.ErrNotInitialized) {
 		return a.notInitialized()
 	}
-	a.showRoot()
-	a.printf("Installation: %s\n", instFile)
+	a.showBase()
+	a.printf("Configuration: %s\n", instFile)
 	if err == nil {
 		for _, e := range inst.Validate() {
 			problem("%s: %s", instFile, e)
@@ -77,20 +85,20 @@ func (a *App) cmdCheck(args []string) error {
 	a.printf("  format and content are valid\n")
 
 	// The enabled sets, and the one given with --set.
-	if a.Set != "" && !config.SetExists(a.Root, a.Set) {
+	if a.Set != "" && !config.SetExists(a.Base, a.Set) {
 		return fmt.Errorf("set '%s' does not exist ('%s' lists the sets)", a.Set, a.hint("set list"))
 	}
-	st := &state{inst: inst, targets: inst.TargetDirs(a.Root)}
+	st := &state{inst: inst, targets: inst.TargetDirs(a.Base)}
 	loadSet := func(name string, enabled bool) *setState {
 		file := a.setFile(name)
-		if !config.SetExists(a.Root, name) {
+		if !config.SetExists(a.Base, name) {
 			problem("the enabled set '%s' does not exist (%s is missing): disable it with '%s', or create it again "+
 				"with '%s'", name, file, a.hint("set disable "+name), a.hint("set add "+name))
 			return nil
 		}
-		cfg, err := config.LoadSet(a.Root, name)
+		cfg, err := config.LoadSet(a.Base, name)
 		if err == nil {
-			for _, e := range cfg.Validate(a.Root) {
+			for _, e := range cfg.Validate(a.Base) {
 				problem("%s: %s", file, e)
 				err = errSilent
 			}
@@ -100,17 +108,17 @@ func (a *App) cmdCheck(args []string) error {
 		if err != nil {
 			return nil
 		}
-		return &setState{name: name, cfg: cfg, enabled: enabled, entries: playbook.Entries(name, cfg.Playbooks, a.Root)}
+		return &setState{name: name, cfg: cfg, enabled: enabled, entries: playbook.Entries(name, cfg.Playbooks, a.Base)}
 	}
 	for _, name := range inst.Enabled {
 		if s := loadSet(name, true); s != nil {
 			st.enabled = append(st.enabled, s)
-			if a.Set == "" || config.SameSet(a.Root, name, a.Set) {
+			if a.Set == "" || config.SameSet(a.Base, name, a.Set) {
 				st.sets = append(st.sets, s)
 			}
 		}
 	}
-	if a.Set != "" && len(st.sets) == 0 && !inst.IsEnabled(a.Root, a.Set) {
+	if a.Set != "" && len(st.sets) == 0 && !inst.IsEnabled(a.Base, a.Set) {
 		if s := loadSet(a.Set, false); s != nil {
 			st.sets = append(st.sets, s)
 		}
@@ -121,10 +129,10 @@ func (a *App) cmdCheck(args []string) error {
 	}
 
 	targets := st.targets
-	a.printf("Agent folders:\n")
+	a.printf("Agents configuration folders:\n")
 	for _, t := range targets {
 		if !fsutil.IsDir(t) {
-			problem("agent folder '%s' does not exist; it is created when a skill is next linked into it",
+			problem("agents configuration folder '%s' does not exist; it is created when an artifact is next linked from it",
 				a.pretty(t))
 			continue
 		}
@@ -152,7 +160,7 @@ func (a *App) cmdCheck(args []string) error {
 	a.hintSet = ""
 
 	// Broken links that no playbook plan covers (for example, links to an unregistered or moved playbook), and links
-	// whose skill is also in the agent folder of the same type of a higher-level configuration.
+	// whose skill is also in the agents configuration folder of the same type of a higher-level base folder.
 	for _, t := range targets {
 		dir := playbook.SkillsFolder(t)
 		items, err := os.ReadDir(dir)
@@ -172,8 +180,8 @@ func (a *App) cmdCheck(args []string) error {
 			for _, higher := range a.ancestorTargets()[t] {
 				other := filepath.Join(playbook.SkillsFolder(higher), item.Name())
 				if _, err := os.Lstat(other); err == nil {
-					problem("%s is also in '%s', the agent folder of the same type of a higher-level configuration: agents reading "+
-						"both would see it twice; remove one of them", a.pretty(link), a.pretty(other))
+					problem("%s is also in '%s', an agents configuration folder of the same type of a higher-level base "+
+						"folder: agents reading both would see it twice; remove one of them", a.pretty(link), a.pretty(other))
 					break
 				}
 			}
@@ -197,7 +205,7 @@ func (a *App) checkPlaybook(st *state, set *setState, e playbook.Entry, reported
 		return
 	}
 	if !set.enabled {
-		// Nothing is installed; the set must only stay installable.
+		// Nothing is linked; the set must only stay linkable.
 		overlaps, err := playbook.Overlaps(set.entries, e)
 		if err != nil {
 			problem("playbook %s: %s", e.ID, err)
@@ -208,7 +216,7 @@ func (a *App) checkPlaybook(st *state, set *setState, e playbook.Entry, reported
 				strings.Join(others, ", "), a.hint("set enable "+set.name))
 		}
 		if len(overlaps) == 0 {
-			a.printf("  folders are valid (not installed: the set is not enabled)\n")
+			a.printf("  playbook folders are valid (not linked: the set is not enabled)\n")
 		}
 		return
 	}

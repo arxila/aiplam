@@ -74,14 +74,14 @@ aiplam list
 # a single type: the enabled sets' playbooks are unlinked from ~/.claude
 aiplam type agents
 
-# a project configuration, used by the commands run anywhere inside ~/projects/demo
+# a project base folder, used by the commands run anywhere inside the base folder ~/projects/demo
 mkdir -p ~/projects/demo/module && cd ~/projects/demo
 git init -q                                               # init then suggests what to add to .gitignore
 aiplam init .                                             # .aiplam and .agents in ~/projects/demo
-aiplam add aiplam-garlic ~/playbooks/aiplam-tomato-playbook -sp .   # fails: already installed in ~/.agents
+aiplam add aiplam-garlic ~/playbooks/aiplam-tomato-playbook -sp .   # fails: already linked from ~/.agents
 aiplam remove aiplam-garlic --global
 aiplam add aiplam-garlic ~/playbooks/aiplam-tomato-playbook -sp .   # linked into ~/projects/demo/.agents
 cat .aiplam/default.yaml                                  # folder: ../../playbooks/aiplam-tomato-playbook
 cd module
-aiplam list --levels                                      # the project's configuration, then ~'s
+aiplam list --all                                         # the project's base folder, then ~
 ```

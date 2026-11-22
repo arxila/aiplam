@@ -139,8 +139,8 @@ func TestTestdataPlaybooks(t *testing.T) {
 	e.assertLink(filepath.Join(project, ".agents", "skills", "aiplam-garlic-audit"),
 		filepath.Join(tomato, "aiplam-garlic-audit"))
 	e.app.Cwd = filepath.Join(project, "module")
-	out, _ = e.mustRun(ExitOK, "list", "--levels")
-	if strings.Count(out, "Root: ") != 2 {
+	out, _ = e.mustRun(ExitOK, "list", "--all")
+	if strings.Count(out, "Base folder: ") != 2 {
 		t.Fatalf("unexpected list: %s", out)
 	}
 	e.mustRun(ExitOK, "check")

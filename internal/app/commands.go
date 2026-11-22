@@ -32,25 +32,33 @@ import (
 
 // --- init ---------------------------------------------------------------------------------------------------------
 
-const initUsage = `Usage: aiplam init <folder> [--type T] [--set SET]
+const initUsage = `Usage: aiplam init <basefolder> [--type T] [--set SET]
        aiplam init --global [--type T] [--set SET]
 
-Sets up aiplam in a root folder (for example '.', or the home folder with --global or '~'): creates its .aiplam
-folder, holding aiplam-config.yaml, and next to it the agent folders of the given types (.agents, .claude), where
-the artifacts of the enabled sets' playbooks are installed (skills go to their skills/ subfolder). Also creates a
-first set and enables it.
+Sets up <basefolder> as a base folder:
+  - creates <basefolder>/.aiplam, holding its configuration (aiplam-config.yaml, and one <set>.yaml per set);
+  - creates the agents configuration folders of the chosen types in <basefolder> (.agents, .claude), where
+    artifacts are linked from (skills, for example, from their skills/ subfolder);
+  - creates a first set, and enables it.
 
-The other commands use the configuration of the nearest root folder from the current folder up, or else that of
-the home folder (or the one given with --root or --global). Agents read the agent folders of the folder they are
-started in and of the home folder, and some read those of every folder in between: a skill installed in an agent
-folder of a higher-level configuration cannot be installed in this one's folder of the same type.
+From then on, commands run anywhere inside <basefolder> use its configuration: each command uses the nearest base
+folder from the current folder up, or else the home folder (unless given --base or --global).
 
-  -g, --global    set up the home folder (instead of <folder>)
-  -t, --type T    the type of agent folder: ` + "'agents' (.agents) or 'claude' (.claude)" + `. Default: agents.
-                  Repeat the option, or separate values with commas, for several: --type agents,claude
+Agents read the agents configuration folders of the folder they start in, of the home folder and, some of them, of
+every folder in between. So an artifact already linked from an agents configuration folder of a higher-level base
+folder cannot be linked from one of the same type in <basefolder>.
+
+Options:
+  -g, --global    use the user's home folder (e.g. /home/username) as base folder, instead of <basefolder>
+  -t, --type T    the types of agents configuration folders: 'agents' (.agents, the default) or 'claude'
+                  (.claude); several, separated by commas: --type agents,claude
   -s, --set SET   the name of the first set (default: 'default')
 
-Change the types later with 'aiplam type', and manage sets with 'aiplam set'.
+Examples:
+  aiplam init --global                         # ~/.aiplam and ~/.agents
+  aiplam init --global --type agents,claude    # ~/.aiplam, ~/.agents and ~/.claude
+  aiplam init . --set backend                  # the current folder, with a first set named 'backend'
+  aiplam init ~/Workspace/thymeleaf            # a project: commands run inside it use its configuration
 `
 
 func (a *App) cmdInit(args []string) error {
@@ -59,20 +67,20 @@ func (a *App) cmdInit(args []string) error {
 		return err
 	}
 	switch {
-	case a.rootArg != "":
-		return usagef("init takes the folder to set up as an argument, not with --root")
+	case a.baseArg != "":
+		return usagef("init takes the base folder to set up as an argument, not with --base")
 	case a.global && len(p.positional) > 0:
-		return usagef("give either a folder or --global, not both")
+		return usagef("give either a base folder or --global, not both")
 	case !a.global && len(p.positional) == 0:
-		return usagef("init needs the folder to set up (for example '.'), or --global for the home folder")
+		return usagef("init needs the base folder to set up (for example '.'), or --global for the home folder")
 	case len(p.positional) > 1:
 		return usagef("unexpected argument: %s", p.positional[1])
 	}
-	a.Root = a.Home
+	a.Base = a.Home
 	if !a.global {
-		a.Root = a.absPath(p.positional[0])
-		if !fsutil.IsDir(a.Root) {
-			return fmt.Errorf("folder '%s' does not exist", p.positional[0])
+		a.Base = a.absPath(p.positional[0])
+		if !fsutil.IsDir(a.Base) {
+			return fmt.Errorf("base folder '%s' does not exist", p.positional[0])
 		}
 	}
 	types, err := parseTypes(p.values["type"])
@@ -86,59 +94,78 @@ func (a *App) cmdInit(args []string) error {
 	if set == "" {
 		set = config.DefaultSet
 	}
-	// Commands suggested from here on name the root folder when the current folder does not lead to it.
-	useRoot := func() {
-		if !a.global && !fsutil.SamePath(config.FindRoot(a.absPathAsGiven(a.Cwd), a.Home), a.Root) {
-			a.rootArg = a.Root
+	// Commands suggested from here on name the base folder when the current folder does not lead to it.
+	useBase := func() {
+		if !a.global && !fsutil.SamePath(config.FindBase(a.absPathAsGiven(a.Cwd), a.Home), a.Base) {
+			a.baseArg = a.Base
 		}
 	}
-	file := config.InstallFile(a.Root)
+	file := config.InstallFile(a.Base)
 	if _, err := os.Stat(file); err == nil {
-		useRoot()
+		useBase()
 		return fmt.Errorf("aiplam is already initialized in '%s': %s exists. Change the types with '%s' and "+
-			"manage sets with '%s'", a.pretty(a.Root), a.pretty(file), a.hint("type"), a.hint("set"))
+			"manage sets with '%s'", a.pretty(a.Base), a.pretty(file), a.hint("type"), a.hint("set"))
 	}
-	if config.SetExists(a.Root, set) {
+	if config.SetExists(a.Base, set) {
 		return fmt.Errorf("%s already exists: remove it, or choose another set with --set", a.setFile(set))
 	}
 	inst := &config.Install{Types: types, Enabled: []string{set}}
 	if errs := inst.Validate(); len(errs) > 0 {
 		return errs[0]
 	}
-	for _, dir := range inst.TargetDirs(a.Root) {
+	for _, dir := range inst.TargetDirs(a.Base) {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
 		}
 	}
-	if err := config.SaveSet(a.Root, set, &config.Set{}); err != nil {
+	if err := config.SaveSet(a.Base, set, &config.Set{}); err != nil {
 		return err
 	}
-	if err := config.SaveInstall(a.Root, inst); err != nil {
+	if err := config.SaveInstall(a.Base, inst); err != nil {
 		return err
 	}
-	useRoot()
-	a.printf("Created %s\nAgent folders:\n", a.pretty(file))
-	for _, dir := range inst.TargetDirs(a.Root) {
+	useBase()
+	a.printf("Created %s\nAgents configuration folders:\n", a.pretty(file))
+	for _, dir := range inst.TargetDirs(a.Base) {
 		a.printf("  %s\n", a.pretty(dir))
 	}
 	a.printf("Created set '%s' (%s), enabled.\n", set, a.setFile(set))
-	if ancestors := config.Ancestors(a.Root, a.Home); len(ancestors) > 0 {
-		var names []string
-		for _, r := range ancestors {
-			names = append(names, a.pretty(r))
-		}
-		a.printf("Note: higher-level configurations exist (%s). Agents may read their agent folders too, so skills "+
-			"installed there cannot be installed here in an agent folder of the same type.\n", strings.Join(names, ", "))
-	}
-	if repo := gitRepository(a.Root); repo != "" {
+	a.printHigherLevels()
+	if repo := gitRepository(a.Base); repo != "" {
 		a.printf("Note: '%s' is inside a git repository. The %s folder can be committed to share the configuration "+
-			"(playbook folders are stored relative to '%s'), but the links in the agent folders' skills/ subfolders "+
-			"belong to each machine (and cannot be committed on Windows): add them to '%s', for example with a "+
-			"line '/%s/skills/<name>-*' for each playbook name.\n", a.pretty(a.Root), config.DirName,
-			a.pretty(a.Root), a.pretty(filepath.Join(a.Root, ".gitignore")), config.Types[types[0]])
+			"(playbook folders are stored relative to '%s'), but the links in the agents configuration folders' "+
+			"skills/ subfolders belong to each machine (and cannot be committed on Windows): add them to '%s', for "+
+			"example with a line '/%s/skills/<name>-*' for each playbook name.\n", a.pretty(a.Base), config.DirName,
+			a.pretty(a.Base), a.pretty(filepath.Join(a.Base, ".gitignore")), config.Types[types[0]])
 	}
-	a.printf("Next: register a playbook with '%s'.\n", a.cmd("add <name> <folder>"))
+	a.printf("Next: register a playbook with '%s'.\n", a.cmd("add <name> <playbookfolder>"))
 	return nil
+}
+
+// printHigherLevels notes, after init, the higher-level base folders whose artifacts cannot be linked here: the home
+// folder's agents configuration folders are read by every agent, and those of the base folders in between by some.
+func (a *App) printHigherLevels() {
+	home, between := false, []string{}
+	for _, r := range config.Ancestors(a.Base, a.Home) {
+		if fsutil.SamePath(r, fsutil.Canonical(a.Home)) {
+			home = true
+		} else {
+			between = append(between, a.pretty(r))
+		}
+	}
+	const rule = "artifacts already linked from those cannot be linked here from one of the same type"
+	switch {
+	case home && len(between) == 0:
+		a.printf("Note: the home folder is also being used as a base folder for playbook management, and agents "+
+			"always read its agents configuration folders: %s.\n", rule)
+	case home:
+		a.printf("Note: higher-level base folders exist: the home folder, whose agents configuration folders agents "+
+			"always read, and %s, whose agents configuration folders some agents read too: %s.\n",
+			strings.Join(between, ", "), rule)
+	case len(between) > 0:
+		a.printf("Note: higher-level base folders exist (%s), and some agents read their agents configuration "+
+			"folders too: %s.\n", strings.Join(between, ", "), rule)
+	}
 }
 
 // gitRepository returns the folder of the git repository that holds dir (the nearest folder from dir up with a .git
@@ -179,23 +206,32 @@ func parseTypes(values []string) ([]string, error) {
 
 // --- add ----------------------------------------------------------------------------------------------------------
 
-const addUsage = `Usage: aiplam add <name> <folder> [--skills-path PATH] [--set SET]
+const addUsage = `Usage: aiplam add <name> <playbookfolder> [--skills-path PATH] [--set SET]
 
-Registers the playbook in <folder> (for example '.') with the given name in a set and, if the set is enabled, links
-its skills into the agent folders. The folder is stored relative to the root folder. The set is the one given with
---set, which is needed unless exactly one set is enabled. The name is the prefix of the playbook's
-artifacts: its skills are the folders named '<name>-*' holding a SKILL.md in its skills folder. Several playbooks can
-share a name if their folders' last segments differ; their ids are then '<name>@<last folder segment>'. The playbook
-is installed at whatever tag or commit is checked out.
+Registers the playbook in <playbookfolder> under <name> and, if its set is enabled, links its artifacts from the
+agents configuration folders of the base folder, at whatever tag or commit is checked out:
+  - its artifacts are those named '<name>-*': its skills, for example, are the folders named '<name>-*' that hold a
+    SKILL.md, in its skills folder;
+  - <playbookfolder> is stored relative to the base folder;
+  - the set is the one given with --set, which can be left out when exactly one set is enabled;
+  - several playbooks can share a name if the last segments of their playbook folders differ: their ids are then
+    '<name>@<last folder segment>'.
 
-Nothing is changed if any link cannot be created because something else is already in its place, or if another
-playbook of the set (or of another enabled set, if the set is enabled) provides a skill with the same name, or if a
-skill with the same name is installed in the agent folder of the same type (.agents, .claude) of a higher-level
-configuration.
+Nothing is changed if:
+  - something other than the right link is already where a link must go;
+  - another playbook of the set, or of another enabled set, provides an artifact with the same name;
+  - an artifact with the same name is already linked from an agents configuration folder of the same type of a
+    higher-level base folder.
 
-  -sp, --skills-path PATH   the skills folder, inside <folder> and relative to it (default: skills; '.' for <folder>
-                            itself)
-  -s, --set SET             the set to register it in (default: the enabled set, if only one is)
+Options:
+  -sp, --skills-path PATH   the skills folder, relative to <playbookfolder> (default: skills; '.' for
+                            <playbookfolder> itself)
+  -s, --set SET             the set to register it in (default: the enabled set, when only one is)
+
+Examples:
+  aiplam add arxila .                                  # the current folder, skills in ./skills
+  aiplam add arxila ~/Workspace/arxila-ai-playbook --skills-path ai/skills
+  aiplam add acme ../acme-ai-playbook --set acme       # in set 'acme', linked only if it is enabled
 `
 
 func (a *App) cmdAdd(args []string) error {
@@ -204,7 +240,7 @@ func (a *App) cmdAdd(args []string) error {
 		return err
 	}
 	if len(p.positional) != 2 {
-		return usagef("add needs a name and a folder")
+		return usagef("add needs a name and a playbook folder")
 	}
 	name := p.positional[0]
 	if !config.ValidName(name) {
@@ -212,7 +248,7 @@ func (a *App) cmdAdd(args []string) error {
 	}
 	folder := a.absPath(p.positional[1])
 	if !fsutil.IsDir(folder) {
-		return fmt.Errorf("folder '%s' does not exist", p.positional[1])
+		return fmt.Errorf("playbook folder '%s' does not exist", p.positional[1])
 	}
 	skillsPath := config.DefaultSkillsPath
 	if v, ok := p.values["skills-path"]; ok {
@@ -250,23 +286,23 @@ func (a *App) cmdAdd(args []string) error {
 				"'%s': their ids would collide", name, a.pretty(e.Dir), a.pretty(folder))
 		}
 	}
-	rel, err := config.RelFolder(a.Root, folder)
+	rel, err := config.RelFolder(a.Base, folder)
 	if err != nil {
 		return err
 	}
 
 	entry := config.Playbook{Name: name, Folder: rel,
 		Artifacts: config.Artifacts{Skills: config.Skills{Path: skillsPath}}}
-	if !fsutil.IsDir(entry.SkillsDir(a.Root)) {
+	if !fsutil.IsDir(entry.SkillsDir(a.Base)) {
 		return fmt.Errorf("skills folder '%s' does not exist; use --skills-path to set it ('.' for the playbook folder "+
-			"itself)", a.pretty(entry.SkillsDir(a.Root)))
+			"itself)", a.pretty(entry.SkillsDir(a.Base)))
 	}
-	if !fsutil.Within(entry.SkillsDir(a.Root), folder) {
+	if !fsutil.Within(entry.SkillsDir(a.Base), folder) {
 		return fmt.Errorf("skills folder '%s' leads outside the playbook folder (through a link)",
-			a.pretty(entry.SkillsDir(a.Root)))
+			a.pretty(entry.SkillsDir(a.Base)))
 	}
 	updated := &config.Set{Playbooks: append(append([]config.Playbook{}, set.cfg.Playbooks...), entry)}
-	final := playbook.Entries(set.name, updated.Playbooks, a.Root)
+	final := playbook.Entries(set.name, updated.Playbooks, a.Base)
 	e := final[len(final)-1]
 
 	var plan playbook.Plan
@@ -277,7 +313,7 @@ func (a *App) cmdAdd(args []string) error {
 		}
 		playbook.MarkAncestors(&plan, a.ancestorTargets())
 	} else {
-		// Nothing is linked, but the set must stay installable: no skill provided by two playbooks.
+		// Nothing is linked, but the set must stay linkable: no artifact provided by two playbooks.
 		overlaps, err := playbook.Overlaps(final, e)
 		if err != nil {
 			return err
@@ -297,7 +333,7 @@ func (a *App) cmdAdd(args []string) error {
 	if err := playbook.Apply(plan, a.printAction); err != nil {
 		return fmt.Errorf("%w; the playbook was not registered: fix the problem and run '%s' again", err, a.cmd("add"))
 	}
-	if err := config.SaveSet(a.Root, set.name, updated); err != nil {
+	if err := config.SaveSet(a.Base, set.name, updated); err != nil {
 		return a.undo(plan, err, "the playbook was not registered")
 	}
 	skills, _ := playbook.Skills(final, e)
@@ -326,19 +362,32 @@ func (a *App) reportRenamedIDs(before, after []playbook.Entry) {
 
 // --- update -------------------------------------------------------------------------------------------------------
 
-const updateUsage = `Usage: aiplam update [<name|id|folder>] [<folder>] [--set SET]
+const updateUsage = `Usage: aiplam update [<name|id|playbookfolder>] [<playbookfolder>] [--set SET]
        aiplam update --all [--set SET]
 
-Brings the installed artifacts of a playbook of the enabled sets in line with its folder as currently checked out:
-links new skills and removes the links of skills that no longer exist. The playbook is the one registered for the
-current folder, or the one given by id, by name (if unique), by folder (if unique), or by name and folder. aiplam
-never fetches, pulls or switches a checkout: select the version in the playbook's folder first. A set that is not
-enabled has nothing installed, so there is nothing to update in it.
+Brings a playbook's links in line with its playbook folder, as currently checked out:
+  - links its new artifacts;
+  - removes the links of artifacts that no longer exist.
 
-Nothing is changed for a playbook if any link cannot be created because something else is already in its place.
+The playbook is chosen by:
+  - nothing: the playbook registered for the current folder;
+  - an id, a name or a playbook folder, when it designates a single playbook;
+  - a name and a playbook folder.
 
+aiplam never fetches, pulls or switches a checkout: select the version in the playbook folder first. Only the
+playbooks of the enabled sets are linked, so only they have anything to update. Nothing is changed for a playbook if
+something other than the right link is already where a link must go.
+
+Options:
   --all           update every playbook of the enabled sets (or of the set given with --set)
-  -s, --set SET   the set (default: the enabled sets)
+  -s, --set SET   look for the playbook in set SET (default: the enabled sets)
+
+Examples:
+  cd ~/Workspace/arxila-ai-playbook
+  git switch --detach v1.3.0
+  aiplam update                # the playbook registered for the current folder
+  aiplam update arxila
+  aiplam update --all
 `
 
 func (a *App) cmdUpdate(args []string) error {
@@ -414,14 +463,20 @@ func (a *App) updateOne(entries []playbook.Entry, e playbook.Entry, targets []st
 
 // --- remove -------------------------------------------------------------------------------------------------------
 
-const removeUsage = `Usage: aiplam remove <name|id|folder> [<folder>] [--set SET]
+const removeUsage = `Usage: aiplam remove <name|id|playbookfolder> [<playbookfolder>] [--set SET]
 
-Unregisters a playbook from its set and, if the set is enabled, removes the links to its artifacts from the agent
-folders. The playbook is looked for in the enabled sets (or in the set given with --set), by id, by name (if unique),
-by folder (if unique), or by name and folder. Only links are removed: the playbook's folder and anything that is not
-a link to it are left in place.
+Unregisters a playbook and, if its set is enabled, removes its links from the agents configuration folders:
+  - the playbook is chosen by an id, a name or a playbook folder (when it designates a single playbook), or by a
+    name and a playbook folder;
+  - only links are removed: the playbook folder, and anything that is not a link into it, are left in place.
 
-  -s, --set SET   the set (default: the enabled sets)
+Options:
+  -s, --set SET   look for the playbook in set SET (default: the enabled sets)
+
+Examples:
+  aiplam remove arxila
+  aiplam remove arxila@arxila-ai-playbook    # by id, when several playbooks share the name
+  aiplam remove ../old-playbook --set acme   # by playbook folder, in set 'acme'
 `
 
 func (a *App) cmdRemove(args []string) error {
@@ -430,7 +485,7 @@ func (a *App) cmdRemove(args []string) error {
 		return err
 	}
 	if len(p.positional) == 0 {
-		return usagef("remove needs a name, id or folder")
+		return usagef("remove needs a name, id or playbook folder")
 	}
 	st, err := a.load()
 	if err != nil {
@@ -444,11 +499,11 @@ func (a *App) cmdRemove(args []string) error {
 	a.useSet(st, set)
 	updated := &config.Set{}
 	for _, pb := range set.cfg.Playbooks {
-		if !(pb.Name == e.Name && fsutil.SamePath(pb.Dir(a.Root), e.Dir)) {
+		if !(pb.Name == e.Name && fsutil.SamePath(pb.Dir(a.Base), e.Dir)) {
 			updated.Playbooks = append(updated.Playbooks, pb)
 		}
 	}
-	final := playbook.Entries(set.name, updated.Playbooks, a.Root)
+	final := playbook.Entries(set.name, updated.Playbooks, a.Base)
 	var plan playbook.Plan
 	if set.enabled {
 		plan, err = playbook.Build(final, e, st.targets, st.others(set.name))
@@ -461,7 +516,7 @@ func (a *App) cmdRemove(args []string) error {
 		return fmt.Errorf("%w; the playbook is still registered: fix the problem and run '%s' again", err,
 			a.cmd("remove"))
 	}
-	if err := config.SaveSet(a.Root, set.name, updated); err != nil {
+	if err := config.SaveSet(a.Base, set.name, updated); err != nil {
 		return a.undo(plan, err, "the playbook is still registered")
 	}
 	a.printf("Removed %s.\n", e.ID)

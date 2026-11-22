@@ -17,7 +17,7 @@
 // =========================================================================
 
 // Command aiplam is the AI Playbook Manager: it registers AI playbooks (git checkouts of shared agent artifacts) and
-// installs their artifacts into the folders that coding agents read, as links.
+// links their artifacts from the agents configuration folders that coding agents read.
 package main
 
 import (

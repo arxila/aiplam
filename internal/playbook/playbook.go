@@ -17,7 +17,7 @@
 // =========================================================================
 
 // Package playbook computes playbook ids, discovers the artifacts (skills) of each registered playbook, and plans the
-// link changes needed to install, update or remove a playbook in the target folders.
+// link changes needed to add, update or remove a playbook in the agents configuration folders (its targets).
 package playbook
 
 import (
@@ -42,26 +42,26 @@ type Entry struct {
 	ID string
 	// Set is the set the playbook is registered in.
 	Set string
-	// Dir is the playbook's folder, resolved against the root folder, with links resolved.
+	// Dir is the playbook's folder, resolved against the base folder, with links resolved.
 	Dir string
 	// SkillsDir is the folder holding the playbook's skills, with links resolved.
 	SkillsDir string
 }
 
 // Entries builds the entries of the playbooks of a set, computing their ids and resolving their folders against the
-// root folder.
-func Entries(set string, playbooks []config.Playbook, root string) []Entry {
+// base folder.
+func Entries(set string, playbooks []config.Playbook, base string) []Entry {
 	count := map[string]int{}
 	for _, p := range playbooks {
 		count[p.Name]++
 	}
 	entries := make([]Entry, len(playbooks))
 	for i, p := range playbooks {
-		id, dir := p.Name, p.Dir(root)
+		id, dir := p.Name, p.Dir(base)
 		if count[p.Name] > 1 {
 			id = p.Name + "@" + filepath.Base(dir)
 		}
-		entries[i] = Entry{Playbook: p, ID: id, Set: set, Dir: dir, SkillsDir: p.SkillsDir(root)}
+		entries[i] = Entry{Playbook: p, ID: id, Set: set, Dir: dir, SkillsDir: p.SkillsDir(base)}
 	}
 	return entries
 }
@@ -157,7 +157,7 @@ const (
 	OtherProvider
 	// Exists: the link already exists, even if it is right; enabling a set requires every one of its links to be new.
 	Exists
-	// Ancestor: an artifact with the same name exists in an agent folder of a higher-level configuration
+	// Ancestor: an artifact with the same name exists in an agents configuration folder of a higher-level base folder
 	// (Action.Current), which agents may read too.
 	Ancestor
 )
@@ -178,7 +178,7 @@ type Action struct {
 	// Cause explains a Conflict.
 	Cause ConflictCause
 	// Current is the target of the link found in the way, for an OtherLink conflict, or the artifact found in a
-	// higher-level agent folder, for an Ancestor conflict.
+	// higher-level agents configuration folder, for an Ancestor conflict.
 	Current string
 	// Others are the ids of the other playbooks providing the artifact, for an OtherProvider conflict.
 	Others []string
@@ -208,14 +208,14 @@ func (p Plan) filter(kind ActionKind) []Action {
 	return out
 }
 
-// SkillsFolder returns the folder of a target where skills are installed.
+// SkillsFolder returns the folder of a target where skills are linked from.
 func SkillsFolder(target string) string {
 	return filepath.Join(target, "skills")
 }
 
 // Build plans the changes for playbook e in the given targets, for the state in which final are the registered
 // entries of e's set and others are the entries of the other enabled sets, one slice per set. When e is in final (by
-// name and folder), its skills must be installed (add or update); otherwise e is being removed and all of its links go.
+// name and folder), its artifacts must be linked (add or update); otherwise e is being removed and all of its links go.
 // Links that point into e's skills folder and are named after e are removed unless some entry in final or others wants
 // exactly that link. A desired link whose path holds anything other than a link to the same skill is a conflict, as is
 // a skill name that another playbook of final or others also provides.
@@ -244,7 +244,7 @@ func build(final []Entry, e Entry, targets []string, gone map[string]bool, other
 		}
 	}
 
-	// What every entry in the final state (of e's set and of the other enabled sets) wants installed, by artifact name.
+	// What every entry in the final state (of e's set and of the other enabled sets) wants linked, by artifact name.
 	wanted := map[string][]Skill{}
 	wantedBy := map[string][]string{}
 	for i, group := range append([][]Entry{final}, others...) {
@@ -375,9 +375,9 @@ func Overlaps(final []Entry, e Entry) (map[string][]string, error) {
 	return overlaps, nil
 }
 
-// Switch plans the move from one installed state to another. Each argument holding entries has one slice per set:
-// the links of the sets in from are removed from fromTargets, the sets in to are installed in toTargets, and the sets
-// in stay remain installed (their links are neither removed nor shared). Links that from and to both want (same path,
+// Switch plans the move from one linked state to another. Each argument holding entries has one slice per set:
+// the links of the sets in from are removed from fromTargets, the sets in to are linked in toTargets, and the sets
+// in stay remain linked (their links are neither removed nor shared). Links that from and to both want (same path,
 // same skill) are left alone. Conflicts are planned as in Build, except that links being removed are not in the way;
 // with strict, any other link already in place of a link to create is a conflict. Entries of to must have their
 // skills folders. dropReason explains the removals of links in folders that are no longer targets; reason explains
@@ -417,7 +417,7 @@ func Switch(from, to, stay [][]Entry, fromTargets, toTargets []string, reason, d
 	for link := range removed {
 		gone[link] = true
 	}
-	var installs []Action
+	var creations []Action
 	kept := map[string]bool{}
 	for i, group := range to {
 		others := append([][]Entry{}, stay...)
@@ -445,7 +445,7 @@ func Switch(from, to, stay [][]Entry, fromTargets, toTargets []string, reason, d
 					gone[a.Link] = true
 				}
 				if a.Kind != Keep {
-					installs = append(installs, a)
+					creations = append(creations, a)
 				}
 			}
 		}
@@ -455,7 +455,7 @@ func Switch(from, to, stay [][]Entry, fromTargets, toTargets []string, reason, d
 			plan.Actions = append(plan.Actions, r)
 		}
 	}
-	plan.Actions = append(plan.Actions, installs...)
+	plan.Actions = append(plan.Actions, creations...)
 	return plan, nil
 }
 
@@ -479,9 +479,9 @@ func wantedExactly(skills []Skill, source string) bool {
 }
 
 // MarkAncestors turns into Ancestor conflicts the creations of a plan whose artifact name already exists in the skills
-// folder of an agent folder of a higher-level configuration, so that agents reading several levels never see an
-// artifact twice. ancestors maps each agent folder of the plan's targets to the higher-level agent folders of the same
-// type.
+// folder of an agents configuration folder of a higher-level base folder, so that agents reading several levels
+// never see an artifact twice. ancestors maps each agents configuration folder of the plan's targets to the
+// higher-level agents configuration folders of the same type.
 func MarkAncestors(plan *Plan, ancestors map[string][]string) {
 	for i, act := range plan.Actions {
 		if act.Kind != Create {

@@ -28,14 +28,22 @@ import (
 )
 
 const typeUsage = `Usage: aiplam type
-       aiplam type agents|claude...
+       aiplam type <type>[,<type>...]
 
-Without arguments, shows the types of agent folders of the configuration, and their folders (next to the .aiplam
-folder): where the artifacts of the enabled sets' playbooks are installed (skills go to their skills/ subfolder).
-With arguments, replaces them: ` + "'agents' (.agents) or 'claude' (.claude)" + `; several can be given, as separate
-arguments or separated by commas. The enabled sets' playbooks are unlinked from the agent folders of the types
-removed and linked into those of the types added. Nothing is changed if any link cannot be created because something
-else is already in its place.
+Shows or changes the types of agents configuration folders in the base folder, where artifacts are linked from
+(skills, for example, from their skills/ subfolder):
+  - agents: the .agents folder;
+  - claude: the .claude folder.
+
+Changing them is all-or-nothing:
+  - the enabled sets' playbooks are unlinked from the agents configuration folders of the types removed, and linked
+    from those of the types added;
+  - nothing is changed if something other than the right link is already where a link must go.
+
+Examples:
+  aiplam type                  # show the types and their folders
+  aiplam type agents,claude    # link from .agents and .claude
+  aiplam type claude           # .claude only: everything is unlinked from .agents
 `
 
 func (a *App) cmdType(args []string) error {
@@ -54,7 +62,7 @@ func (a *App) cmdType(args []string) error {
 	if err != nil {
 		return err
 	}
-	current := inst.TargetDirs(a.Root)
+	current := inst.TargetDirs(a.Base)
 	if len(types) == 0 {
 		a.printTypes(inst.Types)
 		return nil
@@ -68,7 +76,7 @@ func (a *App) cmdType(args []string) error {
 		a.printf("The types are unchanged.\n")
 		return nil
 	}
-	next := updated.TargetDirs(a.Root)
+	next := updated.TargetDirs(a.Base)
 
 	sets, err := a.enabledSets(inst)
 	if err != nil {
@@ -106,16 +114,16 @@ func (a *App) cmdType(args []string) error {
 	if err := playbook.Apply(plan, a.printAction); err != nil {
 		return fmt.Errorf("%w; the types were not changed", err)
 	}
-	if err := config.SaveInstall(a.Root, &updated); err != nil {
+	if err := config.SaveInstall(a.Base, &updated); err != nil {
 		return a.undo(plan, err, "the types were not changed")
 	}
 	a.printTypes(updated.Types)
 	return nil
 }
 
-// printTypes prints types and their agent folders: "agents  ~/.agents".
+// printTypes prints types and their agents configuration folders: "agents  ~/.agents".
 func (a *App) printTypes(types []string) {
-	dirs := config.TargetDirs(types, a.Root)
+	dirs := config.TargetDirs(types, a.Base)
 	for i, t := range types {
 		a.printf("%-8s %s\n", t, a.pretty(dirs[i]))
 	}
