@@ -56,22 +56,22 @@ git -C aiplam-lettuce-playbook switch -q --detach v1.0.0
 aiplam check
 aiplam update aiplam-lettuce-data
 
-# a second set that collides with the first one (both provide aiplam-tomato): it can replace it, not join it
-aiplam set add other
-aiplam add aiplam-tomato aiplam-tomato-playbook --skills-path . -s other
-aiplam set enable other                                   # fails: its links already exist
-aiplam set switch other                                   # disable default, enable other
-aiplam set list
-aiplam set switch default
+# a second profile that collides with the first one (both provide aiplam-tomato): it can replace it, not join it
+aiplam profile add other
+aiplam add aiplam-tomato aiplam-tomato-playbook --skills-path . -p other
+aiplam profile enable other                               # fails: its links already exist
+aiplam profile switch other                               # disable default, enable other
+aiplam profile list
+aiplam profile switch default
 
-# a third set that does not collide can be enabled besides the first one
-aiplam set add extra
+# a third profile that does not collide can be enabled besides the first one
+aiplam profile add extra
 aiplam remove aiplam-blueberry
-aiplam add aiplam-blueberry aiplam-blueberry-playbook -s extra
-aiplam set enable extra
+aiplam add aiplam-blueberry aiplam-blueberry-playbook -p extra
+aiplam profile enable extra
 aiplam list
 
-# a single type: the enabled sets' playbooks are unlinked from ~/.claude
+# a single type: the enabled profiles' playbooks are unlinked from ~/.claude
 aiplam type agents
 
 # a project base folder, used by the commands run anywhere inside the base folder ~/projects/demo
@@ -80,7 +80,7 @@ git init -q                                               # init then suggests w
 aiplam init .                                             # .aiplam and .agents in ~/projects/demo
 aiplam add aiplam-garlic ~/playbooks/aiplam-tomato-playbook -sp .   # fails: already linked from ~/.agents
 aiplam remove aiplam-garlic --global
-aiplam add aiplam-garlic ~/playbooks/aiplam-tomato-playbook -sp .   # linked into ~/projects/demo/.agents
+aiplam add aiplam-garlic ~/playbooks/aiplam-tomato-playbook -sp .   # linked from ~/projects/demo/.agents
 cat .aiplam/default.yaml                                  # folder: ../../playbooks/aiplam-tomato-playbook
 cd module
 aiplam list --all                                         # the project's base folder, then ~

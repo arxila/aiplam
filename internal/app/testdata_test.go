@@ -102,27 +102,27 @@ func TestTestdataPlaybooks(t *testing.T) {
 		filepath.Join(lettuce, "skills", "aiplam-lettuce-data-clean"))
 	e.mustRun(ExitOK, "check")
 
-	// A second set: it collides with the first one (both provide aiplam-tomato), so it can replace it but not join it.
+	// A second profile: it collides with the first one (both provide aiplam-tomato), so it can replace it but not join it.
 	all := linked()
-	e.mustRun(ExitOK, "set", "add", "other")
-	e.mustRun(ExitOK, "add", "aiplam-tomato", tomato, "-sp", ".", "-s", "other")
-	e.mustRun(ExitFailure, "set", "enable", "other")
-	e.mustRun(ExitOK, "set", "switch", "other")
+	e.mustRun(ExitOK, "profile", "add", "other")
+	e.mustRun(ExitOK, "add", "aiplam-tomato", tomato, "-sp", ".", "-p", "other")
+	e.mustRun(ExitFailure, "profile", "enable", "other")
+	e.mustRun(ExitOK, "profile", "switch", "other")
 	expect("aiplam-tomato-onboard", "aiplam-tomato-style")
-	e.mustRun(ExitOK, "set", "switch", "default")
+	e.mustRun(ExitOK, "profile", "switch", "default")
 	expect(all...)
 
-	// A third set that does not collide can be enabled besides the first one.
-	e.mustRun(ExitOK, "set", "add", "extra")
+	// A third profile that does not collide can be enabled besides the first one.
+	e.mustRun(ExitOK, "profile", "add", "extra")
 	e.mustRun(ExitOK, "remove", "aiplam-blueberry")
-	e.mustRun(ExitOK, "add", "aiplam-blueberry", blueberry, "-s", "extra")
-	e.mustRun(ExitOK, "set", "enable", "extra")
+	e.mustRun(ExitOK, "add", "aiplam-blueberry", blueberry, "-p", "extra")
+	e.mustRun(ExitOK, "profile", "enable", "extra")
 	expect(all...)
 	e.mustRun(ExitOK, "type", "agents")
 	e.assertMissing(filepath.Join(e.home, ".claude", "skills", "aiplam-lettuce-review"))
 	e.mustRun(ExitOK, "check")
 	_, errOut = e.mustRun(ExitFailure, "remove", tomato) // two playbooks are registered there
-	if !strings.Contains(errOut, "aiplam-tomato of set default, aiplam-garlic") {
+	if !strings.Contains(errOut, "aiplam-tomato of profile default, aiplam-garlic") {
 		t.Fatalf("unexpected message: %s", errOut)
 	}
 
@@ -150,7 +150,7 @@ func TestTestdataPlaybooks(t *testing.T) {
 	e.mustRun(ExitOK, "remove", "aiplam-lettuce@aiplam-lettuce-fork")
 	e.mustRun(ExitOK, "remove", "aiplam-lettuce")
 	e.mustRun(ExitOK, "remove", "aiplam-blueberry")
-	e.mustRun(ExitOK, "set", "disable", "extra")
+	e.mustRun(ExitOK, "profile", "disable", "extra")
 	e.mustRun(ExitOK, "remove", "aiplam-tomato")
 	expect()
 }

@@ -36,8 +36,8 @@ Shows or changes the types of agents configuration folders in the base folder, w
   - claude: the .claude folder.
 
 Changing them is all-or-nothing:
-  - the enabled sets' playbooks are unlinked from the agents configuration folders of the types removed, and linked
-    from those of the types added;
+  - the enabled profiles' playbooks are unlinked from the agents configuration folders of the types removed, and
+    linked from those of the types added;
   - nothing is changed if something other than the right link is already where a link must go.
 
 Examples:
@@ -47,7 +47,7 @@ Examples:
 `
 
 func (a *App) cmdType(args []string) error {
-	if err := a.noSetOption("type"); err != nil {
+	if err := a.noProfileOption("type"); err != nil {
 		return err
 	}
 	p, err := parseArgs(args, nil, nil)
@@ -78,18 +78,18 @@ func (a *App) cmdType(args []string) error {
 	}
 	next := updated.AgentsConfigDirs(a.Base)
 
-	sets, err := a.enabledSets(conf)
+	profiles, err := a.enabledProfiles(conf)
 	if err != nil {
 		return err
 	}
-	for _, s := range sets {
+	for _, s := range profiles {
 		for _, e := range s.entries {
 			if err := a.checkPlaybookFolders(e); err != nil {
 				return fmt.Errorf("%w; the types were not changed", err)
 			}
 		}
 	}
-	plan, err := playbook.Switch(groups(sets), groups(sets), nil, current, next, "no longer in the playbook",
+	plan, err := playbook.Switch(groups(profiles), groups(profiles), nil, current, next, "no longer in the playbook",
 		"type removed", false)
 	if err != nil {
 		return err
@@ -102,9 +102,9 @@ func (a *App) cmdType(args []string) error {
 	}
 
 	if len(conf.Enabled) == 0 {
-		a.printf("Changing the types (no set is enabled)\n")
+		a.printf("Changing the types (no profile is enabled)\n")
 	} else {
-		a.printf("Changing the types (enabled sets: %s)\n", strings.Join(conf.Enabled, ", "))
+		a.printf("Changing the types (enabled profiles: %s)\n", strings.Join(conf.Enabled, ", "))
 	}
 	for _, dir := range next {
 		if err := os.MkdirAll(dir, 0o755); err != nil {

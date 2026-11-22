@@ -38,19 +38,19 @@ const SkillFile = "SKILL.md"
 // Entry is a registered playbook with its computed id and resolved skills folder.
 type Entry struct {
 	config.Playbook
-	// ID is the name, or "name@<last folder segment>" when several playbooks of its set share the name.
+	// ID is the name, or "name@<last folder segment>" when several playbooks of its profile share the name.
 	ID string
-	// Set is the set the playbook is registered in.
-	Set string
+	// Profile is the profile the playbook is registered in.
+	Profile string
 	// Dir is the playbook folder, resolved against the base folder, with links resolved.
 	Dir string
 	// SkillsDir is the folder holding the playbook's skills, with links resolved.
 	SkillsDir string
 }
 
-// Entries builds the entries of the playbooks of a set, computing their ids and resolving their folders against the
+// Entries builds the entries of the playbooks of a profile, computing their ids and resolving their folders against the
 // base folder.
-func Entries(set string, playbooks []config.Playbook, base string) []Entry {
+func Entries(profile string, playbooks []config.Playbook, base string) []Entry {
 	count := map[string]int{}
 	for _, p := range playbooks {
 		count[p.Name]++
@@ -61,7 +61,7 @@ func Entries(set string, playbooks []config.Playbook, base string) []Entry {
 		if count[p.Name] > 1 {
 			id = p.Name + "@" + filepath.Base(dir)
 		}
-		entries[i] = Entry{Playbook: p, ID: id, Set: set, Dir: dir, SkillsDir: p.SkillsDir(base)}
+		entries[i] = Entry{Playbook: p, ID: id, Profile: profile, Dir: dir, SkillsDir: p.SkillsDir(base)}
 	}
 	return entries
 }
@@ -155,7 +155,7 @@ const (
 	OtherLink
 	// OtherProvider: other registered playbooks (Action.Others) provide an artifact with the same name.
 	OtherProvider
-	// Exists: the link already exists, even if it is right; enabling a set requires every one of its links to be new.
+	// Exists: the link already exists, even if it is right; enabling a profile requires every one of its links to be new.
 	Exists
 	// Ancestor: an artifact with the same name exists in an agents configuration folder of a higher-level base folder
 	// (Action.Current), which agents may read too.
@@ -213,12 +213,12 @@ func SkillsFolder(agentsConfigDir string) string {
 	return filepath.Join(agentsConfigDir, "skills")
 }
 
-// Build plans the changes for playbook e in the given agents configuration folders, for the state in which final
-// are the registered entries of e's set and others are the entries of the other enabled sets, one slice per set.
-// When e is in final (by name and folder), its artifacts must be linked (add or update); otherwise e is being
+// Build plans the changes for playbook e in the given agents configuration folders, for the state in which final are
+// the registered entries of e's profile and others are the entries of the other enabled profiles, one slice per
+// profile. When e is in final (by name and folder), its artifacts must be linked (add or update); otherwise e is being
 // removed and all of its links go. Links that point into e's skills folder and are named after e are removed unless
-// some entry in final or others wants exactly that link. A desired link whose path holds anything other than a link
-// to the same artifact is a conflict, as is an artifact name that another playbook of final or others also provides.
+// some entry in final or others wants exactly that link. A desired link whose path holds anything other than a link to
+// the same artifact is a conflict, as is an artifact name that another playbook of final or others also provides.
 func Build(final []Entry, e Entry, agentsConfigDirs []string, others [][]Entry) (Plan, error) {
 	return build(final, e, agentsConfigDirs, nil, others, false)
 }
@@ -244,7 +244,8 @@ func build(final []Entry, e Entry, agentsConfigDirs []string, gone map[string]bo
 		}
 	}
 
-	// What every entry in the final state (of e's set and of the other enabled sets) wants linked, by artifact name.
+	// What every entry in the final state (of e's profile and of the other enabled profiles) wants linked, by artifact
+	// name.
 	wanted := map[string][]Skill{}
 	wantedBy := map[string][]string{}
 	for i, group := range append([][]Entry{final}, others...) {
@@ -258,7 +259,7 @@ func build(final []Entry, e Entry, agentsConfigDirs []string, gone map[string]bo
 			}
 			label := f.ID
 			if i > 0 {
-				label = fmt.Sprintf("%s of set %s", f.ID, f.Set)
+				label = fmt.Sprintf("%s of profile %s", f.ID, f.Profile)
 			}
 			for _, s := range skills {
 				wanted[s.Name] = append(wanted[s.Name], s)
@@ -375,13 +376,13 @@ func Overlaps(final []Entry, e Entry) (map[string][]string, error) {
 	return overlaps, nil
 }
 
-// Switch plans the move from one linked state to another. Each argument holding entries has one slice per set:
-// the links of the sets in from are removed from the agents configuration folders fromAgentsConfigDirs, the sets in
-// to are linked from toAgentsConfigDirs, and the sets in stay remain linked (their links are neither removed nor
-// shared). Links that from and to both want (same path, same skill) are left alone. Conflicts are planned as in
-// Build, except that links being removed are not in the way; with strict, any other link already in place of a link
-// to create is a conflict. Entries of to must have their skills folders. dropReason explains the removals of links
-// in agents configuration folders that are no longer used; reason explains the others.
+// Switch plans the move from one linked state to another. Each argument holding entries has one slice per profile: the
+// links of the profiles in from are removed from the agents configuration folders fromAgentsConfigDirs, the profiles in
+// to are linked from toAgentsConfigDirs, and the profiles in stay remain linked (their links are neither removed nor
+// shared). Links that from and to both want (same path, same skill) are left alone. Conflicts are planned as in Build,
+// except that links being removed are not in the way; with strict, any other link already in place of a link to create
+// is a conflict. Entries of to must have their skills folders. dropReason explains the removals of links in agents
+// configuration folders that are no longer used; reason explains the others.
 func Switch(from, to, stay [][]Entry, fromAgentsConfigDirs, toAgentsConfigDirs []string, reason, dropReason string,
 	strict bool) (Plan, error) {
 	var plan Plan

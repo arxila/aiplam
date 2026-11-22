@@ -32,14 +32,14 @@ import (
 
 // --- init ---------------------------------------------------------------------------------------------------------
 
-const initUsage = `Usage: aiplam init <basefolder> [--type T] [--set SET]
-       aiplam init --global [--type T] [--set SET]
+const initUsage = `Usage: aiplam init <basefolder> [--type T] [--profile PROFILE]
+       aiplam init --global [--type T] [--profile PROFILE]
 
 Sets up <basefolder> as a base folder:
-  - creates <basefolder>/.aiplam, holding its configuration (aiplam-config.yaml, and one <set>.yaml per set);
+  - creates <basefolder>/.aiplam, holding its configuration (aiplam-config.yaml, and one <profile>.yaml per profile);
   - creates the agents configuration folders of the chosen types in <basefolder> (.agents, .claude), where
     artifacts are linked from (skills, for example, from their skills/ subfolder);
-  - creates a first set, and enables it.
+  - creates a first profile, and enables it.
 
 From then on, commands run anywhere inside <basefolder> use its configuration: each command uses the nearest base
 folder from the current folder up, or else the home folder (unless given --base or --global).
@@ -49,15 +49,15 @@ every folder in between. So an artifact already linked from an agents configurat
 folder cannot be linked from one of the same type in <basefolder>.
 
 Options:
-  -g, --global    use the user's home folder (e.g. /home/username) as base folder, instead of <basefolder>
-  -t, --type T    the types of agents configuration folders: 'agents' (.agents, the default) or 'claude'
-                  (.claude); several, separated by commas: --type agents,claude
-  -s, --set SET   the name of the first set (default: 'default')
+  -g, --global            use the user's home folder (e.g. /home/username) as base folder, instead of <basefolder>
+  -t, --type T            the types of agents configuration folders: 'agents' (.agents, the default) or 'claude'
+                          (.claude); several, separated by commas: --type agents,claude
+  -p, --profile PROFILE   the name of the first profile (default: 'default')
 
 Examples:
   aiplam init --global                         # ~/.aiplam and ~/.agents
   aiplam init --global --type agents,claude    # ~/.aiplam, ~/.agents and ~/.claude
-  aiplam init . --set backend                  # the current folder, with a first set named 'backend'
+  aiplam init . --profile backend              # the current folder, with a first profile named 'backend'
   aiplam init ~/Workspace/thymeleaf            # a project: commands run inside it use its configuration
 `
 
@@ -90,9 +90,9 @@ func (a *App) cmdInit(args []string) error {
 	if len(types) == 0 {
 		types = []string{config.DefaultType}
 	}
-	set := a.Set
-	if set == "" {
-		set = config.DefaultSet
+	profile := a.Profile
+	if profile == "" {
+		profile = config.DefaultProfile
 	}
 	// Commands suggested from here on name the base folder when the current folder does not lead to it.
 	useBase := func() {
@@ -104,12 +104,12 @@ func (a *App) cmdInit(args []string) error {
 	if _, err := os.Stat(file); err == nil {
 		useBase()
 		return fmt.Errorf("'%s' is already set up as a base folder: %s exists. Change the types with '%s' and "+
-			"manage sets with '%s'", a.pretty(a.Base), a.pretty(file), a.hint("type"), a.hint("set"))
+			"manage profiles with '%s'", a.pretty(a.Base), a.pretty(file), a.hint("type"), a.hint("profile"))
 	}
-	if config.SetExists(a.Base, set) {
-		return fmt.Errorf("%s already exists: remove it, or choose another set with --set", a.setFile(set))
+	if config.ProfileExists(a.Base, profile) {
+		return fmt.Errorf("%s already exists: remove it, or choose another profile with --profile", a.profileFile(profile))
 	}
-	conf := &config.BaseConfig{Types: types, Enabled: []string{set}}
+	conf := &config.BaseConfig{Types: types, Enabled: []string{profile}}
 	if errs := conf.Validate(); len(errs) > 0 {
 		return errs[0]
 	}
@@ -118,7 +118,7 @@ func (a *App) cmdInit(args []string) error {
 			return err
 		}
 	}
-	if err := config.SaveSet(a.Base, set, &config.Set{}); err != nil {
+	if err := config.SaveProfile(a.Base, profile, &config.Profile{}); err != nil {
 		return err
 	}
 	if err := config.SaveBaseConfig(a.Base, conf); err != nil {
@@ -129,7 +129,7 @@ func (a *App) cmdInit(args []string) error {
 	for _, dir := range conf.AgentsConfigDirs(a.Base) {
 		a.printf("  %s\n", a.pretty(dir))
 	}
-	a.printf("Created set '%s' (%s), enabled.\n", set, a.setFile(set))
+	a.printf("Created profile '%s' (%s), enabled.\n", profile, a.profileFile(profile))
 	a.printHigherLevels()
 	if repo := gitRepository(a.Base); repo != "" {
 		a.printf("Note: '%s' is inside a git repository. The %s folder can be committed to share the configuration "+
@@ -206,32 +206,32 @@ func parseTypes(values []string) ([]string, error) {
 
 // --- add ----------------------------------------------------------------------------------------------------------
 
-const addUsage = `Usage: aiplam add <name> <playbookfolder> [--skills-path PATH] [--set SET]
+const addUsage = `Usage: aiplam add <name> <playbookfolder> [--skills-path PATH] [--profile PROFILE]
 
-Registers the playbook in <playbookfolder> under <name> and, if its set is enabled, links its artifacts from the
+Registers the playbook in <playbookfolder> under <name> and, if its profile is enabled, links its artifacts from the
 agents configuration folders of the base folder, at whatever tag or commit is checked out:
   - its artifacts are those named '<name>-*': its skills, for example, are the folders named '<name>-*' that hold a
     SKILL.md, in its skills folder;
   - <playbookfolder> is stored relative to the base folder;
-  - the set is the one given with --set, which can be left out when exactly one set is enabled;
+  - the profile is the one given with --profile, which can be left out when exactly one profile is enabled;
   - several playbooks can share a name if the last segments of their playbook folders differ: their ids are then
     '<name>@<last folder segment>'.
 
 Nothing is changed if:
   - something other than the right link is already where a link must go;
-  - another playbook of the set, or of another enabled set, provides an artifact with the same name;
+  - another playbook of the profile, or of another enabled profile, provides an artifact with the same name;
   - an artifact with the same name is already linked from an agents configuration folder of the same type of a
     higher-level base folder.
 
 Options:
   -sp, --skills-path PATH   the skills folder, relative to <playbookfolder> (default: skills; '.' for
                             <playbookfolder> itself)
-  -s, --set SET             the set to register it in (default: the enabled set, when only one is)
+  -p, --profile PROFILE     the profile to register it in (default: the enabled profile, when only one is)
 
 Examples:
-  aiplam add arxila .                                  # the current folder, skills in ./skills
+  aiplam add arxila .                                     # the current folder, skills in ./skills
   aiplam add arxila ~/Workspace/arxila-ai-playbook --skills-path ai/skills
-  aiplam add acme ../acme-ai-playbook --set acme       # in set 'acme', linked only if it is enabled
+  aiplam add acme ../acme-ai-playbook --profile acme      # in profile 'acme', linked only if it is enabled
 `
 
 func (a *App) cmdAdd(args []string) error {
@@ -263,23 +263,24 @@ func (a *App) cmdAdd(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(st.sets) != 1 {
-		if len(st.sets) == 0 {
-			return errors.New("no set is enabled: choose the set to register the playbook in with --set")
+	if len(st.profiles) != 1 {
+		if len(st.profiles) == 0 {
+			return errors.New("no profile is enabled: choose the profile to register the playbook in with --profile")
 		}
-		return fmt.Errorf("%d sets are enabled (%s): choose the one to register the playbook in with --set",
-			len(st.sets), setNames(st.sets))
+		return fmt.Errorf("%d profiles are enabled (%s): choose the one to register the playbook in with --profile",
+			len(st.profiles), profileNames(st.profiles))
 	}
-	set := st.sets[0]
-	a.useSet(st, set)
-	current := set.entries
+	profile := st.profiles[0]
+	a.useProfile(st, profile)
+	current := profile.entries
 	for _, e := range current {
 		if e.Name != name {
 			continue
 		}
 		if fsutil.SamePath(e.Dir, folder) {
-			return fmt.Errorf("playbook '%s' is already registered for playbook folder '%s' in set '%s' (id %s); use '%s'", name,
-				a.pretty(folder), set.name, e.ID, a.cmd("update "+e.ID))
+			return fmt.Errorf("playbook '%s' is already registered for playbook folder '%s' in profile '%s' (id %s); "+
+				"use '%s'", name,
+				a.pretty(folder), profile.name, e.ID, a.cmd("update "+e.ID))
 		}
 		if fsutil.SameName(filepath.Base(e.Dir), filepath.Base(folder)) {
 			return fmt.Errorf("a playbook named '%s' is already registered for playbook folder '%s', whose last segment equals "+
@@ -301,19 +302,19 @@ func (a *App) cmdAdd(args []string) error {
 		return fmt.Errorf("skills folder '%s' leads outside the playbook folder (through a link)",
 			a.pretty(entry.SkillsDir(a.Base)))
 	}
-	updated := &config.Set{Playbooks: append(append([]config.Playbook{}, set.cfg.Playbooks...), entry)}
-	final := playbook.Entries(set.name, updated.Playbooks, a.Base)
+	updated := &config.Profile{Playbooks: append(append([]config.Playbook{}, profile.prof.Playbooks...), entry)}
+	final := playbook.Entries(profile.name, updated.Playbooks, a.Base)
 	e := final[len(final)-1]
 
 	var plan playbook.Plan
-	if set.enabled {
-		plan, err = playbook.Build(final, e, st.agentsConfigDirs, st.others(set.name))
+	if profile.enabled {
+		plan, err = playbook.Build(final, e, st.agentsConfigDirs, st.others(profile.name))
 		if err != nil {
 			return err
 		}
 		playbook.MarkAncestors(&plan, a.ancestorAgentsConfigDirs())
 	} else {
-		// Nothing is linked, but the set must stay linkable: no artifact provided by two playbooks.
+		// Nothing is linked, but the profile must stay linkable: no artifact provided by two playbooks.
 		overlaps, err := playbook.Overlaps(final, e)
 		if err != nil {
 			return err
@@ -329,11 +330,11 @@ func (a *App) cmdAdd(args []string) error {
 		return errSilent
 	}
 
-	a.printf("Adding playbook %s (%s) from %s to set '%s'\n", e.ID, a.version(folder), a.pretty(folder), set.name)
+	a.printf("Adding playbook %s (%s) from %s to profile '%s'\n", e.ID, a.version(folder), a.pretty(folder), profile.name)
 	if err := playbook.Apply(plan, a.printAction); err != nil {
 		return fmt.Errorf("%w; the playbook was not registered: fix the problem and run '%s' again", err, a.cmd("add"))
 	}
-	if err := config.SaveSet(a.Base, set.name, updated); err != nil {
+	if err := config.SaveProfile(a.Base, profile.name, updated); err != nil {
 		return a.undo(plan, err, "the playbook was not registered")
 	}
 	skills, _ := playbook.Skills(final, e)
@@ -342,8 +343,8 @@ func (a *App) cmdAdd(args []string) error {
 			a.pretty(e.SkillsDir))
 	}
 	a.printf("Added %s with %d skill(s).\n", e.ID, len(skills))
-	if !set.enabled {
-		a.printf("Nothing was linked: %s.\n", a.notEnabledNote(set.name))
+	if !profile.enabled {
+		a.printf("Nothing was linked: %s.\n", a.notEnabledNote(profile.name))
 	}
 	a.reportRenamedIDs(current, final)
 	return nil
@@ -362,8 +363,8 @@ func (a *App) reportRenamedIDs(before, after []playbook.Entry) {
 
 // --- update -------------------------------------------------------------------------------------------------------
 
-const updateUsage = `Usage: aiplam update [<name|id|playbookfolder>] [<playbookfolder>] [--set SET]
-       aiplam update --all [--set SET]
+const updateUsage = `Usage: aiplam update [<name|id|playbookfolder>] [<playbookfolder>] [--profile PROFILE]
+       aiplam update --all [--profile PROFILE]
 
 Brings a playbook's links in line with its playbook folder, as currently checked out:
   - links its new artifacts;
@@ -375,12 +376,12 @@ The playbook is chosen by:
   - a name and a playbook folder.
 
 aiplam never fetches, pulls or switches a checkout: select the version in the playbook folder first. Only the
-playbooks of the enabled sets are linked, so only they have anything to update. Nothing is changed for a playbook if
-something other than the right link is already where a link must go.
+playbooks of the enabled profiles are linked, so only they have anything to update. Nothing is changed for a
+playbook if something other than the right link is already where a link must go.
 
 Options:
-  --all           update every playbook of the enabled sets (or of the set given with --set)
-  -s, --set SET   look for the playbook in set SET (default: the enabled sets)
+  --all                   update every playbook of the enabled profiles (or of the profile given with --profile)
+  -p, --profile PROFILE   look for the playbook in profile PROFILE (default: the enabled profiles)
 
 Examples:
   cd ~/Workspace/arxila-ai-playbook
@@ -413,8 +414,8 @@ func (a *App) cmdUpdate(args []string) error {
 		a.printf("No playbooks are registered in %s.\n", st.where())
 		return nil
 	}
-	if len(st.sets) == 1 && !st.sets[0].enabled {
-		a.printf("Nothing to update: %s.\n", a.notEnabledNote(st.sets[0].name))
+	if len(st.profiles) == 1 && !st.profiles[0].enabled {
+		a.printf("Nothing to update: %s.\n", a.notEnabledNote(st.profiles[0].name))
 		return nil
 	}
 
@@ -423,9 +424,9 @@ func (a *App) cmdUpdate(args []string) error {
 		if i > 0 {
 			a.printf("\n")
 		}
-		set := st.set(e.Set)
-		a.useSet(st, set)
-		if err := a.updateOne(set.entries, e, st.agentsConfigDirs, st.others(set.name)); err != nil {
+		profile := st.profile(e.Profile)
+		a.useProfile(st, profile)
+		if err := a.updateOne(profile.entries, e, st.agentsConfigDirs, st.others(profile.name)); err != nil {
 			if !errors.Is(err, errSilent) {
 				a.errorf("%s", err)
 			}
@@ -463,20 +464,20 @@ func (a *App) updateOne(entries []playbook.Entry, e playbook.Entry, agentsConfig
 
 // --- remove -------------------------------------------------------------------------------------------------------
 
-const removeUsage = `Usage: aiplam remove <name|id|playbookfolder> [<playbookfolder>] [--set SET]
+const removeUsage = `Usage: aiplam remove <name|id|playbookfolder> [<playbookfolder>] [--profile PROFILE]
 
-Unregisters a playbook and, if its set is enabled, removes its links from the agents configuration folders:
+Unregisters a playbook and, if its profile is enabled, removes its links from the agents configuration folders:
   - the playbook is chosen by an id, a name or a playbook folder (when it designates a single playbook), or by a
     name and a playbook folder;
   - only links are removed: the playbook folder, and anything that is not a link into it, are left in place.
 
 Options:
-  -s, --set SET   look for the playbook in set SET (default: the enabled sets)
+  -p, --profile PROFILE   look for the playbook in profile PROFILE (default: the enabled profiles)
 
 Examples:
   aiplam remove arxila
-  aiplam remove arxila@arxila-ai-playbook    # by id, when several playbooks share the name
-  aiplam remove ../old-playbook --set acme   # by playbook folder, in set 'acme'
+  aiplam remove arxila@arxila-ai-playbook         # by id, when several playbooks share the name
+  aiplam remove ../old-playbook --profile acme    # by playbook folder, in profile 'acme'
 `
 
 func (a *App) cmdRemove(args []string) error {
@@ -495,32 +496,32 @@ func (a *App) cmdRemove(args []string) error {
 	if err != nil {
 		return err
 	}
-	set := st.set(e.Set)
-	a.useSet(st, set)
-	updated := &config.Set{}
-	for _, pb := range set.cfg.Playbooks {
+	profile := st.profile(e.Profile)
+	a.useProfile(st, profile)
+	updated := &config.Profile{}
+	for _, pb := range profile.prof.Playbooks {
 		if !(pb.Name == e.Name && fsutil.SamePath(pb.Dir(a.Base), e.Dir)) {
 			updated.Playbooks = append(updated.Playbooks, pb)
 		}
 	}
-	final := playbook.Entries(set.name, updated.Playbooks, a.Base)
+	final := playbook.Entries(profile.name, updated.Playbooks, a.Base)
 	var plan playbook.Plan
-	if set.enabled {
-		plan, err = playbook.Build(final, e, st.agentsConfigDirs, st.others(set.name))
+	if profile.enabled {
+		plan, err = playbook.Build(final, e, st.agentsConfigDirs, st.others(profile.name))
 		if err != nil {
 			return err
 		}
 	}
-	a.printf("Removing playbook %s (%s) from set '%s'\n", e.ID, a.pretty(e.Dir), set.name)
+	a.printf("Removing playbook %s (%s) from profile '%s'\n", e.ID, a.pretty(e.Dir), profile.name)
 	if err := playbook.Apply(plan, a.printAction); err != nil {
 		return fmt.Errorf("%w; the playbook is still registered: fix the problem and run '%s' again", err,
 			a.cmd("remove"))
 	}
-	if err := config.SaveSet(a.Base, set.name, updated); err != nil {
+	if err := config.SaveProfile(a.Base, profile.name, updated); err != nil {
 		return a.undo(plan, err, "the playbook is still registered")
 	}
 	a.printf("Removed %s.\n", e.ID)
-	a.reportRenamedIDs(set.entries, final)
+	a.reportRenamedIDs(profile.entries, final)
 	return nil
 }
 

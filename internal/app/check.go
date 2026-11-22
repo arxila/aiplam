@@ -30,24 +30,24 @@ import (
 	"arxila.io/aiplam/internal/playbook"
 )
 
-const checkUsage = `Usage: aiplam check [--set SET]
+const checkUsage = `Usage: aiplam check [--profile PROFILE]
 
 Changes nothing. Reports everything that needs attention, and then exits with 1:
-  - problems in the configuration files (aiplam-config.yaml and the sets' files, in the base folder's .aiplam);
+  - problems in the configuration files (aiplam-config.yaml and the profiles' files, in the base folder's .aiplam);
   - missing agents configuration folders and playbook folders;
-  - for each playbook of the enabled sets, the links that 'aiplam update' would create or remove, or the conflicts
-    that would cancel it;
+  - for each playbook of the enabled profiles, the links that 'aiplam update' would create or remove, or the
+    conflicts that would cancel it;
   - broken links in the agents configuration folders;
   - links whose artifact is also linked from an agents configuration folder of the same type of a higher-level
     base folder.
 
 Options:
-  -s, --set SET   check set SET only (default: the enabled sets); for a set that is not enabled, only whether it
-                  could be enabled
+  -p, --profile PROFILE   check profile PROFILE only (default: the enabled profiles); for a profile that is not
+                          enabled, only whether it could be enabled
 
 Examples:
   aiplam check
-  aiplam check --set acme
+  aiplam check --profile acme
 `
 
 func (a *App) cmdCheck(args []string) error {
@@ -84,21 +84,21 @@ func (a *App) cmdCheck(args []string) error {
 	}
 	a.printf("  format and content are valid\n")
 
-	// The enabled sets, and the one given with --set.
-	if a.Set != "" && !config.SetExists(a.Base, a.Set) {
-		return fmt.Errorf("set '%s' does not exist ('%s' lists the sets)", a.Set, a.hint("set list"))
+	// The enabled profiles, and the one given with --profile.
+	if a.Profile != "" && !config.ProfileExists(a.Base, a.Profile) {
+		return fmt.Errorf("profile '%s' does not exist ('%s' lists the profiles)", a.Profile, a.hint("profile list"))
 	}
 	st := &state{conf: conf, agentsConfigDirs: conf.AgentsConfigDirs(a.Base)}
-	loadSet := func(name string, enabled bool) *setState {
-		file := a.setFile(name)
-		if !config.SetExists(a.Base, name) {
-			problem("the enabled set '%s' does not exist (%s is missing): disable it with '%s', or create it again "+
-				"with '%s'", name, file, a.hint("set disable "+name), a.hint("set add "+name))
+	loadProfile := func(name string, enabled bool) *profileState {
+		file := a.profileFile(name)
+		if !config.ProfileExists(a.Base, name) {
+			problem("the enabled profile '%s' does not exist (%s is missing): disable it with '%s', or create it again "+
+				"with '%s'", name, file, a.hint("profile disable "+name), a.hint("profile add "+name))
 			return nil
 		}
-		cfg, err := config.LoadSet(a.Base, name)
+		prof, err := config.LoadProfile(a.Base, name)
 		if err == nil {
-			for _, e := range cfg.Validate(a.Base) {
+			for _, e := range prof.Validate(a.Base) {
 				problem("%s: %s", file, e)
 				err = errSilent
 			}
@@ -108,23 +108,24 @@ func (a *App) cmdCheck(args []string) error {
 		if err != nil {
 			return nil
 		}
-		return &setState{name: name, cfg: cfg, enabled: enabled, entries: playbook.Entries(name, cfg.Playbooks, a.Base)}
+		return &profileState{name: name, prof: prof, enabled: enabled,
+			entries: playbook.Entries(name, prof.Playbooks, a.Base)}
 	}
 	for _, name := range conf.Enabled {
-		if s := loadSet(name, true); s != nil {
+		if s := loadProfile(name, true); s != nil {
 			st.enabled = append(st.enabled, s)
-			if a.Set == "" || config.SameSet(a.Base, name, a.Set) {
-				st.sets = append(st.sets, s)
+			if a.Profile == "" || config.SameProfile(a.Base, name, a.Profile) {
+				st.profiles = append(st.profiles, s)
 			}
 		}
 	}
-	if a.Set != "" && len(st.sets) == 0 && !conf.IsEnabled(a.Base, a.Set) {
-		if s := loadSet(a.Set, false); s != nil {
-			st.sets = append(st.sets, s)
+	if a.Profile != "" && len(st.profiles) == 0 && !conf.IsEnabled(a.Base, a.Profile) {
+		if s := loadProfile(a.Profile, false); s != nil {
+			st.profiles = append(st.profiles, s)
 		}
 	}
 	if attention > 0 {
-		a.errorf("%d problem(s) in the set files: fix them by hand; nothing else was checked.", attention)
+		a.errorf("%d problem(s) in the profile files: fix them by hand; nothing else was checked.", attention)
 		return errSilent
 	}
 
@@ -139,25 +140,25 @@ func (a *App) cmdCheck(args []string) error {
 		a.printf("  %s\n", a.pretty(t))
 	}
 
-	if len(st.sets) == 0 {
-		a.printf("No set is enabled.\n")
+	if len(st.profiles) == 0 {
+		a.printf("No profile is enabled.\n")
 	}
 	reported := map[string]bool{} // links already reported by a playbook's plan
-	for _, set := range st.sets {
-		a.useSet(st, set)
+	for _, profile := range st.profiles {
+		a.useProfile(st, profile)
 		status := "enabled"
-		if !set.enabled {
+		if !profile.enabled {
 			status = "not enabled"
 		}
-		a.printf("Set %s (%s): %s\n", set.name, status, a.setFile(set.name))
-		if len(set.entries) == 0 {
+		a.printf("Profile %s (%s): %s\n", profile.name, status, a.profileFile(profile.name))
+		if len(profile.entries) == 0 {
 			a.printf("  no playbooks are registered\n")
 		}
-		for _, e := range set.entries {
-			a.checkPlaybook(st, set, e, reported, problem)
+		for _, e := range profile.entries {
+			a.checkPlaybook(st, profile, e, reported, problem)
 		}
 	}
-	a.hintSet = ""
+	a.hintProfile = ""
 
 	// Broken links that no playbook plan covers (for example, links to an unregistered or moved playbook), and links
 	// whose artifact is also in the agents configuration folder of the same type of a higher-level base folder.
@@ -196,32 +197,32 @@ func (a *App) cmdCheck(args []string) error {
 	return nil
 }
 
-// checkPlaybook checks a playbook's playbook folder and skills folder and, for an enabled set, whether 'aiplam
+// checkPlaybook checks a playbook's playbook folder and skills folder and, for an enabled profile, whether 'aiplam
 // update' would change anything.
-func (a *App) checkPlaybook(st *state, set *setState, e playbook.Entry, reported map[string]bool,
+func (a *App) checkPlaybook(st *state, profile *profileState, e playbook.Entry, reported map[string]bool,
 	problem func(string, ...any)) {
 	a.printf("Playbook %s (%s) at %s\n", e.ID, a.version(e.Dir), a.pretty(e.Dir))
 	if err := a.checkPlaybookFolders(e); err != nil {
 		problem("%s", err)
 		return
 	}
-	if !set.enabled {
-		// Nothing is linked; the set must only stay linkable.
-		overlaps, err := playbook.Overlaps(set.entries, e)
+	if !profile.enabled {
+		// Nothing is linked; the profile must only stay linkable.
+		overlaps, err := playbook.Overlaps(profile.entries, e)
 		if err != nil {
 			problem("playbook %s: %s", e.ID, err)
 			return
 		}
 		for name, others := range overlaps {
 			problem("playbook %s: skill %s: also provided by playbook %s; '%s' would be cancelled", e.ID, name,
-				strings.Join(others, ", "), a.hint("set enable "+set.name))
+				strings.Join(others, ", "), a.hint("profile enable "+profile.name))
 		}
 		if len(overlaps) == 0 {
-			a.printf("  playbook folder and skills folder are valid (not linked: the set is not enabled)\n")
+			a.printf("  playbook folder and skills folder are valid (not linked: the profile is not enabled)\n")
 		}
 		return
 	}
-	plan, err := playbook.Build(set.entries, e, st.agentsConfigDirs, st.others(set.name))
+	plan, err := playbook.Build(profile.entries, e, st.agentsConfigDirs, st.others(profile.name))
 	if err != nil {
 		problem("playbook %s: %s", e.ID, err)
 		return

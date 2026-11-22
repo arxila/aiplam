@@ -31,37 +31,37 @@ import (
 	"arxila.io/aiplam/internal/playbook"
 )
 
-const listUsage = `Usage: aiplam list [--all] [--json] [--set SET]
+const listUsage = `Usage: aiplam list [--all] [--json] [--profile PROFILE]
 
-Lists the playbooks of the enabled sets, and for each:
+Lists the playbooks of the enabled profiles, and for each:
   - its id, name and playbook folder;
   - its version: the tags of the checked-out commit, or else its branch;
   - its artifacts, by kind (such as skills), marking those not linked from every agents configuration folder
     ('aiplam update' links them).
 
 Options:
-  --all           also list the higher-level base folders, nearest first:
-                    - the parents of the base folder that are base folders as well: some agents read their
-                      agents configuration folders too;
-                    - the home folder, if it is also being used as a base folder for playbook management: agents
-                      always read its agents configuration folders.
-  --json          print JSON, for other tools (with --all, an array with one item per base folder)
-  -s, --set SET   list set SET instead (default: the enabled sets)
+  --all                   also list the higher-level base folders, nearest first:
+                            - the parents of the base folder that are base folders as well: some agents read
+                              their agents configuration folders too;
+                            - the home folder, if it is also being used as a base folder for playbook
+                              management: agents always read its agents configuration folders.
+  --json                  print JSON, for other tools (with --all, an array with one item per base folder)
+  -p, --profile PROFILE   list profile PROFILE instead (default: the enabled profiles)
 
 Examples:
   aiplam list
   aiplam list --all
-  aiplam list --set acme --json
+  aiplam list --profile acme --json
 `
 
 type listOutput struct {
-	Base             string    `json:"base"`
-	Types            []string  `json:"types"`
-	AgentsConfigDirs []string  `json:"agentsConfigurationFolders"`
-	Sets             []listSet `json:"sets"`
+	Base             string        `json:"base"`
+	Types            []string      `json:"types"`
+	AgentsConfigDirs []string      `json:"agentsConfigurationFolders"`
+	Profiles         []listProfile `json:"profiles"`
 }
 
-type listSet struct {
+type listProfile struct {
 	Name      string         `json:"name"`
 	Enabled   bool           `json:"enabled"`
 	Playbooks []listPlaybook `json:"playbooks"`
@@ -103,8 +103,8 @@ func (a *App) cmdList(args []string) error {
 		return usagef("unexpected argument: %s", p.positional[0])
 	}
 	all, asJSON := p.bools["all"], p.bools["json"]
-	if all && a.Set != "" {
-		return usagef("--all cannot be used with --set")
+	if all && a.Profile != "" {
+		return usagef("--all cannot be used with --profile")
 	}
 	a.baseShown = true // the base folder is part of the listing
 	bases := []string{a.Base}
@@ -131,9 +131,9 @@ func (a *App) cmdList(args []string) error {
 			failed = true
 			continue
 		}
-		out := listOutput{Base: base, Types: st.conf.Types, AgentsConfigDirs: st.agentsConfigDirs, Sets: []listSet{}}
-		for _, set := range st.sets {
-			out.Sets = append(out.Sets, a.listSet(set, st.agentsConfigDirs))
+		out := listOutput{Base: base, Types: st.conf.Types, AgentsConfigDirs: st.agentsConfigDirs, Profiles: []listProfile{}}
+		for _, profile := range st.profiles {
+			out.Profiles = append(out.Profiles, a.listProfile(profile, st.agentsConfigDirs))
 		}
 		outs = append(outs, out)
 		if !asJSON {
@@ -172,7 +172,7 @@ func (a *App) cmdList(args []string) error {
 	return nil
 }
 
-// printListing prints the listing of a configuration and reports whether any skill of an enabled set is not
+// printListing prints the listing of a configuration and reports whether any artifact of an enabled profile is not
 // linked from every agents configuration folder.
 func (a *App) printListing(st *state, out listOutput) bool {
 	var folders []string
@@ -180,40 +180,40 @@ func (a *App) printListing(st *state, out listOutput) bool {
 		folders = append(folders, a.pretty(t))
 	}
 	a.printf("Base folder: %s\nAgents configuration folders: %s\n", a.pretty(out.Base), strings.Join(folders, ", "))
-	if len(out.Sets) == 0 {
-		a.printf("\nNo set is enabled: enable one with '%s' ('%s' lists them).\n", a.hint("set enable <set>"),
-			a.hint("set list"))
+	if len(out.Profiles) == 0 {
+		a.printf("\nNo profile is enabled: enable one with '%s' ('%s' lists them).\n", a.hint("profile enable <profile>"),
+			a.hint("profile list"))
 		return false
 	}
 	notLinked := false
-	for i, ls := range out.Sets {
-		set := st.sets[i]
-		a.useSet(st, set)
+	for i, lprof := range out.Profiles {
+		profile := st.profiles[i]
+		a.useProfile(st, profile)
 		status := "enabled"
-		if !ls.Enabled {
+		if !lprof.Enabled {
 			status = "not enabled"
 		}
-		a.printf("\nSet %s (%s), %s\n", ls.Name, a.setFile(ls.Name), status)
-		if !ls.Enabled {
-			a.printf("Nothing of this set is linked: %s.\n", a.notEnabledNote(ls.Name))
+		a.printf("\nProfile %s (%s), %s\n", lprof.Name, a.profileFile(lprof.Name), status)
+		if !lprof.Enabled {
+			a.printf("Nothing of this profile is linked: %s.\n", a.notEnabledNote(lprof.Name))
 		}
-		if len(ls.Playbooks) == 0 {
+		if len(lprof.Playbooks) == 0 {
 			a.printf("No playbooks are registered. Register one with '%s'.\n", a.cmd("add <name> <playbookfolder>"))
 			continue
 		}
-		if a.listPlaybooks(ls) {
+		if a.listPlaybooks(lprof) {
 			notLinked = true
 		}
 	}
-	a.hintSet = ""
+	a.hintProfile = ""
 	return notLinked
 }
 
-// listPlaybooks prints a set's playbooks and reports whether any of their artifacts is not linked from every agents
+// listPlaybooks prints a profile's playbooks and reports whether any of their artifacts is not linked from every agents
 // configuration folder.
-func (a *App) listPlaybooks(ls listSet) bool {
+func (a *App) listPlaybooks(lprof listProfile) bool {
 	notLinked := false
-	for _, lp := range ls.Playbooks {
+	for _, lp := range lprof.Playbooks {
 		a.printf("\n%s\n", lp.ID)
 		a.printf("  name:    %s\n", lp.Name)
 		a.printf("  folder:  %s\n", a.pretty(lp.Folder))
@@ -228,7 +228,7 @@ func (a *App) listPlaybooks(ls listSet) bool {
 		}
 		a.printf("\n")
 		for _, s := range lp.Artifacts.Skills.Items {
-			if s.Linked || !ls.Enabled {
+			if s.Linked || !lprof.Enabled {
 				a.printf("    %s\n", s.Name)
 				continue
 			}
@@ -243,10 +243,10 @@ func (a *App) listPlaybooks(ls listSet) bool {
 	return notLinked
 }
 
-// listSet gathers the information of a set's playbooks.
-func (a *App) listSet(set *setState, agentsConfigDirs []string) listSet {
-	ls := listSet{Name: set.name, Enabled: set.enabled, Playbooks: []listPlaybook{}}
-	for _, e := range set.entries {
+// listProfile gathers the information of a profile's playbooks.
+func (a *App) listProfile(profile *profileState, agentsConfigDirs []string) listProfile {
+	lprof := listProfile{Name: profile.name, Enabled: profile.enabled, Playbooks: []listPlaybook{}}
+	for _, e := range profile.entries {
 		lp := listPlaybook{ID: e.ID, Name: e.Name, Folder: e.Dir, Problems: []string{},
 			Artifacts: listArtifacts{Skills: listSkills{Path: e.SkillsPath(), Folder: e.SkillsDir,
 				Items: []listSkill{}}}}
@@ -267,15 +267,15 @@ func (a *App) listSet(set *setState, agentsConfigDirs []string) listSet {
 		}
 		lp.Label = lp.Version.String()
 		if fsutil.IsDir(e.SkillsDir) {
-			skills, err := playbook.Skills(set.entries, e)
+			skills, err := playbook.Skills(profile.entries, e)
 			if err != nil {
 				lp.Problems = append(lp.Problems, err.Error())
 			}
 			for _, s := range skills {
 				item := listSkill{Name: s.Name, Source: s.Source, MissingIn: []string{}}
 				for _, t := range agentsConfigDirs {
-					if !set.enabled {
-						break // a set that is not enabled has nothing linked
+					if !profile.enabled {
+						break // a profile that is not enabled has nothing linked
 					}
 					state, current, err := fsutil.Inspect(filepath.Join(playbook.SkillsFolder(t), s.Name))
 					if err != nil || state != fsutil.Link ||
@@ -283,11 +283,11 @@ func (a *App) listSet(set *setState, agentsConfigDirs []string) listSet {
 						item.MissingIn = append(item.MissingIn, t)
 					}
 				}
-				item.Linked = set.enabled && len(item.MissingIn) == 0
+				item.Linked = profile.enabled && len(item.MissingIn) == 0
 				lp.Artifacts.Skills.Items = append(lp.Artifacts.Skills.Items, item)
 			}
 		}
-		ls.Playbooks = append(ls.Playbooks, lp)
+		lprof.Playbooks = append(lprof.Playbooks, lp)
 	}
-	return ls
+	return lprof
 }

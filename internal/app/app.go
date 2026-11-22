@@ -57,18 +57,19 @@ type App struct {
 	Stdout io.Writer
 	Stderr io.Writer
 	Git    *gitinfo.Reader
-	// Set is the set given with the --set option, or "" (commands then act on the enabled set). Run sets it.
-	Set string
-	// Base is the base folder of the configuration commands act on (it holds the .aiplam folder and the agent
-	// folders). Run sets it.
+	// Profile is the profile given with the --profile option, or "" (commands then act on the enabled profile). Run
+	// sets it.
+	Profile string
+	// Base is the base folder of the configuration commands act on (it holds the .aiplam folder and the agents
+	// configuration folders). Run sets it.
 	Base string
 
-	baseArg   string // the folder given with --base, or ""
-	global    bool   // whether --global was given
-	baseShown bool   // whether the "Base folder: ..." line has been printed
-	ancestors map[string][]string
-	gitWarned bool
-	hintSet   string // the set to name with --set in suggested commands, when it is not the enabled one
+	baseArg     string // the folder given with --base, or ""
+	global      bool   // whether --global was given
+	baseShown   bool   // whether the "Base folder: ..." line has been printed
+	ancestors   map[string][]string
+	gitWarned   bool
+	hintProfile string // the profile to name with --profile in suggested commands, when it is not the enabled one
 }
 
 // New returns an App for the current user, working directory and standard streams.
@@ -98,14 +99,15 @@ var commands []command
 
 func init() {
 	commands = []command{
-		{"init", "set up a base folder: its .aiplam folder, agents configuration folders and first set", initUsage,
+		{"init", "set up a base folder: its .aiplam folder, agents configuration folders and first profile", initUsage,
 			(*App).cmdInit},
 		{"add", "register a playbook and link its artifacts", addUsage, (*App).cmdAdd},
 		{"update", "link new artifacts of a playbook and unlink deleted ones", updateUsage, (*App).cmdUpdate},
 		{"remove", "unlink a playbook's artifacts and unregister it", removeUsage, (*App).cmdRemove},
 		{"list", "list registered playbooks, their versions and artifacts", listUsage, (*App).cmdList},
 		{"check", "check the configuration and whether any update is needed", checkUsage, (*App).cmdCheck},
-		{"set", "manage sets of playbooks: create, remove, enable, disable, switch", setUsage, (*App).cmdSet},
+		{"profile", "manage profiles (groups of playbooks): create, remove, enable, disable, switch", profileUsage,
+			(*App).cmdProfile},
 		{"type", "show or change the types of agents configuration folders", typeUsage, (*App).cmdType},
 	}
 }
@@ -132,13 +134,13 @@ How it works:
   - commands use the nearest base folder from the current folder up, or else the home folder;
   - aiplam links the playbooks' artifacts from the agents configuration folders of the chosen types, so updating
     a playbook only takes switching its checkout to another tag and running 'aiplam update';
-  - playbooks are registered in sets, and only the playbooks of the enabled sets are linked.
+  - playbooks are registered in profiles, and only the playbooks of the enabled profiles are linked.
 
 Options for every command:
   -b, --base <basefolder>   use <basefolder> as base folder
   -g, --global              use the user's home folder (e.g. /home/username) as base folder
 Option for add, update, remove, list and check:
-  -s, --set SET             act on set SET instead of the enabled ones
+  -p, --profile PROFILE     act on profile PROFILE instead of the enabled ones
 
 Getting started:
   aiplam init --global                                # ~ as base folder: ~/.aiplam and ~/.agents
@@ -156,8 +158,8 @@ func (a *App) Run(args []string) int {
 	if err != nil {
 		return a.exitCode(err, a.mainUsage())
 	}
-	a.Set, a.baseArg, a.global = opts.set, opts.base, opts.global
-	a.Base, a.baseShown, a.ancestors, a.hintSet = "", false, nil, ""
+	a.Profile, a.baseArg, a.global = opts.profile, opts.base, opts.global
+	a.Base, a.baseShown, a.ancestors, a.hintProfile = "", false, nil, ""
 	if len(args) == 0 {
 		fmt.Fprint(a.Stderr, a.mainUsage())
 		return ExitUsage
@@ -208,13 +210,13 @@ func (a *App) Run(args []string) int {
 
 // globalOptions are the options that Run removes from the command line before running a command.
 type globalOptions struct {
-	set    string // --set/-s, or ""
-	base   string // --base/-b, or ""
-	global bool   // --global/-g
+	profile string // --profile/-p, or ""
+	base    string // --base/-b, or ""
+	global  bool   // --global/-g
 }
 
-// extractGlobal removes the --set/-s, --base/-b and --global/-g options (allowed anywhere before "--") from args and
-// returns them.
+// extractGlobal removes the --profile/-p, --base/-b and --global/-g options (allowed anywhere before "--") from args
+// and returns them.
 func extractGlobal(args []string) ([]string, globalOptions, error) {
 	var opts globalOptions
 	var rest []string
@@ -230,7 +232,7 @@ func extractGlobal(args []string) ([]string, globalOptions, error) {
 		}
 		var name, value string
 		switch {
-		case arg == "--set" || arg == "-s" || arg == "--base" || arg == "-b":
+		case arg == "--profile" || arg == "-p" || arg == "--base" || arg == "-b":
 			if i+1 >= len(args) {
 				return nil, opts, usagef("option %s needs a value", arg)
 			}
@@ -238,7 +240,7 @@ func extractGlobal(args []string) ([]string, globalOptions, error) {
 			name, value = arg, args[i]
 		default:
 			found := false
-			for _, prefix := range []string{"--set=", "-s=", "--base=", "-b="} {
+			for _, prefix := range []string{"--profile=", "-p=", "--base=", "-b="} {
 				if v, ok := strings.CutPrefix(arg, prefix); ok {
 					name, value, found = strings.TrimSuffix(prefix, "="), v, true
 					break
@@ -250,11 +252,11 @@ func extractGlobal(args []string) ([]string, globalOptions, error) {
 			}
 		}
 		switch name {
-		case "--set", "-s":
-			if !config.ValidSetName(value) {
-				return nil, opts, invalidSetName(value)
+		case "--profile", "-p":
+			if !config.ValidProfileName(value) {
+				return nil, opts, invalidProfileName(value)
 			}
-			opts.set = value
+			opts.profile = value
 		default:
 			if value == "" {
 				return nil, opts, usagef("option %s needs a base folder", name)
@@ -404,18 +406,18 @@ func (a *App) version(folder string) gitinfo.Version {
 	return a.Git.Read(folder)
 }
 
-func invalidSetName(name string) error {
-	return usagef("invalid set name '%s': use letters, digits, '_' and '-', starting with a letter or digit ('%s' is "+
+func invalidProfileName(name string) error {
+	return usagef("invalid profile name '%s': use letters, digits, '_' and '-', starting with a letter or digit ('%s' is "+
 		"reserved)", name, config.BaseConfigName)
 }
 
-// cmd returns an aiplam command line to suggest to the user, with the --set option when the command acts on a set
-// that is not the enabled one.
+// cmd returns an aiplam command line to suggest to the user, with the --profile option when the command acts on a
+// profile that is not the enabled one.
 func (a *App) cmd(command string) string {
-	if a.hintSet == "" {
+	if a.hintProfile == "" {
 		return a.hint(command)
 	}
-	return a.hint(command) + " --set " + a.hintSet
+	return a.hint(command) + " --profile " + a.hintProfile
 }
 
 // hint returns an aiplam command line to suggest to the user, with the option that selects the base folder when one
@@ -424,10 +426,10 @@ func (a *App) hint(command string) string {
 	return "aiplam " + command + a.baseOption()
 }
 
-// noSetOption fails when --set was given to a command that does not take it.
-func (a *App) noSetOption(command string) error {
-	if a.Set != "" {
-		return usagef("'aiplam %s' does not take --set", command)
+// noProfileOption fails when --profile was given to a command that does not take it.
+func (a *App) noProfileOption(command string) error {
+	if a.Profile != "" {
+		return usagef("'aiplam %s' does not take --profile", command)
 	}
 	return nil
 }
@@ -467,45 +469,45 @@ func (a *App) notInitialized() error {
 		"'aiplam init <basefolder>' (or 'aiplam init --global', for the home folder) first")
 }
 
-// setState is a loaded set.
-type setState struct {
+// profileState is a loaded profile.
+type profileState struct {
 	name    string
-	cfg     *config.Set
+	prof    *config.Profile
 	enabled bool             // whether it is enabled (linked from the agents configuration folders)
 	entries []playbook.Entry // its playbooks
 }
 
-// state is what commands that act on sets work with.
+// state is what commands that act on profiles work with.
 type state struct {
 	conf             *config.BaseConfig
 	agentsConfigDirs []string
-	sets             []*setState // the sets acted on: the one given with --set, or the enabled ones
-	enabled          []*setState // every enabled set
+	profiles         []*profileState // the profiles acted on: the one given with --profile, or the enabled ones
+	enabled          []*profileState // every enabled profile
 }
 
-// others returns the entries of the enabled sets other than set, one slice per set.
-func (st *state) others(set string) [][]playbook.Entry {
+// others returns the entries of the enabled profiles other than profile, one slice per profile.
+func (st *state) others(profile string) [][]playbook.Entry {
 	var others [][]playbook.Entry
 	for _, s := range st.enabled {
-		if s.name != set {
+		if s.name != profile {
 			others = append(others, s.entries)
 		}
 	}
 	return others
 }
 
-// entries returns the playbooks of the sets acted on.
+// entries returns the playbooks of the profiles acted on.
 func (st *state) entries() []playbook.Entry {
 	var all []playbook.Entry
-	for _, s := range st.sets {
+	for _, s := range st.profiles {
 		all = append(all, s.entries...)
 	}
 	return all
 }
 
-// set returns the loaded set named name.
-func (st *state) set(name string) *setState {
-	for _, s := range st.sets {
+// profile returns the loaded profile named name.
+func (st *state) profile(name string) *profileState {
+	for _, s := range st.profiles {
 		if s.name == name {
 			return s
 		}
@@ -513,13 +515,13 @@ func (st *state) set(name string) *setState {
 	return nil
 }
 
-// file returns the path of the set's file, for display.
-func (a *App) setFile(set string) string {
-	return a.pretty(config.SetFile(a.Base, set))
+// file returns the path of the profile's file, for display.
+func (a *App) profileFile(profile string) string {
+	return a.pretty(config.ProfileFile(a.Base, profile))
 }
 
-// load loads the base folder's configuration, every enabled set, and the set given with --set (which must exist).
-// It fails when any of them is missing or not valid.
+// load loads the base folder's configuration, every enabled profile, and the profile given with --profile (which must
+// exist). It fails when any of them is missing or not valid.
 func (a *App) load() (*state, error) {
 	conf, err := a.loadBaseConfig()
 	if err != nil {
@@ -527,110 +529,113 @@ func (a *App) load() (*state, error) {
 	}
 	st := &state{conf: conf, agentsConfigDirs: conf.AgentsConfigDirs(a.Base)}
 	for _, name := range conf.Enabled {
-		if !config.SetExists(a.Base, name) {
-			return nil, fmt.Errorf("the enabled set '%s' does not exist (%s is missing): disable it with '%s', or "+
-				"create it again with '%s'", name, a.setFile(name), a.hint("set disable "+name), a.hint("set add "+name))
+		if !config.ProfileExists(a.Base, name) {
+			return nil, fmt.Errorf("the enabled profile '%s' does not exist (%s is missing): disable it with '%s', or "+
+				"create it again with '%s'", name, a.profileFile(name), a.hint("profile disable "+name),
+				a.hint("profile add "+name))
 		}
-		s, err := a.loadSetState(name, true)
+		s, err := a.loadProfileState(name, true)
 		if err != nil {
 			return nil, err
 		}
 		st.enabled = append(st.enabled, s)
 	}
-	if a.Set == "" {
-		st.sets = st.enabled
+	if a.Profile == "" {
+		st.profiles = st.enabled
 		return st, nil
 	}
-	if !config.SetExists(a.Base, a.Set) {
-		return nil, fmt.Errorf("set '%s' does not exist; create it with '%s' ('%s' lists the sets)", a.Set,
-			a.hint("set add "+a.Set), a.hint("set list"))
+	if !config.ProfileExists(a.Base, a.Profile) {
+		return nil, fmt.Errorf("profile '%s' does not exist; create it with '%s' ('%s' lists the profiles)", a.Profile,
+			a.hint("profile add "+a.Profile), a.hint("profile list"))
 	}
 	for _, s := range st.enabled {
-		if config.SameSet(a.Base, s.name, a.Set) {
-			st.sets = []*setState{s}
+		if config.SameProfile(a.Base, s.name, a.Profile) {
+			st.profiles = []*profileState{s}
 			return st, nil
 		}
 	}
-	s, err := a.loadSetState(a.Set, false)
+	s, err := a.loadProfileState(a.Profile, false)
 	if err != nil {
 		return nil, err
 	}
-	st.sets = []*setState{s}
+	st.profiles = []*profileState{s}
 	return st, nil
 }
 
-func (a *App) loadSetState(name string, enabled bool) (*setState, error) {
-	cfg, err := a.loadSet(name)
+func (a *App) loadProfileState(name string, enabled bool) (*profileState, error) {
+	prof, err := a.loadProfile(name)
 	if err != nil {
 		return nil, err
 	}
-	return &setState{name: name, cfg: cfg, enabled: enabled,
-		entries: playbook.Entries(name, cfg.Playbooks, a.Base)}, nil
+	return &profileState{name: name, prof: prof, enabled: enabled,
+		entries: playbook.Entries(name, prof.Playbooks, a.Base)}, nil
 }
 
-// useSet makes the commands suggested from now on name set with --set, unless it is the only enabled set.
-func (a *App) useSet(st *state, s *setState) {
-	a.hintSet = ""
+// useProfile makes the commands suggested from now on name profile with --profile, unless it is the only enabled
+// profile.
+func (a *App) useProfile(st *state, s *profileState) {
+	a.hintProfile = ""
 	if !s.enabled || len(st.enabled) > 1 {
-		a.hintSet = s.name
+		a.hintProfile = s.name
 	}
 }
 
-// loadSet loads a set and fails when it is missing or not valid.
-func (a *App) loadSet(set string) (*config.Set, error) {
-	cfg, err := config.LoadSet(a.Base, set)
-	if errors.Is(err, config.ErrNoSet) {
-		return nil, fmt.Errorf("set '%s' does not exist ('%s' lists the sets)", set, a.hint("set list"))
+// loadProfile loads a profile and fails when it is missing or not valid.
+func (a *App) loadProfile(profile string) (*config.Profile, error) {
+	prof, err := config.LoadProfile(a.Base, profile)
+	if errors.Is(err, config.ErrNoProfile) {
+		return nil, fmt.Errorf("profile '%s' does not exist ('%s' lists the profiles)", profile, a.hint("profile list"))
 	}
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w; fix it by hand", a.setFile(set), err)
+		return nil, fmt.Errorf("%s: %w; fix it by hand", a.profileFile(profile), err)
 	}
-	if errs := cfg.Validate(a.Base); len(errs) > 0 {
+	if errs := prof.Validate(a.Base); len(errs) > 0 {
 		for _, e := range errs {
-			a.errorf("%s: %s", a.setFile(set), e)
+			a.errorf("%s: %s", a.profileFile(profile), e)
 		}
-		a.errorf("fix %s by hand; '%s' lists its problems.", a.setFile(set), a.hint("check --set "+set))
+		a.errorf("fix %s by hand; '%s' lists its problems.", a.profileFile(profile), a.hint("check --profile "+profile))
 		return nil, errSilent
 	}
-	return cfg, nil
+	return prof, nil
 }
 
-// notEnabledNote explains that a set's playbooks are not linked.
-func (a *App) notEnabledNote(set string) string {
-	return fmt.Sprintf("set '%s' is not enabled (its playbooks are linked from the agents configuration folders "+
-		"when it is enabled with '%s')", set, a.hint("set enable "+set))
+// notEnabledNote explains that a profile's playbooks are not linked.
+func (a *App) notEnabledNote(profile string) string {
+	return fmt.Sprintf("profile '%s' is not enabled (its playbooks are linked from the agents configuration folders "+
+		"when it is enabled with '%s')", profile, a.hint("profile enable "+profile))
 }
 
-// setNames returns the names of sets, separated by commas.
-func setNames(sets []*setState) string {
+// profileNames returns the names of profiles, separated by commas.
+func profileNames(profiles []*profileState) string {
 	var names []string
-	for _, s := range sets {
+	for _, s := range profiles {
 		names = append(names, s.name)
 	}
 	return strings.Join(names, ", ")
 }
 
-// where describes the sets acted on, for messages: "set 'x'", "the enabled sets (x, y)" or "no enabled set".
+// where describes the profiles acted on, for messages: "profile 'x'", "the enabled profiles (x, y)" or "no enabled
+// profile".
 func (st *state) where() string {
 	switch {
-	case len(st.sets) == 1:
-		return fmt.Sprintf("set '%s'", st.sets[0].name)
-	case len(st.sets) == 0:
-		return "no enabled set"
+	case len(st.profiles) == 1:
+		return fmt.Sprintf("profile '%s'", st.profiles[0].name)
+	case len(st.profiles) == 0:
+		return "no enabled profile"
 	}
-	return "the enabled sets (" + setNames(st.sets) + ")"
+	return "the enabled profiles (" + profileNames(st.profiles) + ")"
 }
 
-// selectEntry finds the registered playbook that args designate among those of the sets acted on:
+// selectEntry finds the registered playbook that args designate among those of the profiles acted on:
 //   - no argument: the playbook registered for the current folder (it must be the only one there);
 //   - one argument: an id, else a name, else a folder, each of which must designate a single playbook;
 //   - two arguments: a name and a folder, which must match a single registered playbook.
 func (a *App) selectEntry(st *state, args []string) (playbook.Entry, error) {
 	entries := st.entries()
-	several := len(st.sets) > 1
+	several := len(st.profiles) > 1
 	label := func(e playbook.Entry) string {
 		if several {
-			return e.ID + " of set " + e.Set
+			return e.ID + " of profile " + e.Profile
 		}
 		return e.ID
 	}
@@ -650,11 +655,11 @@ func (a *App) selectEntry(st *state, args []string) (playbook.Entry, error) {
 		}
 		return out
 	}
-	// ambiguous builds the error for several matches, suggesting --set when they belong to different sets.
+	// ambiguous builds the error for several matches, suggesting --profile when they belong to different profiles.
 	ambiguous := func(what string, matches []playbook.Entry, give string) error {
 		for _, m := range matches[1:] {
-			if m.Set != matches[0].Set {
-				return fmt.Errorf("several playbooks match %s (%s); choose the set with --set", what, list(matches))
+			if m.Profile != matches[0].Profile {
+				return fmt.Errorf("several playbooks match %s (%s); choose the profile with --profile", what, list(matches))
 			}
 		}
 		return fmt.Errorf("several playbooks match %s (%s); %s", what, list(matches), give)

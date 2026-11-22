@@ -115,14 +115,14 @@ func (e *env) assertMissing(path string) {
 	}
 }
 
-// config returns the first enabled set.
-func (e *env) config() *config.Set {
+// config returns the first enabled profile.
+func (e *env) config() *config.Profile {
 	e.t.Helper()
-	cfg, err := config.LoadSet(e.home, e.baseConfig().Enabled[0])
+	prof, err := config.LoadProfile(e.home, e.baseConfig().Enabled[0])
 	if err != nil {
 		e.t.Fatal(err)
 	}
-	return cfg
+	return prof
 }
 
 func (e *env) baseConfig() *config.BaseConfig {
@@ -134,10 +134,10 @@ func (e *env) baseConfig() *config.BaseConfig {
 	return conf
 }
 
-// writeSet replaces the content of a set's file.
-func (e *env) writeSet(set, content string) {
+// writeProfile replaces the content of a profile's file.
+func (e *env) writeProfile(profile, content string) {
 	e.t.Helper()
-	if err := os.WriteFile(config.SetFile(e.home, set), []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(config.ProfileFile(e.home, profile), []byte(content), 0o644); err != nil {
 		e.t.Fatal(err)
 	}
 }
@@ -175,18 +175,18 @@ func TestInit(t *testing.T) {
 	}
 
 	e2 := newEnv(t)
-	e2.mustRun(ExitOK, "init", "-g", "--type", "agents,claude", "-s", "work")
+	e2.mustRun(ExitOK, "init", "-g", "--type", "agents,claude", "-p", "work")
 	if conf := e2.baseConfig(); strings.Join(conf.Types, ",") != "agents,claude" ||
 		strings.Join(conf.Enabled, ",") != "work" {
 		t.Fatalf("base config = %+v", conf)
 	}
-	if config.SetExists(e2.home, "default") {
-		t.Fatal("the default set should not be created")
+	if config.ProfileExists(e2.home, "default") {
+		t.Fatal("the default profile should not be created")
 	}
 	if !fsutil.IsDir(filepath.Join(e2.home, ".claude")) {
 		t.Fatal("~/.claude not created")
 	}
-	e2.mustRun(ExitUsage, "init", "-g", "-t", "agents", "-s", config.BaseConfigName)
+	e2.mustRun(ExitUsage, "init", "-g", "-t", "agents", "-p", config.BaseConfigName)
 }
 
 func TestAddLinksPrefixedSkillsOnly(t *testing.T) {
@@ -206,10 +206,10 @@ func TestAddLinksPrefixedSkillsOnly(t *testing.T) {
 		e.assertMissing(filepath.Join(dir, "other-skill"))
 		e.assertMissing(filepath.Join(dir, "arxila-noskill"))
 	}
-	cfg := e.config()
-	if len(cfg.Playbooks) != 1 || cfg.Playbooks[0].Name != "arxila" || cfg.Playbooks[0].Dir(e.home) != pb ||
-		cfg.Playbooks[0].Artifacts.Skills.Path != "skills" {
-		t.Fatalf("unexpected config: %+v", cfg.Playbooks)
+	prof := e.config()
+	if len(prof.Playbooks) != 1 || prof.Playbooks[0].Name != "arxila" || prof.Playbooks[0].Dir(e.home) != pb ||
+		prof.Playbooks[0].Artifacts.Skills.Path != "skills" {
+		t.Fatalf("unexpected config: %+v", prof.Playbooks)
 	}
 
 	_, errOut := e.mustRun(ExitFailure, "add", "arxila", pb)
@@ -374,7 +374,7 @@ func TestLongestPrefixWins(t *testing.T) {
 		t.Fatal(err)
 	}
 	names := map[string][]string{}
-	for _, p := range list.Sets[0].Playbooks {
+	for _, p := range list.Profiles[0].Playbooks {
 		for _, s := range p.Artifacts.Skills.Items {
 			names[p.ID] = append(names[p.ID], s.Name)
 		}
@@ -417,7 +417,7 @@ func TestRemoveKeepsRealFolders(t *testing.T) {
 		t.Fatal("a real folder was removed")
 	}
 	_, errOut := e.mustRun(ExitFailure, "remove", "x")
-	if !strings.Contains(errOut, "no playbook of set 'default' is registered") {
+	if !strings.Contains(errOut, "no playbook of profile 'default' is registered") {
 		t.Fatalf("unexpected message: %s", errOut)
 	}
 }
@@ -465,15 +465,15 @@ func TestCheckInvalidConfig(t *testing.T) {
 		"playbooks:\n  - name: 'x@y'\n    folder: relative\n    artifacts:\n      skills:\n        path: skills\n",
 		"playbooks: [\n",
 	} {
-		e.writeSet("default", content)
+		e.writeProfile("default", content)
 		e.mustRun(ExitFailure, "check")
 		_, errOut := e.mustRun(ExitFailure, "list")
 		if !strings.Contains(errOut, "default.yaml") {
-			t.Fatalf("list should point to the set's file for %q: %s", content, errOut)
+			t.Fatalf("list should point to the profile's file for %q: %s", content, errOut)
 		}
 	}
-	e.writeSet("default", "")
-	e.mustRun(ExitOK, "check") // an empty file is an empty set
+	e.writeProfile("default", "")
+	e.mustRun(ExitOK, "check") // an empty file is an empty profile
 
 	file := config.BaseConfigFile(e.home)
 	for _, content := range []string{
@@ -528,10 +528,10 @@ func TestListJSONAndVersions(t *testing.T) {
 		return list
 	}
 	list := readList()
-	if len(list.Sets) != 1 || len(list.Sets[0].Playbooks) != 1 || !list.Sets[0].Enabled {
+	if len(list.Profiles) != 1 || len(list.Profiles[0].Playbooks) != 1 || !list.Profiles[0].Enabled {
 		t.Fatalf("unexpected list: %+v", list)
 	}
-	p := list.Sets[0].Playbooks[0]
+	p := list.Profiles[0].Playbooks[0]
 	if p.ID != "x" || p.Name != "x" || p.Folder != pb || p.Label != "branch: main" || !p.Version.Known ||
 		len(p.Artifacts.Skills.Items) != 1 || !p.Artifacts.Skills.Items[0].Linked {
 		t.Fatalf("unexpected playbook: %+v", p)
@@ -540,7 +540,7 @@ func TestListJSONAndVersions(t *testing.T) {
 	git("tag", "v1.0.0")
 	git("tag", "x-1.0.0")
 	git("checkout", "-q", "--detach", "v1.0.0")
-	if got := readList().Sets[0].Playbooks[0].Label; got != "tags: v1.0.0, x-1.0.0" {
+	if got := readList().Profiles[0].Playbooks[0].Label; got != "tags: v1.0.0, x-1.0.0" {
 		t.Fatalf("label = %q", got)
 	}
 	out, _ := e.mustRun(ExitOK, "list")
@@ -575,7 +575,7 @@ func TestUsageErrors(t *testing.T) {
 	}
 }
 
-func TestSets(t *testing.T) {
+func TestProfiles(t *testing.T) {
 	e := newEnv(t)
 	e.mustRun(ExitOK, "init", "-g", "-t", "agents")
 	pbA := e.playbook("pa", "x-a")
@@ -584,122 +584,124 @@ func TestSets(t *testing.T) {
 	e.mustRun(ExitOK, "add", "x", pbA)
 	e.assertLink(filepath.Join(e.agentsSkills(), "x-a"), filepath.Join(pbA, "skills", "x-a"))
 
-	// --set needs an existing set.
-	_, errOut := e.mustRun(ExitFailure, "list", "--set", "work")
-	if !strings.Contains(errOut, "set 'work' does not exist") || !strings.Contains(errOut, "aiplam set add work") {
+	// --profile needs an existing profile.
+	_, errOut := e.mustRun(ExitFailure, "list", "--profile", "work")
+	if !strings.Contains(errOut, "profile 'work' does not exist") || !strings.Contains(errOut, "aiplam profile add work") {
 		t.Fatalf("unexpected message: %s", errOut)
 	}
-	e.mustRun(ExitOK, "set", "add", "work")
-	e.mustRun(ExitFailure, "set", "add", "work")
-	e.mustRun(ExitUsage, "set", "add", config.BaseConfigName)
+	e.mustRun(ExitOK, "profile", "add", "work")
+	e.mustRun(ExitFailure, "profile", "add", "work")
+	e.mustRun(ExitUsage, "profile", "add", config.BaseConfigName)
 
-	// A set that is not enabled is only recorded: nothing is linked or unlinked.
-	out, _ := e.mustRun(ExitOK, "add", "y", pbB, "-s", "work")
+	// A profile that is not enabled is only recorded: nothing is linked or unlinked.
+	out, _ := e.mustRun(ExitOK, "add", "y", pbB, "-p", "work")
 	if !strings.Contains(out, "not enabled") {
 		t.Fatalf("unexpected output: %s", out)
 	}
 	e.assertMissing(filepath.Join(e.agentsSkills(), "y-b"))
-	out, _ = e.mustRun(ExitOK, "update", "--all", "-s", "work")
+	out, _ = e.mustRun(ExitOK, "update", "--all", "-p", "work")
 	if !strings.Contains(out, "Nothing to update") {
 		t.Fatalf("unexpected output: %s", out)
 	}
-	e.mustRun(ExitOK, "check", "-s", "work")
+	e.mustRun(ExitOK, "check", "-p", "work")
 	var list listOutput
-	out, _ = e.mustRun(ExitOK, "list", "--json", "--set=work")
-	if err := json.Unmarshal([]byte(out), &list); err != nil || len(list.Sets) != 1 || list.Sets[0].Name != "work" ||
-		list.Sets[0].Enabled || list.Sets[0].Playbooks[0].Artifacts.Skills.Items[0].Linked {
+	out, _ = e.mustRun(ExitOK, "list", "--json", "--profile=work")
+	if err := json.Unmarshal([]byte(out), &list); err != nil || len(list.Profiles) != 1 ||
+		list.Profiles[0].Name != "work" ||
+		list.Profiles[0].Enabled || list.Profiles[0].Playbooks[0].Artifacts.Skills.Items[0].Linked {
 		t.Fatalf("unexpected list: %v %s", err, out)
 	}
 
-	// Enabling a set adds it to the enabled ones.
-	e.mustRun(ExitOK, "set", "enable", "work")
+	// Enabling a profile adds it to the enabled ones.
+	e.mustRun(ExitOK, "profile", "enable", "work")
 	e.assertLink(filepath.Join(e.agentsSkills(), "x-a"), filepath.Join(pbA, "skills", "x-a"))
 	e.assertLink(filepath.Join(e.agentsSkills(), "y-b"), filepath.Join(pbB, "skills", "y-b"))
 	if got := strings.Join(e.baseConfig().Enabled, ","); got != "default,work" {
 		t.Fatalf("enabled = %s", got)
 	}
-	out, _ = e.mustRun(ExitOK, "set", "list")
+	out, _ = e.mustRun(ExitOK, "profile", "list")
 	if !strings.Contains(out, "* default") || !strings.Contains(out, "* work") {
-		t.Fatalf("unexpected sets: %s", out)
+		t.Fatalf("unexpected profiles: %s", out)
 	}
-	out, _ = e.mustRun(ExitOK, "set", "enable", "work")
+	out, _ = e.mustRun(ExitOK, "profile", "enable", "work")
 	if !strings.Contains(out, "already enabled") {
 		t.Fatalf("unexpected output: %s", out)
 	}
 
-	// With several sets enabled: list and check cover them all, add needs --set, and selectors look in all of them.
+	// With several profiles enabled: list and check cover them all, add needs --profile, and selectors look in all of
+	// them.
 	out, _ = e.mustRun(ExitOK, "list")
-	if !strings.Contains(out, "Set default") || !strings.Contains(out, "Set work") {
+	if !strings.Contains(out, "Profile default") || !strings.Contains(out, "Profile work") {
 		t.Fatalf("unexpected list: %s", out)
 	}
 	e.mustRun(ExitOK, "check")
 	_, errOut = e.mustRun(ExitFailure, "add", "z", pbC)
-	if !strings.Contains(errOut, "--set") {
+	if !strings.Contains(errOut, "--profile") {
 		t.Fatalf("unexpected message: %s", errOut)
 	}
 	e.mustRun(ExitOK, "update", "y")
 	e.mustRun(ExitOK, "update", "--all")
 
-	// Sets enabled together cannot provide the same skill.
-	_, errOut = e.mustRun(ExitFailure, "add", "y", pbB, "-s", "default")
-	if !strings.Contains(errOut, "also provided by playbook y of set work") {
+	// Profiles enabled together cannot provide the same skill.
+	_, errOut = e.mustRun(ExitFailure, "add", "y", pbB, "-p", "default")
+	if !strings.Contains(errOut, "also provided by playbook y of profile work") {
 		t.Fatalf("unexpected message: %s", errOut)
 	}
 
-	// Disabling a set unlinks its playbooks only.
-	e.mustRun(ExitOK, "set", "disable", "default")
+	// Disabling a profile unlinks its playbooks only.
+	e.mustRun(ExitOK, "profile", "disable", "default")
 	e.assertMissing(filepath.Join(e.agentsSkills(), "x-a"))
 	e.assertLink(filepath.Join(e.agentsSkills(), "y-b"), filepath.Join(pbB, "skills", "y-b"))
-	e.mustRun(ExitFailure, "set", "disable", "default") // not enabled
-	e.mustRun(ExitOK, "remove", "y")                    // the only enabled set
+	e.mustRun(ExitFailure, "profile", "disable", "default") // not enabled
+	e.mustRun(ExitOK, "remove", "y")                        // the only enabled profile
 	e.assertMissing(filepath.Join(e.agentsSkills(), "y-b"))
 	e.mustRun(ExitOK, "add", "y", pbB)
 
-	// The enabled sets cannot be removed; others can, unlinking nothing.
-	_, errOut = e.mustRun(ExitFailure, "set", "remove", "work")
-	if !strings.Contains(errOut, "aiplam set disable work") {
+	// The enabled profiles cannot be removed; others can, unlinking nothing.
+	_, errOut = e.mustRun(ExitFailure, "profile", "remove", "work")
+	if !strings.Contains(errOut, "aiplam profile disable work") {
 		t.Fatalf("unexpected message: %s", errOut)
 	}
-	e.mustRun(ExitOK, "set", "remove", "default")
-	e.mustRun(ExitFailure, "list", "-s", "default")
-	e.mustRun(ExitFailure, "set", "enable", "default")
+	e.mustRun(ExitOK, "profile", "remove", "default")
+	e.mustRun(ExitFailure, "list", "-p", "default")
+	e.mustRun(ExitFailure, "profile", "enable", "default")
 
-	// No set enabled.
-	e.mustRun(ExitOK, "set", "disable", "work")
+	// No profile enabled.
+	e.mustRun(ExitOK, "profile", "disable", "work")
 	e.assertMissing(filepath.Join(e.agentsSkills(), "y-b"))
 	out, _ = e.mustRun(ExitOK, "list")
-	if !strings.Contains(out, "No set is enabled") {
+	if !strings.Contains(out, "No profile is enabled") {
 		t.Fatalf("unexpected list: %s", out)
 	}
 	e.mustRun(ExitOK, "check")
 	_, errOut = e.mustRun(ExitFailure, "add", "z", pbC)
-	if !strings.Contains(errOut, "no set is enabled") {
+	if !strings.Contains(errOut, "no profile is enabled") {
 		t.Fatalf("unexpected message: %s", errOut)
 	}
 
-	e.mustRun(ExitUsage, "set")
-	e.mustRun(ExitUsage, "set", "frob")
-	e.mustRun(ExitUsage, "set", "enable")
-	e.mustRun(ExitUsage, "set", "enable", "a,,b")
-	e.mustRun(ExitUsage, "set", "list", "-s", "work")
-	e.mustRun(ExitUsage, "list", "--set")
-	e.mustRun(ExitUsage, "list", "--set", "../x")
-	e.mustRun(ExitUsage, "list", "-s", "a.b")
+	e.mustRun(ExitUsage, "profile")
+	e.mustRun(ExitUsage, "profile", "frob")
+	e.mustRun(ExitUsage, "profile", "enable")
+	e.mustRun(ExitUsage, "profile", "enable", "a,,b")
+	e.mustRun(ExitUsage, "profile", "list", "-p", "work")
+	e.mustRun(ExitUsage, "list", "--profile")
+	e.mustRun(ExitUsage, "list", "--profile", "../x")
+	e.mustRun(ExitUsage, "list", "-p", "a.b")
 }
 
-func TestSetEnableCollisions(t *testing.T) {
+func TestProfileEnableCollisions(t *testing.T) {
 	e := newEnv(t)
 	e.mustRun(ExitOK, "init", "-g", "-t", "agents")
 	pb := e.playbook("p", "x-a", "x-b")
 	other := e.playbook("q", "y-a")
 	e.mustRun(ExitOK, "add", "x", pb)
-	e.mustRun(ExitOK, "set", "add", "work")
-	e.mustRun(ExitOK, "add", "x", pb, "-s", "work")
-	e.mustRun(ExitOK, "set", "add", "more")
-	e.mustRun(ExitOK, "add", "y", other, "-s", "more")
+	e.mustRun(ExitOK, "profile", "add", "work")
+	e.mustRun(ExitOK, "add", "x", pb, "-p", "work")
+	e.mustRun(ExitOK, "profile", "add", "more")
+	e.mustRun(ExitOK, "add", "y", other, "-p", "more")
 
-	// Enabling a set whose links already exist (from an enabled set) fails, changing nothing.
-	_, errOut := e.mustRun(ExitFailure, "set", "enable", "work,more")
+	// Enabling a profile whose links already exist (from an enabled profile) fails, changing nothing.
+	_, errOut := e.mustRun(ExitFailure, "profile", "enable", "work,more")
 	if !strings.Contains(errOut, "collide") {
 		t.Fatalf("unexpected message: %s", errOut)
 	}
@@ -709,11 +711,11 @@ func TestSetEnableCollisions(t *testing.T) {
 	}
 
 	// Also when the link exists for any other reason, even if it is right.
-	e.mustRun(ExitOK, "set", "disable", "default")
+	e.mustRun(ExitOK, "profile", "disable", "default")
 	if err := fsutil.CreateLink(filepath.Join(e.agentsSkills(), "x-a"), filepath.Join(pb, "skills", "x-a")); err != nil {
 		t.Fatal(err)
 	}
-	_, errOut = e.mustRun(ExitFailure, "set", "enable", "work")
+	_, errOut = e.mustRun(ExitFailure, "profile", "enable", "work")
 	if !strings.Contains(errOut, "already exists") {
 		t.Fatalf("unexpected message: %s", errOut)
 	}
@@ -721,47 +723,47 @@ func TestSetEnableCollisions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Two sets being enabled together cannot collide either.
-	_, errOut = e.mustRun(ExitFailure, "set", "enable", "default", "work")
+	// Two profiles being enabled together cannot collide either.
+	_, errOut = e.mustRun(ExitFailure, "profile", "enable", "default", "work")
 	if !strings.Contains(errOut, "collide") {
 		t.Fatalf("unexpected message: %s", errOut)
 	}
-	e.mustRun(ExitOK, "set", "enable", "work,more")
+	e.mustRun(ExitOK, "profile", "enable", "work,more")
 	e.assertLink(filepath.Join(e.agentsSkills(), "y-a"), filepath.Join(other, "skills", "y-a"))
 	e.assertLink(filepath.Join(e.agentsSkills(), "x-b"), filepath.Join(pb, "skills", "x-b"))
 }
 
-func TestSetSwitch(t *testing.T) {
+func TestProfileSwitch(t *testing.T) {
 	e := newEnv(t)
 	e.mustRun(ExitOK, "init", "-g", "-t", "agents")
 	pb := e.playbook("p", "x-a", "x-b")
 	other := e.playbook("q", "y-a")
 	e.mustRun(ExitOK, "add", "x", pb)
-	e.mustRun(ExitOK, "set", "add", "work")
-	e.mustRun(ExitOK, "add", "x", pb, "-s", "work")
-	e.mustRun(ExitOK, "set", "add", "more")
-	e.mustRun(ExitOK, "add", "y", other, "-s", "more")
+	e.mustRun(ExitOK, "profile", "add", "work")
+	e.mustRun(ExitOK, "add", "x", pb, "-p", "work")
+	e.mustRun(ExitOK, "profile", "add", "more")
+	e.mustRun(ExitOK, "add", "y", other, "-p", "more")
 
-	// Switching replaces the enabled sets; links wanted before and after are left alone.
-	out, _ := e.mustRun(ExitOK, "set", "switch", "work,more")
+	// Switching replaces the enabled profiles; links wanted before and after are left alone.
+	out, _ := e.mustRun(ExitOK, "profile", "switch", "work,more")
 	if strings.Contains(out, "x-a") {
-		t.Fatalf("links wanted by both sets should be left alone: %s", out)
+		t.Fatalf("links wanted by both profiles should be left alone: %s", out)
 	}
 	e.assertLink(filepath.Join(e.agentsSkills(), "x-a"), filepath.Join(pb, "skills", "x-a"))
 	e.assertLink(filepath.Join(e.agentsSkills(), "y-a"), filepath.Join(other, "skills", "y-a"))
 	if got := strings.Join(e.baseConfig().Enabled, ","); got != "work,more" {
 		t.Fatalf("enabled = %s", got)
 	}
-	e.mustRun(ExitOK, "set", "switch", "more")
+	e.mustRun(ExitOK, "profile", "switch", "more")
 	e.assertMissing(filepath.Join(e.agentsSkills(), "x-a"))
 	e.assertLink(filepath.Join(e.agentsSkills(), "y-a"), filepath.Join(other, "skills", "y-a"))
-	out, _ = e.mustRun(ExitOK, "set", "switch", "more")
+	out, _ = e.mustRun(ExitOK, "profile", "switch", "more")
 	if !strings.Contains(out, "unchanged") {
 		t.Fatalf("unexpected output: %s", out)
 	}
-	e.mustRun(ExitFailure, "set", "switch", "default,work") // they collide
+	e.mustRun(ExitFailure, "profile", "switch", "default,work") // they collide
 	e.assertLink(filepath.Join(e.agentsSkills(), "y-a"), filepath.Join(other, "skills", "y-a"))
-	e.mustRun(ExitFailure, "set", "switch", "nope")
+	e.mustRun(ExitFailure, "profile", "switch", "nope")
 }
 
 func TestType(t *testing.T) {
@@ -774,7 +776,7 @@ func TestType(t *testing.T) {
 		t.Fatalf("unexpected types: %q", out)
 	}
 
-	// Add a type: the enabled set is linked into its folder.
+	// Add a type: the enabled profile is linked into its folder.
 	claude := filepath.Join(e.home, ".claude", "skills")
 	e.mustRun(ExitOK, "type", "agents", "claude")
 	e.assertLink(filepath.Join(claude, "x-a"), filepath.Join(pb, "skills", "x-a"))
@@ -804,7 +806,7 @@ func TestType(t *testing.T) {
 		t.Fatalf("unexpected message: %s", errOut)
 	}
 	e.assertLink(filepath.Join(claude, "x-a"), filepath.Join(pb, "skills", "x-a"))
-	e.mustRun(ExitUsage, "type", "agents", "-s", "default")
+	e.mustRun(ExitUsage, "type", "agents", "-p", "default")
 	e.mustRun(ExitUsage, "type", "other")
 	e.mustRun(ExitUsage, "type", "agents,agents") // listed twice
 	e.mustRun(ExitUsage, "init", "-g", "-t", "agents", "-t", "agents")
@@ -813,22 +815,22 @@ func TestType(t *testing.T) {
 func TestShortOptions(t *testing.T) {
 	e := newEnv(t)
 	claude := filepath.Join(e.home, ".claude")
-	e.mustRun(ExitOK, "init", "-g", "-t", "agents", "-t=claude", "-s", "main")
+	e.mustRun(ExitOK, "init", "-g", "-t", "agents", "-t=claude", "-p", "main")
 	if conf := e.baseConfig(); strings.Join(conf.Types, ",") != "agents,claude" ||
 		strings.Join(conf.Enabled, ",") != "main" {
 		t.Fatalf("base config = %+v", conf)
 	}
-	e.mustRun(ExitOK, "set", "add", "work")
+	e.mustRun(ExitOK, "profile", "add", "work")
 
 	pb := filepath.Join(e.root, "flat")
 	e.skill(pb, "x-a")
 	e.mustRun(ExitOK, "add", "x", pb, "-sp", ".")
 	e.assertLink(filepath.Join(claude, "skills", "x-a"), filepath.Join(pb, "x-a"))
-	e.mustRun(ExitOK, "add", "x", pb, "-sp=.", "-s", "work")
-	e.mustRun(ExitOK, "update", "--all", "-s", "work")
-	e.mustRun(ExitOK, "list", "-s", "work")
-	e.mustRun(ExitOK, "check", "-s", "work")
-	e.mustRun(ExitOK, "remove", "x", "-s", "work")
+	e.mustRun(ExitOK, "add", "x", pb, "-sp=.", "-p", "work")
+	e.mustRun(ExitOK, "update", "--all", "-p", "work")
+	e.mustRun(ExitOK, "list", "-p", "work")
+	e.mustRun(ExitOK, "check", "-p", "work")
+	e.mustRun(ExitOK, "remove", "x", "-p", "work")
 
 	_, errOut := e.mustRun(ExitUsage, "add", "y", pb, "-x")
 	if !strings.Contains(errOut, "unknown option: -x") {
@@ -885,9 +887,9 @@ func TestFoldersAreRelativeToBase(t *testing.T) {
 	outside := e.playbook("q", "y-a")
 	e.mustRun(ExitOK, "add", "x", inside)
 	e.mustRun(ExitOK, "add", "y", outside)
-	cfg := e.config()
-	if cfg.Playbooks[0].Folder != "playbooks/p" || cfg.Playbooks[1].Folder != "../q" {
-		t.Fatalf("folders = %q, %q", cfg.Playbooks[0].Folder, cfg.Playbooks[1].Folder)
+	prof := e.config()
+	if prof.Playbooks[0].Folder != "playbooks/p" || prof.Playbooks[1].Folder != "../q" {
+		t.Fatalf("folders = %q, %q", prof.Playbooks[0].Folder, prof.Playbooks[1].Folder)
 	}
 	// Links are relative too (junctions on Windows are always absolute).
 	link := filepath.Join(e.agentsSkills(), "x-a")
@@ -925,7 +927,7 @@ func TestArtifactsStayInsidePlaybook(t *testing.T) {
 	e.assertMissing(filepath.Join(e.agentsSkills(), "x-b"))
 
 	// A hand-edited skills path leading outside is a configuration error.
-	e.writeSet("default", "playbooks:\n  - name: x\n    folder: "+pb+"\n    artifacts:\n"+
+	e.writeProfile("default", "playbooks:\n  - name: x\n    folder: "+pb+"\n    artifacts:\n"+
 		"      skills:\n        path: ../other/skills\n")
 	_, errOut = e.mustRun(ExitFailure, "check")
 	if !strings.Contains(errOut, "inside the playbook folder") {
@@ -933,20 +935,20 @@ func TestArtifactsStayInsidePlaybook(t *testing.T) {
 	}
 }
 
-func TestSetNameCase(t *testing.T) {
+func TestProfileNameCase(t *testing.T) {
 	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "-t", "agents", "-s", "work")
-	if !config.SetExists(e.home, "Work") {
-		t.Skip("the file system distinguishes case: Work and work are different sets")
+	e.mustRun(ExitOK, "init", "-g", "-t", "agents", "-p", "work")
+	if !config.ProfileExists(e.home, "Work") {
+		t.Skip("the file system distinguishes case: Work and work are different profiles")
 	}
 	pb := e.playbook("p", "x-a")
-	out, _ := e.mustRun(ExitOK, "add", "x", pb, "-s", "Work")
+	out, _ := e.mustRun(ExitOK, "add", "x", pb, "-p", "Work")
 	if strings.Contains(out, "not enabled") {
-		t.Fatalf("Work is the enabled set work: %s", out)
+		t.Fatalf("Work is the enabled profile work: %s", out)
 	}
 	e.assertLink(filepath.Join(e.agentsSkills(), "x-a"), filepath.Join(pb, "skills", "x-a"))
-	e.mustRun(ExitOK, "check", "-s", "Work")
-	e.mustRun(ExitFailure, "set", "remove", "Work")
+	e.mustRun(ExitOK, "check", "-p", "Work")
+	e.mustRun(ExitFailure, "profile", "remove", "Work")
 }
 
 func TestFailedAddIsUndone(t *testing.T) {
@@ -975,7 +977,7 @@ func TestFailedAddIsUndone(t *testing.T) {
 	}
 }
 
-func TestMessagesUseSetAndHome(t *testing.T) {
+func TestMessagesUseProfileAndHome(t *testing.T) {
 	e := newEnv(t)
 	e.mustRun(ExitOK, "init", "-g", "-t", "agents")
 	pb := e.playbook("p", "x-a")
@@ -987,15 +989,15 @@ func TestMessagesUseSetAndHome(t *testing.T) {
 		t.Fatalf("conflict should show ~ paths: %s", errOut)
 	}
 
-	e.mustRun(ExitOK, "set", "add", "work")
-	e.mustRun(ExitOK, "add", "x", pb, "-s", "work")
-	_, errOut = e.mustRun(ExitFailure, "add", "x", pb, "-s", "work")
-	if !strings.Contains(errOut, "'aiplam update x --set work'") {
-		t.Fatalf("hint should name the set: %s", errOut)
+	e.mustRun(ExitOK, "profile", "add", "work")
+	e.mustRun(ExitOK, "add", "x", pb, "-p", "work")
+	_, errOut = e.mustRun(ExitFailure, "add", "x", pb, "-p", "work")
+	if !strings.Contains(errOut, "'aiplam update x --profile work'") {
+		t.Fatalf("hint should name the profile: %s", errOut)
 	}
-	_, errOut = e.mustRun(ExitFailure, "add", "x", pb, "-s", "default")
-	if strings.Contains(errOut, "--set") {
-		t.Fatalf("hint should not name the enabled set: %s", errOut)
+	_, errOut = e.mustRun(ExitFailure, "add", "x", pb, "-p", "default")
+	if strings.Contains(errOut, "--profile") {
+		t.Fatalf("hint should not name the enabled profile: %s", errOut)
 	}
 }
 
@@ -1034,8 +1036,8 @@ func TestBaseFolders(t *testing.T) {
 	projectSkills := filepath.Join(project, ".agents", "skills")
 	e.assertLink(filepath.Join(projectSkills, "x-a"), filepath.Join(pb, "skills", "x-a"))
 	e.assertMissing(filepath.Join(e.agentsSkills(), "x-a"))
-	if f, err := config.LoadSet(project, "default"); err != nil || f.Playbooks[0].Folder != "../p" {
-		t.Fatalf("set = %+v (%v)", f, err)
+	if f, err := config.LoadProfile(project, "default"); err != nil || f.Playbooks[0].Folder != "../p" {
+		t.Fatalf("profile = %+v (%v)", f, err)
 	}
 
 	// --global and --base choose the configuration explicitly.
@@ -1081,7 +1083,7 @@ func TestBaseFolders(t *testing.T) {
 	if strings.Count(out, "Base folder: ") != 2 {
 		t.Fatalf("unexpected list: %s", out)
 	}
-	e.mustRun(ExitUsage, "list", "--all", "-s", "default")
+	e.mustRun(ExitUsage, "list", "--all", "-p", "default")
 
 	// A nested configuration inside a git repository.
 	if err := os.Mkdir(filepath.Join(project, ".git"), 0o755); err != nil {
@@ -1127,8 +1129,8 @@ func TestBaseDiscoveryAndHints(t *testing.T) {
 	if !strings.Contains(errOut, "'aiplam type --base "+project+"'") {
 		t.Fatalf("hint should name the base folder: %s", errOut)
 	}
-	out, _ = e.mustRun(ExitOK, "set", "add", "work", "-b", project)
-	if !strings.Contains(out, "'aiplam set enable work --base "+project+"'") {
+	out, _ = e.mustRun(ExitOK, "profile", "add", "work", "-b", project)
+	if !strings.Contains(out, "'aiplam profile enable work --base "+project+"'") {
 		t.Fatalf("hint should name the base folder: %s", out)
 	}
 

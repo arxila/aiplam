@@ -43,25 +43,25 @@ the prefix of its artifacts:
 ## Usage
 
 ```bash
-aiplam init <basefolder>|--global [--type T] [--set SET]    # set up a base folder, and a first set, enabled
-aiplam add <name> <playbookfolder> [--skills-path P]        # register a playbook and link its artifacts
-aiplam update [<name|id|playbookfolder>] [<playbookfolder>] # link new artifacts, unlink deleted ones
+aiplam init <basefolder>|--global [--type T] [--profile P]       # set up a base folder, and a first profile, enabled
+aiplam add <name> <playbookfolder> [--skills-path P]             # register a playbook and link its artifacts
+aiplam update [<name|id|playbookfolder>] [<playbookfolder>]      # link new artifacts, unlink deleted ones
 aiplam update --all
-aiplam remove <name|id|playbookfolder> [<playbookfolder>]   # remove a playbook's links and unregister it
-aiplam list [--all] [--json]                                # playbooks, versions and artifacts
-aiplam check                                                # what update would change; config and broken links
-aiplam set list|add|remove [<set>]                          # manage sets of playbooks
-aiplam set enable|disable|switch <set>[,<set>...]           # choose the sets linked
-aiplam type [agents|claude...]                              # types of agents configuration folders
+aiplam remove <name|id|playbookfolder> [<playbookfolder>]        # remove a playbook's links and unregister it
+aiplam list [--all] [--json]                                     # playbooks, versions and artifacts
+aiplam check                                                     # what update would change; config and broken links
+aiplam profile list|add|remove [<profile>]                       # manage profiles (groups of playbooks)
+aiplam profile enable|disable|switch <profile>[,<profile>...]    # choose the profiles linked
+aiplam type [agents|claude...]                                   # types of agents configuration folders
 ```
 
 Every command acts on a [base folder](#base-folders)'s configuration: the nearest one from the current folder up, or
 the home folder's, unless given with `--base <basefolder>` or `--global` (the user's home folder, e.g.
-`/home/username`). Playbooks are registered in [sets](#sets), and only the playbooks of the enabled sets are linked.
-`update`, `remove`, `list` and `check` act on the enabled sets, or on the one given with `--set SET`. `add` needs
-`--set` unless exactly one set is enabled.
+`/home/username`). Playbooks are registered in [profiles](#profiles), and only the playbooks of the enabled profiles
+are linked. `update`, `remove`, `list` and `check` act on the enabled profiles, or on the one given with
+`--profile PROFILE`. `add` needs `--profile` unless exactly one profile is enabled.
 
-Options have short forms: `-b` (`--base`), `-g` (`--global`), `-s` (`--set`), `-t` (`--type`) and `-sp`
+Options have short forms: `-b` (`--base`), `-g` (`--global`), `-p` (`--profile`), `-t` (`--type`) and `-sp`
 (`--skills-path`).
 
 Without a selector, `update` acts on the playbook registered for the current folder. A selector is an id, a name
@@ -88,7 +88,7 @@ A **base folder** holds:
 
 `aiplam init ~/Workspace/thymeleaf` (or `aiplam init .` from there) sets up that base folder with `.agents`;
 `aiplam init --global` sets up the home folder. `--type agents,claude` chooses the agents configuration folders, and
-`aiplam type` changes them later: the enabled sets' playbooks are unlinked from the agents configuration folders of
+`aiplam type` changes them later: the enabled profiles' playbooks are unlinked from the agents configuration folders of
 the types removed and linked from those of the types added, all-or-nothing.
 
 Commands use the nearest base folder from the current folder up (any folder holding a `.aiplam` folder), or else
@@ -115,30 +115,31 @@ shared. On Windows, a playbook must be on the same drive as the base folder. The
 each machine (on Windows they are junctions, which git cannot store as links): when the base folder is inside a git
 repository, `init` suggests adding them to `.gitignore`.
 
-### Sets
+### Profiles
 
-A **set** is a group of registered playbooks. The **enabled** sets (any number of them) are the ones whose playbooks
-are linked from the agents configuration folders. `init` creates a first set, `default` (or the one given with
-`--set`), and enables it.
+A **profile** is a group of registered playbooks. The **enabled** profiles (any number of them) are the ones whose
+playbooks are linked from the agents configuration folders. `init` creates a first profile, `default` (or the one given
+with `--profile`), and enables it.
 
 ```bash
-aiplam set add acme                                       # create an empty set
-aiplam add acme ~/Workspace/acme/acme-ai-playbook -s acme # register in it: nothing is linked yet
-aiplam set enable acme                                    # link its playbooks too
-aiplam set disable default                                # unlink default's playbooks
-aiplam set switch default,acme                            # enable exactly these sets
-aiplam set list                                           # the sets; '*' marks the enabled ones
-aiplam set remove old                                     # delete a set that is not enabled
+aiplam profile add acme                                   # create an empty profile
+aiplam add acme ~/Workspace/acme/acme-ai-playbook -p acme # register in it: nothing is linked yet
+aiplam profile enable acme                                # link its playbooks too
+aiplam profile disable default                            # unlink default's playbooks
+aiplam profile switch default,acme                        # enable exactly these profiles
+aiplam profile list                                       # the profiles; '*' marks the enabled ones
+aiplam profile remove old                                 # delete a profile that is not enabled
 ```
 
-Sets enabled together cannot collide: `set enable` fails, changing nothing, if any link that a set needs already
-exists in an agents configuration folder, whether another enabled set made it or anything else did. `set switch`
-disables the sets that are not listed first, so their links are not in the way, and leaves alone the links that stay
-the same. Within the enabled sets, `add` and `update` also refuse an artifact that another enabled set provides.
+Profiles enabled together cannot collide: `profile enable` fails, changing nothing, if any link that a profile needs
+already exists in an agents configuration folder, whether another enabled profile made it or anything else did.
+`profile switch` disables the profiles that are not listed first, so their links are not in the way, and leaves alone
+the links that stay the same. Within the enabled profiles, `add` and `update` also refuse an artifact that another
+enabled profile provides.
 
-In a set that is not enabled, `add` and `remove` only register and unregister playbooks, and `update` has nothing to
-do. Enabled sets cannot be removed (disable them first), but any other can, including `default`. Several sets can be
-given at once, separated by commas. Set names use letters, digits, `_` and `-`; `aiplam-config` is reserved.
+In a profile that is not enabled, `add` and `remove` only register and unregister playbooks, and `update` has nothing to
+do. Enabled profiles cannot be removed (disable them first), but any other can, including `default`. Several profiles
+can be given at once, separated by commas. Profile names use letters, digits, `_` and `-`; `aiplam-config` is reserved.
 
 ### Safety
 
@@ -158,7 +159,7 @@ A configuration lives in the `.aiplam` folder of its base folder, in YAML files 
 validates:
 
 - `aiplam-config.yaml`, the base folder's configuration: the types of agents configuration folders and the enabled
-  sets. Written by `init`, `type` and `set enable`, `disable` and `switch`.
+  profiles. Written by `init`, `type` and `profile enable`, `disable` and `switch`.
 
   ```yaml
   types:
@@ -168,7 +169,7 @@ validates:
     - default
   ```
 
-- `<set>.yaml`, one per set: its playbooks. Written by `init`, `set add`, `add` and `remove`.
+- `<profile>.yaml`, one per profile: its playbooks. Written by `init`, `profile add`, `add` and `remove`.
 
   ```yaml
   playbooks:

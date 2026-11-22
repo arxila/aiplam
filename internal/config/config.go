@@ -21,9 +21,9 @@
 // agents configuration folders next to it (.agents, .claude, ...):
 //
 //   - aiplam-config.yaml, the base folder's configuration: the types of agents configuration folders where
-//     artifacts are linked from, and the enabled sets.
-//   - <set>.yaml, one file per set: the playbooks registered in the set. Only the enabled sets' playbooks are
-//     linked from the agents configuration folders.
+//     artifacts are linked from, and the enabled profiles.
+//   - <profile>.yaml, one file per profile: the playbooks registered in the profile. Only the enabled profiles'
+//     playbooks are linked from the agents configuration folders.
 package config
 
 import (
@@ -45,12 +45,12 @@ import (
 const (
 	// DirName is the name of aiplam's configuration folder in a base folder.
 	DirName = ".aiplam"
-	// BaseConfigName is the name (without extension) of the base folder's configuration file. It cannot be a set name.
+	// BaseConfigName is the name (without extension) of the base folder's configuration file. It cannot be a profile name.
 	BaseConfigName = "aiplam-config"
 	// FileExt is the extension of the configuration files.
 	FileExt = ".yaml"
-	// DefaultSet is the set that 'aiplam init' creates and enables when no set is given.
-	DefaultSet = "default"
+	// DefaultProfile is the profile that 'aiplam init' creates and enables when no profile is given.
+	DefaultProfile = "default"
 	// DefaultSkillsPath is the folder, relative to a playbook folder, where its skills live by default.
 	DefaultSkillsPath = "skills"
 )
@@ -58,8 +58,8 @@ const (
 var (
 	// ErrNotInitialized is returned by LoadBaseConfig when the base folder's configuration file does not exist.
 	ErrNotInitialized = errors.New("not initialized")
-	// ErrNoSet is returned by LoadSet when the set's file does not exist.
-	ErrNoSet = errors.New("no such set")
+	// ErrNoProfile is returned by LoadProfile when the profile's file does not exist.
+	ErrNoProfile = errors.New("no such profile")
 )
 
 // Types maps each type of agents configuration folder to its path, relative to the base folder (in slash form).
@@ -86,13 +86,13 @@ type BaseConfig struct {
 	// Types are the types of the agents configuration folders where artifacts are linked from (for example agents,
 	// for the base folder's .agents folder); skills go to their skills/ subfolder.
 	Types []string `yaml:"types"`
-	// Enabled are the sets whose playbooks are linked from the agents configuration folders (possibly none).
+	// Enabled are the profiles whose playbooks are linked from the agents configuration folders (possibly none).
 	Enabled []string `yaml:"enabled"`
 }
 
-// Set is the content of a set's file.
-type Set struct {
-	// Playbooks are the playbooks registered in the set.
+// Profile is the content of a profile's file.
+type Profile struct {
+	// Playbooks are the playbooks registered in the profile.
 	Playbooks []Playbook `yaml:"playbooks"`
 }
 
@@ -129,9 +129,9 @@ func BaseConfigFile(base string) string {
 	return filepath.Join(Dir(base), BaseConfigName+FileExt)
 }
 
-// SetFile returns the path of a set's file.
-func SetFile(base, set string) string {
-	return filepath.Join(Dir(base), set+FileExt)
+// ProfileFile returns the path of a profile's file.
+func ProfileFile(base, profile string) string {
+	return filepath.Join(Dir(base), profile+FileExt)
 }
 
 // IsBase reports whether dir is a base folder: it holds a .aiplam folder (whose configuration may still be missing).
@@ -187,8 +187,8 @@ func RelFolder(base, dir string) (string, error) {
 }
 
 var (
-	nameRegexp    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
-	setNameRegexp = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
+	nameRegexp        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+	profileNameRegexp = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
 )
 
 // ValidName reports whether name can be a playbook name: letters, digits, '.', '_' and '-', starting with a letter
@@ -197,14 +197,14 @@ func ValidName(name string) bool {
 	return nameRegexp.MatchString(name)
 }
 
-// ValidSetName reports whether name can be a set name: letters, digits, '_' and '-', starting with a letter or digit,
-// and not the name of the base folder's configuration file.
-func ValidSetName(name string) bool {
-	return setNameRegexp.MatchString(name) && !strings.EqualFold(name, BaseConfigName)
+// ValidProfileName reports whether name can be a profile name: letters, digits, '_' and '-', starting with a letter or
+// digit, and not the name of the base folder's configuration file.
+func ValidProfileName(name string) bool {
+	return profileNameRegexp.MatchString(name) && !strings.EqualFold(name, BaseConfigName)
 }
 
-// Sets returns the names of the existing sets, sorted.
-func Sets(base string) ([]string, error) {
+// Profiles returns the names of the existing profiles, sorted.
+func Profiles(base string) ([]string, error) {
 	items, err := os.ReadDir(Dir(base))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -212,30 +212,30 @@ func Sets(base string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	var sets []string
+	var profiles []string
 	for _, item := range items {
 		name, ok := strings.CutSuffix(item.Name(), FileExt)
-		if ok && !item.IsDir() && ValidSetName(name) {
-			sets = append(sets, name)
+		if ok && !item.IsDir() && ValidProfileName(name) {
+			profiles = append(profiles, name)
 		}
 	}
-	sort.Strings(sets)
-	return sets, nil
+	sort.Strings(profiles)
+	return profiles, nil
 }
 
-// SetExists reports whether a set's file exists.
-func SetExists(base, set string) bool {
-	return fsutil.IsFile(SetFile(base, set))
+// ProfileExists reports whether a profile's file exists.
+func ProfileExists(base, profile string) bool {
+	return fsutil.IsFile(ProfileFile(base, profile))
 }
 
-// SameSet reports whether two set names designate the same set: equal names, or names of the same file (on file
-// systems that ignore case, "Work" and "work" are the same set).
-func SameSet(base, a, b string) bool {
+// SameProfile reports whether two profile names designate the same profile: equal names, or names of the same file (on
+// file systems that ignore case, "Work" and "work" are the same profile).
+func SameProfile(base, a, b string) bool {
 	if a == b {
 		return true
 	}
-	fa, errA := os.Stat(SetFile(base, a))
-	fb, errB := os.Stat(SetFile(base, b))
+	fa, errA := os.Stat(ProfileFile(base, a))
+	fb, errB := os.Stat(ProfileFile(base, b))
 	return errA == nil && errB == nil && os.SameFile(fa, fb)
 }
 
@@ -256,17 +256,17 @@ func LoadBaseConfig(base string) (*BaseConfig, error) {
 	return conf, nil
 }
 
-// LoadSet reads and parses a set's file. It returns ErrNoSet when the file does not exist. An empty file is an empty
-// set. Use Validate for semantic checks.
-func LoadSet(base, set string) (*Set, error) {
-	data, err := os.ReadFile(SetFile(base, set))
+// LoadProfile reads and parses a profile's file. It returns ErrNoProfile when the file does not exist. An empty file is
+// an empty profile. Use Validate for semantic checks.
+func LoadProfile(base, profile string) (*Profile, error) {
+	data, err := os.ReadFile(ProfileFile(base, profile))
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, ErrNoSet
+		return nil, ErrNoProfile
 	}
 	if err != nil {
 		return nil, err
 	}
-	s := &Set{}
+	s := &Profile{}
 	if err := parse(data, s); err != nil && !errors.Is(err, errEmpty) {
 		return nil, err
 	}
@@ -299,18 +299,18 @@ func SaveBaseConfig(base string, conf *BaseConfig) error {
 		"# aiplam (AI Playbook Manager) configuration of this base folder.\n"+
 			"# types: the agents configuration folders, next to this .aiplam folder, where artifacts are linked from\n"+
 			"#   (skills from their skills/ subfolder): "+typeList()+"; change them with 'aiplam type'.\n"+
-			"# enabled: the sets whose playbooks are linked; change them with 'aiplam set enable', 'aiplam set disable'\n"+
-			"#   and 'aiplam set switch'.\n")
+			"# enabled: the profiles whose playbooks are linked; change them with 'aiplam profile enable',\n"+
+			"#   'aiplam profile disable' and 'aiplam profile switch'.\n")
 }
 
-// SaveSet writes a set's file, replacing it atomically.
-func SaveSet(base, set string, s *Set) error {
+// SaveProfile writes a profile's file, replacing it atomically.
+func SaveProfile(base, profile string, s *Profile) error {
 	if s.Playbooks == nil {
-		s = &Set{Playbooks: []Playbook{}}
+		s = &Profile{Playbooks: []Playbook{}}
 	}
-	return save(SetFile(base, set), s, fmt.Sprintf(
-		"# aiplam (AI Playbook Manager) set '%s'.\n"+
-			"# playbooks: registered playbooks, managed with 'aiplam add', 'aiplam update' and 'aiplam remove'.\n", set))
+	return save(ProfileFile(base, profile), s, fmt.Sprintf(
+		"# aiplam (AI Playbook Manager) profile '%s'.\n"+
+			"# playbooks: registered playbooks, managed with 'aiplam add', 'aiplam update' and 'aiplam remove'.\n", profile))
 }
 
 func save(file string, v any, header string) error {
@@ -395,26 +395,26 @@ func ValidateTypes(types []string) []error {
 }
 
 // Validate checks the base folder's configuration and returns every problem found. It does not check that the
-// enabled sets exist.
+// enabled profiles exist.
 func (c *BaseConfig) Validate() []error {
 	errs := ValidateTypes(c.Types)
-	for i, set := range c.Enabled {
-		if !ValidSetName(set) {
-			errs = append(errs, fmt.Errorf("enabled set '%s' is not a valid set name", set))
+	for i, profile := range c.Enabled {
+		if !ValidProfileName(profile) {
+			errs = append(errs, fmt.Errorf("enabled profile '%s' is not a valid profile name", profile))
 		}
 		for j := 0; j < i; j++ {
-			if strings.EqualFold(set, c.Enabled[j]) {
-				errs = append(errs, fmt.Errorf("set '%s' is listed more than once under 'enabled'", set))
+			if strings.EqualFold(profile, c.Enabled[j]) {
+				errs = append(errs, fmt.Errorf("profile '%s' is listed more than once under 'enabled'", profile))
 			}
 		}
 	}
 	return errs
 }
 
-// IsEnabled reports whether set is one of the enabled sets.
-func (c *BaseConfig) IsEnabled(base, set string) bool {
+// IsEnabled reports whether profile is one of the enabled profiles.
+func (c *BaseConfig) IsEnabled(base, profile string) bool {
 	for _, e := range c.Enabled {
-		if SameSet(base, e, set) {
+		if SameProfile(base, e, profile) {
 			return true
 		}
 	}
@@ -454,8 +454,8 @@ func ValidArtifactPath(path string) bool {
 	return path != "" && filepath.IsLocal(filepath.FromSlash(path))
 }
 
-// Validate checks the set's content and returns every problem found.
-func (s *Set) Validate(base string) []error {
+// Validate checks the profile's content and returns every problem found.
+func (s *Profile) Validate(base string) []error {
 	var errs []error
 	add := func(format string, args ...any) { errs = append(errs, fmt.Errorf(format, args...)) }
 	for i, p := range s.Playbooks {
