@@ -20,6 +20,7 @@ package app
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -30,7 +31,7 @@ import (
 	"arxila.io/aiplam/internal/playbook"
 )
 
-const listUsage = `Usage: aiplam list [--levels] [--json] [-s|--set SET]
+const listUsage = `Usage: aiplam list [--levels] [--json] [--set SET]
 
 Lists the playbooks registered in the enabled sets, or in the set given with --set (id, name, folder and checked-out
 version: its tags, or else its branch) and, for each, the artifacts it provides. For enabled sets, it marks the
@@ -100,16 +101,25 @@ func (a *App) cmdList(args []string) error {
 	if levels {
 		roots = append(roots, config.Ancestors(a.Root, a.Home)...)
 	}
-	var outs []listOutput
-	notInstalled := false
+	outs := []listOutput{}
+	notInstalled, failed := false, false
+	root0, rootArg0, global0 := a.Root, a.rootArg, a.global
 	for i, root := range roots {
 		if i > 0 {
 			// Commands suggested for a higher level must name its root folder.
 			a.Root, a.rootArg, a.global = root, root, false
 		}
 		st, err := a.load()
-		if err != nil {
+		if err != nil && i == 0 {
 			return err
+		}
+		if err != nil {
+			// A higher level that cannot be read: report it and list the others.
+			if !errors.Is(err, errSilent) {
+				a.errorf("the configuration of '%s' cannot be listed: %s", a.pretty(root), err)
+			}
+			failed = true
+			continue
 		}
 		out := listOutput{Root: root, Types: st.inst.Types, Folders: st.targets, Sets: []listSet{}}
 		for _, set := range st.sets {
@@ -125,17 +135,28 @@ func (a *App) cmdList(args []string) error {
 			}
 		}
 	}
+	a.Root, a.rootArg, a.global = root0, rootArg0, global0
 	if asJSON {
 		enc := json.NewEncoder(a.Stdout)
 		enc.SetIndent("", "  ")
 		if levels {
-			return enc.Encode(outs)
+			if err := enc.Encode(outs); err != nil {
+				return err
+			}
+		} else if err := enc.Encode(outs[0]); err != nil {
+			return err
 		}
-		return enc.Encode(outs[0])
+		if failed {
+			return errSilent
+		}
+		return nil
 	}
 	if notInstalled {
-		a.printf("\nSome skills are not installed: run 'aiplam update --all' (with --root for a higher level), or " +
-			"'aiplam check' for details.\n")
+		a.printf("\nSome skills are not installed: run '%s', or '%s' for details (with --root for a higher level).\n",
+			a.hint("update --all"), a.hint("check"))
+	}
+	if failed {
+		return errSilent
 	}
 	return nil
 }
@@ -149,8 +170,8 @@ func (a *App) printListing(st *state, out listOutput) bool {
 	}
 	a.printf("Root: %s\nAgent folders: %s\n", a.pretty(out.Root), strings.Join(folders, ", "))
 	if len(out.Sets) == 0 {
-		a.printf("\nNo set is enabled: enable one with '%s' ('aiplam set list' lists them).\n",
-			a.cmd("set enable <set>"))
+		a.printf("\nNo set is enabled: enable one with '%s' ('%s' lists them).\n", a.hint("set enable <set>"),
+			a.hint("set list"))
 		return false
 	}
 	notInstalled := false

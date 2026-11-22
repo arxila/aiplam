@@ -785,7 +785,10 @@ func TestType(t *testing.T) {
 	}
 
 	// Replace the types: the old folder is unlinked.
-	e.mustRun(ExitOK, "type", "claude")
+	out, _ = e.mustRun(ExitOK, "type", "claude")
+	if !strings.Contains(out, "x-a (type removed)") {
+		t.Fatalf("unexpected output: %s", out)
+	}
 	e.assertMissing(filepath.Join(e.agentsSkills(), "x-a"))
 	e.assertLink(filepath.Join(claude, "x-a"), filepath.Join(pb, "skills", "x-a"))
 	if got := e.install().Types; strings.Join(got, ",") != "claude" {
@@ -803,7 +806,8 @@ func TestType(t *testing.T) {
 	e.assertLink(filepath.Join(claude, "x-a"), filepath.Join(pb, "skills", "x-a"))
 	e.mustRun(ExitUsage, "type", "agents", "-s", "default")
 	e.mustRun(ExitUsage, "type", "other")
-	e.mustRun(ExitFailure, "type", "agents,agents") // listed twice
+	e.mustRun(ExitUsage, "type", "agents,agents") // listed twice
+	e.mustRun(ExitUsage, "init", "-g", "-t", "agents", "-t", "agents")
 }
 
 func TestShortOptions(t *testing.T) {
@@ -1048,7 +1052,8 @@ func TestRoots(t *testing.T) {
 	// the other.
 	e.app.Cwd = module
 	_, errOut = e.mustRun(ExitFailure, "add", "z", other)
-	if !strings.Contains(errOut, "higher-level configuration") {
+	if !strings.Contains(errOut, "higher-level configuration") || !strings.Contains(errOut, "--root <its folder>") ||
+		strings.Contains(errOut, "what is in the way") {
 		t.Fatalf("unexpected message: %s", errOut)
 	}
 	e.assertMissing(filepath.Join(projectSkills, "z-a"))
@@ -1082,7 +1087,8 @@ func TestRoots(t *testing.T) {
 	}
 	out, _ = e.mustRun(ExitOK, "init", ".", "-t", "claude")
 	if !strings.Contains(out, "git repository") || !strings.Contains(out, "higher-level configurations exist") ||
-		!strings.Contains(out, "/.claude/skills/<name>-*") {
+		!strings.Contains(out, "/.claude/skills/<name>-*") ||
+		!strings.Contains(out, "'"+filepath.Join(module, ".gitignore")+"'") {
 		t.Fatalf("unexpected notes: %s", out)
 	}
 	// Only agent folders of the same type collide: z is in ~/.claude, x only in the project's .agents.
@@ -1093,4 +1099,69 @@ func TestRoots(t *testing.T) {
 	e.mustRun(ExitOK, "add", "x", pb)
 	e.assertLink(filepath.Join(module, ".claude", "skills", "x-a"), filepath.Join(pb, "skills", "x-a"))
 	e.mustRun(ExitOK, "check")
+}
+
+func TestRootDiscoveryAndHints(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init", "-g", "-t", "agents")
+	project := filepath.Join(e.root, "project")
+	elsewhere := filepath.Join(e.root, "elsewhere")
+	for _, dir := range []string{project, elsewhere} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pb := e.playbook("p", "x-a")
+
+	// init from another folder: suggested commands name the new root folder.
+	e.app.Cwd = elsewhere
+	out, _ := e.mustRun(ExitOK, "init", project)
+	if !strings.Contains(out, "'aiplam add <name> <folder> --root "+project+"'") {
+		t.Fatalf("hint should name the root folder: %s", out)
+	}
+	_, errOut := e.mustRun(ExitFailure, "init", project)
+	if !strings.Contains(errOut, "'aiplam type --root "+project+"'") {
+		t.Fatalf("hint should name the root folder: %s", errOut)
+	}
+	out, _ = e.mustRun(ExitOK, "set", "add", "work", "-r", project)
+	if !strings.Contains(out, "'aiplam set enable work --root "+project+"'") {
+		t.Fatalf("hint should name the root folder: %s", out)
+	}
+
+	// From inside a linked skill, the root folder is the one above the link, not the playbook's.
+	e.app.Cwd = project
+	e.mustRun(ExitOK, "add", "x", pb)
+	e.app.Cwd = filepath.Join(project, ".agents", "skills", "x-a")
+	out, _ = e.mustRun(ExitOK, "list")
+	if !strings.HasPrefix(out, "Root: "+project+"\n") {
+		t.Fatalf("unexpected list: %s", out)
+	}
+
+	// A .aiplam folder makes a root folder, even without its configuration.
+	empty := filepath.Join(e.root, "empty")
+	if err := os.MkdirAll(filepath.Join(empty, ".aiplam"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e.app.Cwd = empty
+	_, errOut = e.mustRun(ExitFailure, "list")
+	if !strings.Contains(errOut, "aiplam init") {
+		t.Fatalf("unexpected message: %s", errOut)
+	}
+	e.mustRun(ExitOK, "init", ".")
+
+	// list --levels reports a higher level it cannot read and lists the others.
+	nested := filepath.Join(project, "nested")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e.app.Cwd = nested
+	e.mustRun(ExitOK, "init", ".")
+	if err := os.WriteFile(config.InstallFile(project), []byte("types: [nope]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, errOut = e.mustRun(ExitFailure, "list", "--levels")
+	if !strings.Contains(out, "Root: "+nested) || !strings.Contains(out, "Root: ~") ||
+		!strings.Contains(errOut, config.InstallName+".yaml") {
+		t.Fatalf("unexpected list: %s / %s", out, errOut)
+	}
 }

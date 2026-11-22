@@ -100,7 +100,7 @@ func (a *App) cmdSet(args []string) error {
 		}
 		for _, name := range names {
 			if sub != "disable" && !config.SetExists(a.Root, name) {
-				return fmt.Errorf("set '%s' does not exist; create it with 'aiplam set add %s'", name, name)
+				return fmt.Errorf("set '%s' does not exist; create it with '%s'", name, a.hint("set add "+name))
 			}
 		}
 		switch sub {
@@ -153,18 +153,18 @@ func (a *App) setList() error {
 		}
 		cfg, err := config.LoadSet(a.Root, set)
 		if err != nil {
-			a.printf("%s %-20s cannot be read (%s); see 'aiplam check --set %s'\n", mark, set, err, set)
+			a.printf("%s %-20s cannot be read (%s); see '%s'\n", mark, set, err, a.hint("check --set "+set))
 			continue
 		}
 		a.printf("%s %-20s %d playbook(s)\n", mark, set, len(cfg.Playbooks))
 	}
 	for _, name := range inst.Enabled {
 		if !config.SetExists(a.Root, name) {
-			a.warnf("the enabled set '%s' does not exist: disable it with 'aiplam set disable %s'.", name, name)
+			a.warnf("the enabled set '%s' does not exist: disable it with '%s'.", name, a.hint("set disable "+name))
 		}
 	}
 	if len(inst.Enabled) == 0 {
-		a.printf("No set is enabled: enable one with 'aiplam set enable <set>'.\n")
+		a.printf("No set is enabled: enable one with '%s'.\n", a.hint("set enable <set>"))
 	}
 	return nil
 }
@@ -177,18 +177,18 @@ func (a *App) setAdd(name string) error {
 		return err
 	}
 	a.printf("Created set '%s' (%s).\n", name, a.setFile(name))
-	a.printf("Register playbooks in it with 'aiplam add <name> <folder> --set %s', and enable it with "+
-		"'aiplam set enable %s'.\n", name, name)
+	a.printf("Register playbooks in it with '%s', and enable it with '%s'.\n",
+		a.hint("add <name> <folder> --set "+name), a.hint("set enable "+name))
 	return nil
 }
 
 func (a *App) setRemove(inst *config.Install, name string) error {
 	if !config.SetExists(a.Root, name) {
-		return fmt.Errorf("set '%s' does not exist ('aiplam set list' lists the sets)", name)
+		return fmt.Errorf("set '%s' does not exist ('%s' lists the sets)", name, a.hint("set list"))
 	}
 	if inst.IsEnabled(a.Root, name) {
-		return fmt.Errorf("set '%s' is enabled and cannot be removed: disable it first with 'aiplam set disable %s'",
-			name, name)
+		return fmt.Errorf("set '%s' is enabled and cannot be removed: disable it first with '%s'", name,
+			a.hint("set disable "+name))
 	}
 	count := 0
 	if cfg, err := config.LoadSet(a.Root, name); err == nil {
@@ -208,8 +208,8 @@ func (a *App) enabledSets(inst *config.Install) ([]*setState, error) {
 	var sets []*setState
 	for _, name := range inst.Enabled {
 		if !config.SetExists(a.Root, name) {
-			a.warnf("the enabled set '%s' does not exist: its links (if any) cannot be found; 'aiplam check' reports "+
-				"those that are broken.", name)
+			a.warnf("the enabled set '%s' does not exist: its links (if any) cannot be found; '%s' reports those "+
+				"that are broken.", name, a.hint("check"))
 			continue
 		}
 		s, err := a.loadSetState(name, true)
@@ -278,7 +278,8 @@ func (a *App) setDisable(inst *config.Install, names []string) error {
 		}
 	}
 	if len(notEnabled) > 0 {
-		return fmt.Errorf("not enabled: %s ('aiplam set list' shows the enabled sets)", strings.Join(notEnabled, ", "))
+		return fmt.Errorf("not enabled: %s ('%s' shows the enabled sets)", strings.Join(notEnabled, ", "),
+			a.hint("set list"))
 	}
 	current, err := a.enabledSets(inst)
 	if err != nil {
@@ -345,15 +346,20 @@ func (a *App) changeSets(inst, updated *config.Install, removed, added, stay []*
 		}
 	}
 	targets := inst.TargetDirs(a.Root)
-	plan, err := playbook.Switch(groups(removed), groups(added), groups(stay), targets, targets, "set disabled", true)
+	plan, err := playbook.Switch(groups(removed), groups(added), groups(stay), targets, targets, "set disabled",
+		"set disabled", true)
 	if err != nil {
 		return err
 	}
 	playbook.MarkAncestors(&plan, a.ancestorTargets())
 	if len(plan.Conflicts()) > 0 {
 		a.printConflicts(plan)
-		a.errorf("nothing was changed: sets enabled together cannot collide, so every link of a set being enabled " +
-			"must be new. Remove or rename what is in the way (or disable the set that provides it), then try again.")
+		advice := a.conflictAdvice(plan)
+		if hasConflictsOtherThan(plan, playbook.Ancestor) {
+			advice = "sets enabled together cannot collide, so every link of a set being enabled must be new; " +
+				strings.Replace(advice, "what is in the way", "what is in the way (or disable the set that provides it)", 1)
+		}
+		a.errorf("nothing was changed: %s.", advice)
 		return errSilent
 	}
 

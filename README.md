@@ -41,8 +41,8 @@ the prefix of its artifacts:
 ## Usage
 
 ```bash
-aiplam init <folder>|-g [-t|--type agents,claude] [-s SET]  # set up a root folder, and a first set, enabled
-aiplam add <name> <folder> [-sp|--skills-path P]            # register a playbook and link its skills
+aiplam init <folder>|--global [--type T] [--set SET]        # set up a root folder, and a first set, enabled
+aiplam add <name> <folder> [--skills-path P]                # register a playbook and link its skills
 aiplam update [<name|id|folder>] [<folder>]                 # link new skills, remove links to deleted ones
 aiplam update --all
 aiplam remove <name|id|folder> [<folder>]                   # remove a playbook's links and unregister it
@@ -54,10 +54,12 @@ aiplam type [agents|claude...]                              # show or change the
 ```
 
 Every command acts on a [root folder](#root-folders)'s configuration: the nearest one from the current folder up, or
-the home folder's, unless given with `--root DIR` (`-r DIR`) or `--global` (`-g`, the home folder). Playbooks are
-registered in [sets](#sets), and only the enabled sets are installed. `update`, `remove`, `list` and `check` act on
-the enabled sets, or on the one given with `--set SET` (`-s SET`). `add` needs `--set` unless exactly one set is
-enabled.
+the home folder's, unless given with `--root DIR` or `--global` (the home folder). Playbooks are registered in
+[sets](#sets), and only the enabled sets are installed. `update`, `remove`, `list` and `check` act on the enabled
+sets, or on the one given with `--set SET`. `add` needs `--set` unless exactly one set is enabled.
+
+Options have short forms: `-r` (`--root`), `-g` (`--global`), `-s` (`--set`), `-t` (`--type`) and `-sp`
+(`--skills-path`).
 
 Without a selector, `update` acts on the playbook registered for the current folder. A selector is an id, a name
 (when only one playbook has it), a folder (when only one playbook is registered there), or a name and a folder.
@@ -81,8 +83,9 @@ installs artifacts, next to it: `.agents` for type `agents` and `.claude` for ty
 changes them later: the enabled sets' playbooks are unlinked from the folders of the types removed and linked into
 those of the types added, all-or-nothing.
 
-Commands use the nearest root folder from the current folder up (a folder whose `.aiplam` holds
-`aiplam-config.yaml`), or else the home folder, and show which one they use (`Root: ...`).
+Commands use the nearest root folder from the current folder up (any folder holding a `.aiplam` folder), or else
+the home folder, and show which one they use (`Root: ...`). The current folder is walked up as given, so inside a
+linked skill (`.agents/skills/x`) the root folder is the one above the link, not the playbook's.
 
 Agents read the agent folders of the folder where a session starts and of the home folder, and some read those of
 every folder in between. So a skill cannot be installed in an agent folder of a configuration if it already exists in

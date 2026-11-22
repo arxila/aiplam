@@ -254,13 +254,13 @@ func (a *App) resolveRoot() error {
 		dir := a.absPath(a.rootArg)
 		if !config.IsRoot(dir) {
 			return fmt.Errorf("'%s' holds no aiplam configuration (%s is missing); set it up with 'aiplam init %s'",
-				a.rootArg, a.pretty(config.InstallFile(dir)), a.rootArg)
+				a.rootArg, a.pretty(config.Dir(dir)), a.rootArg)
 		}
 		a.Root = dir
 	case a.global:
 		a.Root = a.Home
 	default:
-		a.Root = config.FindRoot(fsutil.Canonical(a.Cwd), a.Home)
+		a.Root = config.FindRoot(a.absPathAsGiven(a.Cwd), a.Home)
 	}
 	return nil
 }
@@ -365,6 +365,14 @@ func (a *App) absPath(path string) string {
 	return fsutil.Canonical(path)
 }
 
+// absPathAsGiven returns path as an absolute, cleaned path, without resolving links.
+func (a *App) absPathAsGiven(path string) string {
+	if abs, err := filepath.Abs(path); err == nil {
+		return abs
+	}
+	return filepath.Clean(path)
+}
+
 // version returns the version of a playbook folder, warning once when git is not available.
 func (a *App) version(folder string) gitinfo.Version {
 	if !a.Git.Available() {
@@ -386,9 +394,15 @@ func invalidSetName(name string) error {
 // that is not the enabled one.
 func (a *App) cmd(command string) string {
 	if a.hintSet == "" {
-		return "aiplam " + command + a.rootOption()
+		return a.hint(command)
 	}
-	return "aiplam " + command + a.rootOption() + " --set " + a.hintSet
+	return a.hint(command) + " --set " + a.hintSet
+}
+
+// hint returns an aiplam command line to suggest to the user, with the option that selects the root folder when one
+// was given.
+func (a *App) hint(command string) string {
+	return "aiplam " + command + a.rootOption()
 }
 
 // noSetOption fails when --set was given to a command that does not take it.
@@ -414,7 +428,7 @@ func (a *App) loadInstall() (*config.Install, error) {
 		for _, e := range errs {
 			a.errorf("%s: %s", file, e)
 		}
-		a.errorf("fix %s by hand; 'aiplam check' lists its problems.", file)
+		a.errorf("fix %s by hand; '%s' lists its problems.", file, a.hint("check"))
 		return nil, errSilent
 	}
 	return inst, nil
@@ -491,8 +505,8 @@ func (a *App) load() (*state, error) {
 	st := &state{inst: inst, targets: inst.TargetDirs(a.Root)}
 	for _, name := range inst.Enabled {
 		if !config.SetExists(a.Root, name) {
-			return nil, fmt.Errorf("the enabled set '%s' does not exist (%s is missing): disable it with 'aiplam set "+
-				"disable %s', or create it again with 'aiplam set add %s'", name, a.setFile(name), name, name)
+			return nil, fmt.Errorf("the enabled set '%s' does not exist (%s is missing): disable it with '%s', or "+
+				"create it again with '%s'", name, a.setFile(name), a.hint("set disable "+name), a.hint("set add "+name))
 		}
 		s, err := a.loadSetState(name, true)
 		if err != nil {
@@ -505,8 +519,8 @@ func (a *App) load() (*state, error) {
 		return st, nil
 	}
 	if !config.SetExists(a.Root, a.Set) {
-		return nil, fmt.Errorf("set '%s' does not exist; create it with 'aiplam set add %s' ('aiplam set list' lists "+
-			"the sets)", a.Set, a.Set)
+		return nil, fmt.Errorf("set '%s' does not exist; create it with '%s' ('%s' lists the sets)", a.Set,
+			a.hint("set add "+a.Set), a.hint("set list"))
 	}
 	for _, s := range st.enabled {
 		if config.SameSet(a.Root, s.name, a.Set) {
@@ -543,7 +557,7 @@ func (a *App) useSet(st *state, s *setState) {
 func (a *App) loadSet(set string) (*config.Set, error) {
 	cfg, err := config.LoadSet(a.Root, set)
 	if errors.Is(err, config.ErrNoSet) {
-		return nil, fmt.Errorf("set '%s' does not exist ('aiplam set list' lists the sets)", set)
+		return nil, fmt.Errorf("set '%s' does not exist ('%s' lists the sets)", set, a.hint("set list"))
 	}
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w; fix it by hand", a.setFile(set), err)
@@ -552,7 +566,7 @@ func (a *App) loadSet(set string) (*config.Set, error) {
 		for _, e := range errs {
 			a.errorf("%s: %s", a.setFile(set), e)
 		}
-		a.errorf("fix %s by hand; 'aiplam check --set %s' lists its problems.", a.setFile(set), set)
+		a.errorf("fix %s by hand; '%s' lists its problems.", a.setFile(set), a.hint("check --set "+set))
 		return nil, errSilent
 	}
 	return cfg, nil
@@ -560,8 +574,8 @@ func (a *App) loadSet(set string) (*config.Set, error) {
 
 // notEnabledNote explains that a set's playbooks are not installed.
 func (a *App) notEnabledNote(set string) string {
-	return fmt.Sprintf("set '%s' is not enabled (its playbooks are linked into the agent folders when it is enabled with "+
-		"'aiplam set enable %s')", set, set)
+	return fmt.Sprintf("set '%s' is not enabled (its playbooks are linked into the agent folders when it is enabled "+
+		"with '%s')", set, a.hint("set enable "+set))
 }
 
 // setNames returns the names of sets, separated by commas.
@@ -629,7 +643,7 @@ func (a *App) selectEntry(st *state, args []string) (playbook.Entry, error) {
 		switch len(matches) {
 		case 0:
 			return playbook.Entry{}, fmt.Errorf("no playbook of %s is registered for the current folder '%s'; give "+
-				"a name, id or folder ('aiplam list' shows them)", st.where(), a.pretty(a.Cwd))
+				"a name, id or folder ('%s' shows them)", st.where(), a.pretty(a.Cwd), a.hint("list"))
 		case 1:
 			return matches[0], nil
 		default:
@@ -652,7 +666,7 @@ func (a *App) selectEntry(st *state, args []string) (playbook.Entry, error) {
 		switch len(matches) {
 		case 0:
 			return playbook.Entry{}, fmt.Errorf("no playbook of %s is registered with name, id or folder '%s' "+
-				"('aiplam list' shows them)", st.where(), arg)
+				"('%s' shows them)", st.where(), arg, a.hint("list"))
 		case 1:
 			return matches[0], nil
 		default:
@@ -683,6 +697,33 @@ func (a *App) printAction(act playbook.Action) {
 	case playbook.Remove:
 		a.printf("  - %s (%s)\n", a.pretty(act.Link), act.Reason)
 	}
+}
+
+// conflictAdvice says how to resolve the conflicts of a plan: "remove or rename what is in the way, then try again",
+// and, for skills installed by a higher-level configuration, that they must be removed there first.
+func (a *App) conflictAdvice(plan playbook.Plan) string {
+	var advice []string
+	if hasConflictsOtherThan(plan, playbook.Ancestor) {
+		advice = append(advice, "remove or rename what is in the way")
+	}
+	for _, c := range plan.Conflicts() {
+		if c.Cause == playbook.Ancestor {
+			advice = append(advice, "remove from the higher-level configuration the skills it already installs "+
+				"(with 'aiplam remove ... --root <its folder>'; 'aiplam list --levels' shows the levels)")
+			break
+		}
+	}
+	return strings.Join(advice, ", and ") + ", then try again"
+}
+
+// hasConflictsOtherThan reports whether plan has conflicts with a cause other than cause.
+func hasConflictsOtherThan(plan playbook.Plan, cause playbook.ConflictCause) bool {
+	for _, c := range plan.Conflicts() {
+		if c.Cause != cause {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *App) printConflicts(plan playbook.Plan) {

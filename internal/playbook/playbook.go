@@ -380,9 +380,10 @@ func Overlaps(final []Entry, e Entry) (map[string][]string, error) {
 // in stay remain installed (their links are neither removed nor shared). Links that from and to both want (same path,
 // same skill) are left alone. Conflicts are planned as in Build, except that links being removed are not in the way;
 // with strict, any other link already in place of a link to create is a conflict. Entries of to must have their
-// skills folders. Removals of links in folders that are no longer targets are explained as such; reason explains the
-// others.
-func Switch(from, to, stay [][]Entry, fromTargets, toTargets []string, reason string, strict bool) (Plan, error) {
+// skills folders. dropReason explains the removals of links in folders that are no longer targets; reason explains
+// the others.
+func Switch(from, to, stay [][]Entry, fromTargets, toTargets []string, reason, dropReason string, strict bool) (Plan,
+	error) {
 	var plan Plan
 	isTarget := func(link string) bool {
 		for _, t := range toTargets {
@@ -404,7 +405,7 @@ func Switch(from, to, stay [][]Entry, fromTargets, toTargets []string, reason st
 				if _, dup := removed[a.Link]; a.Kind == Remove && !dup {
 					a.Reason = reason
 					if !isTarget(a.Link) {
-						a.Reason = "no longer a target"
+						a.Reason = dropReason
 					}
 					removed[a.Link] = a
 					removals = append(removals, a)

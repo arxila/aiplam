@@ -134,17 +134,19 @@ func SetFile(root, set string) string {
 	return filepath.Join(Dir(root), set+FileExt)
 }
 
-// IsRoot reports whether dir holds a configuration: a .aiplam folder with an installation's configuration file.
+// IsRoot reports whether dir is a root folder: it holds a .aiplam folder (whose configuration may still be missing).
 func IsRoot(dir string) bool {
-	return fsutil.IsFile(InstallFile(dir))
+	return fsutil.IsDir(Dir(dir))
 }
 
 // FindRoot returns the root folder whose configuration commands run in start use: start or its nearest parent that
-// holds a configuration, or else home. start must be absolute.
+// holds a .aiplam folder, or else home. start must be absolute; it is walked up as given (a folder reached through a
+// link, such as a linked skill, belongs to the root folder above the link), and the root folder found is returned
+// with links resolved.
 func FindRoot(start, home string) string {
 	for dir := filepath.Clean(start); ; {
 		if IsRoot(dir) {
-			return dir
+			return fsutil.Canonical(dir)
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
@@ -155,7 +157,7 @@ func FindRoot(start, home string) string {
 }
 
 // Ancestors returns the root folders whose agent folders agents may read besides root's: the parents of root that
-// hold a configuration, nearest first, and home when it holds one and root is not inside it.
+// hold a .aiplam folder, nearest first, and home when it holds one and root is not inside it.
 func Ancestors(root, home string) []string {
 	var roots []string
 	for dir := filepath.Clean(root); ; {

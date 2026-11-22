@@ -81,14 +81,15 @@ func (a *App) cmdType(args []string) error {
 			}
 		}
 	}
-	plan, err := playbook.Switch(groups(sets), groups(sets), nil, current, next, "type removed", false)
+	plan, err := playbook.Switch(groups(sets), groups(sets), nil, current, next, "no longer in the playbook",
+		"type removed", false)
 	if err != nil {
 		return err
 	}
 	playbook.MarkAncestors(&plan, a.ancestorTargets())
 	if len(plan.Conflicts()) > 0 {
 		a.printConflicts(plan)
-		a.errorf("the types were not changed: remove or rename what is in the way, then try again.")
+		a.errorf("the types were not changed: %s.", a.conflictAdvice(plan))
 		return errSilent
 	}
 

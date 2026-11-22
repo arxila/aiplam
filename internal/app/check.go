@@ -30,7 +30,7 @@ import (
 	"arxila.io/aiplam/internal/playbook"
 )
 
-const checkUsage = `Usage: aiplam check [-s|--set SET]
+const checkUsage = `Usage: aiplam check [--set SET]
 
 Changes nothing. Checks the format and content of the installation's configuration (.aiplam/aiplam-config.yaml in
 the root folder) and of the enabled sets' files (.aiplam/<set>.yaml), the agent and playbook folders and, for each
@@ -78,14 +78,14 @@ func (a *App) cmdCheck(args []string) error {
 
 	// The enabled sets, and the one given with --set.
 	if a.Set != "" && !config.SetExists(a.Root, a.Set) {
-		return fmt.Errorf("set '%s' does not exist ('aiplam set list' lists the sets)", a.Set)
+		return fmt.Errorf("set '%s' does not exist ('%s' lists the sets)", a.Set, a.hint("set list"))
 	}
 	st := &state{inst: inst, targets: inst.TargetDirs(a.Root)}
 	loadSet := func(name string, enabled bool) *setState {
 		file := a.setFile(name)
 		if !config.SetExists(a.Root, name) {
-			problem("the enabled set '%s' does not exist (%s is missing): disable it with 'aiplam set disable %s', "+
-				"or create it again with 'aiplam set add %s'", name, file, name, name)
+			problem("the enabled set '%s' does not exist (%s is missing): disable it with '%s', or create it again "+
+				"with '%s'", name, file, a.hint("set disable "+name), a.hint("set add "+name))
 			return nil
 		}
 		cfg, err := config.LoadSet(a.Root, name)
@@ -204,8 +204,8 @@ func (a *App) checkPlaybook(st *state, set *setState, e playbook.Entry, reported
 			return
 		}
 		for name, others := range overlaps {
-			problem("playbook %s: skill %s: also provided by playbook %s; 'aiplam set enable %s' would be cancelled",
-				e.ID, name, strings.Join(others, ", "), set.name)
+			problem("playbook %s: skill %s: also provided by playbook %s; '%s' would be cancelled", e.ID, name,
+				strings.Join(others, ", "), a.hint("set enable "+set.name))
 		}
 		if len(overlaps) == 0 {
 			a.printf("  folders are valid (not installed: the set is not enabled)\n")
