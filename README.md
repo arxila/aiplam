@@ -5,7 +5,8 @@ family of related projects. Each developer keeps a local clone of each playbook,
 they want to use. `aiplam` registers those clones and links their artifacts from the **agents configuration
 folders** that coding agents read (`.agents`, `.claude`), so that switching a clone to another tag and running
 `aiplam update` is all an update takes. It can do so in the home folder (`~/.agents`) and in any other folder where
-agent sessions are started, such as the top folder of a large project with many modules.
+agent sessions are started, such as the top folder of a large project with many modules: each of them is a
+[base folder](#base-folders).
 
 `aiplam` never clones, fetches, pulls or switches a playbook checkout: selecting versions is the developer's job.
 
@@ -30,13 +31,13 @@ the prefix of its artifacts:
 
 - Its artifacts are those named `<name>-*`, found in a folder of the playbook for each kind. Its **skills**, for
   example, are the folders named `<name>-*` that contain a `SKILL.md`, inside its skills folder: `skills/` by
-  default, or any other folder inside the playbook's, given relative to it (`--skills-path` or `-sp`, `.` for the
-  folder itself). Artifacts never come from outside the playbook's folder, not even through links.
+  default, or any other folder inside the playbook folder, given relative to it (`--skills-path` or `-sp`, `.` for the
+  folder itself). Artifacts never come from outside the playbook folder, not even through links.
 - One repository can be registered as several playbooks with different names (for example `x` and `x-y`). When names
   overlap, the longest one wins: `x-y-foo` belongs to `x-y`, not to `x`.
-- The same name can be registered from several folders, as long as their last path segments differ. Their **ids**
-  are then `<name>@<last folder segment>` (for example `arxila@arxila-ai-playbook`); otherwise the id is the name.
-  Ids are computed, not stored. Two playbooks cannot provide an artifact with the same name.
+- The same name can be registered from several playbook folders, as long as their last path segments differ. Their
+  **ids** are then `<name>@<last folder segment>` (for example `arxila@arxila-ai-playbook`); otherwise the id is the
+  name. Ids are computed, not stored. Two playbooks cannot provide an artifact with the same name.
 - A playbook's version is whatever is checked out: the tags of its current commit, or else its branch.
 
 ## Usage
@@ -92,7 +93,8 @@ the types removed and linked from those of the types added, all-or-nothing.
 
 Commands use the nearest base folder from the current folder up (any folder holding a `.aiplam` folder), or else
 the home folder, and show which one they use (`Base folder: ...`). The current folder is walked up as given, so
-inside a linked artifact (such as `.agents/skills/x`) the base folder is the one above the link, not the playbook's.
+inside a linked artifact (such as `.agents/skills/x`) the base folder is the one above the link, not one in the
+playbook folder.
 
 Agents read the agents configuration folders of the folder where a session starts and of the home folder and, some
 of them, of every folder in between. So an artifact cannot be linked from an agents configuration folder of a base
@@ -104,9 +106,9 @@ folder if it is already linked from one of the same type (`.agents`, `.claude`) 
   configuration folders.
 
 Agents configuration folders of different types do not collide: a skill, for example, can be in `~/.claude` and in a
-project's `.agents`. Only higher levels are checked when linking (a command at `~` cannot know about the projects
-below it); `aiplam check` in a project reports an artifact linked both there and at a higher level, and
-`aiplam list --all` also lists the higher-level base folders, nearest first.
+project's `.agents`. Only higher-level base folders are checked when linking (a command at `~` cannot know about
+the projects below it); `aiplam check` in a project reports an artifact linked both there and from a higher-level
+base folder, and `aiplam list --all` also lists the higher-level base folders, nearest first.
 
 Playbook folders are stored relative to the base folder, so a project's `.aiplam` folder can be committed and
 shared. On Windows, a playbook must be on the same drive as the base folder. The links themselves are specific to

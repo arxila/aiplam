@@ -100,20 +100,20 @@ func (a *App) cmdInit(args []string) error {
 			a.baseArg = a.Base
 		}
 	}
-	file := config.InstallFile(a.Base)
+	file := config.BaseConfigFile(a.Base)
 	if _, err := os.Stat(file); err == nil {
 		useBase()
-		return fmt.Errorf("aiplam is already initialized in '%s': %s exists. Change the types with '%s' and "+
+		return fmt.Errorf("'%s' is already set up as a base folder: %s exists. Change the types with '%s' and "+
 			"manage sets with '%s'", a.pretty(a.Base), a.pretty(file), a.hint("type"), a.hint("set"))
 	}
 	if config.SetExists(a.Base, set) {
 		return fmt.Errorf("%s already exists: remove it, or choose another set with --set", a.setFile(set))
 	}
-	inst := &config.Install{Types: types, Enabled: []string{set}}
-	if errs := inst.Validate(); len(errs) > 0 {
+	conf := &config.BaseConfig{Types: types, Enabled: []string{set}}
+	if errs := conf.Validate(); len(errs) > 0 {
 		return errs[0]
 	}
-	for _, dir := range inst.TargetDirs(a.Base) {
+	for _, dir := range conf.AgentsConfigDirs(a.Base) {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
 		}
@@ -121,12 +121,12 @@ func (a *App) cmdInit(args []string) error {
 	if err := config.SaveSet(a.Base, set, &config.Set{}); err != nil {
 		return err
 	}
-	if err := config.SaveInstall(a.Base, inst); err != nil {
+	if err := config.SaveBaseConfig(a.Base, conf); err != nil {
 		return err
 	}
 	useBase()
 	a.printf("Created %s\nAgents configuration folders:\n", a.pretty(file))
-	for _, dir := range inst.TargetDirs(a.Base) {
+	for _, dir := range conf.AgentsConfigDirs(a.Base) {
 		a.printf("  %s\n", a.pretty(dir))
 	}
 	a.printf("Created set '%s' (%s), enabled.\n", set, a.setFile(set))
@@ -278,12 +278,12 @@ func (a *App) cmdAdd(args []string) error {
 			continue
 		}
 		if fsutil.SamePath(e.Dir, folder) {
-			return fmt.Errorf("playbook '%s' is already registered for '%s' in set '%s' (id %s); use '%s'", name,
+			return fmt.Errorf("playbook '%s' is already registered for playbook folder '%s' in set '%s' (id %s); use '%s'", name,
 				a.pretty(folder), set.name, e.ID, a.cmd("update "+e.ID))
 		}
 		if fsutil.SameName(filepath.Base(e.Dir), filepath.Base(folder)) {
-			return fmt.Errorf("a playbook named '%s' is already registered for '%s', whose last segment equals that of "+
-				"'%s': their ids would collide", name, a.pretty(e.Dir), a.pretty(folder))
+			return fmt.Errorf("a playbook named '%s' is already registered for playbook folder '%s', whose last segment equals "+
+				"that of '%s': their ids would collide", name, a.pretty(e.Dir), a.pretty(folder))
 		}
 	}
 	rel, err := config.RelFolder(a.Base, folder)
@@ -307,11 +307,11 @@ func (a *App) cmdAdd(args []string) error {
 
 	var plan playbook.Plan
 	if set.enabled {
-		plan, err = playbook.Build(final, e, st.targets, st.others(set.name))
+		plan, err = playbook.Build(final, e, st.agentsConfigDirs, st.others(set.name))
 		if err != nil {
 			return err
 		}
-		playbook.MarkAncestors(&plan, a.ancestorTargets())
+		playbook.MarkAncestors(&plan, a.ancestorAgentsConfigDirs())
 	} else {
 		// Nothing is linked, but the set must stay linkable: no artifact provided by two playbooks.
 		overlaps, err := playbook.Overlaps(final, e)
@@ -425,7 +425,7 @@ func (a *App) cmdUpdate(args []string) error {
 		}
 		set := st.set(e.Set)
 		a.useSet(st, set)
-		if err := a.updateOne(set.entries, e, st.targets, st.others(set.name)); err != nil {
+		if err := a.updateOne(set.entries, e, st.agentsConfigDirs, st.others(set.name)); err != nil {
 			if !errors.Is(err, errSilent) {
 				a.errorf("%s", err)
 			}
@@ -438,16 +438,16 @@ func (a *App) cmdUpdate(args []string) error {
 	return nil
 }
 
-func (a *App) updateOne(entries []playbook.Entry, e playbook.Entry, targets []string,
+func (a *App) updateOne(entries []playbook.Entry, e playbook.Entry, agentsConfigDirs []string,
 	others [][]playbook.Entry) error {
 	if err := a.checkPlaybookFolders(e); err != nil {
 		return err
 	}
-	plan, err := playbook.Build(entries, e, targets, others)
+	plan, err := playbook.Build(entries, e, agentsConfigDirs, others)
 	if err != nil {
 		return err
 	}
-	playbook.MarkAncestors(&plan, a.ancestorTargets())
+	playbook.MarkAncestors(&plan, a.ancestorAgentsConfigDirs())
 	a.printf("Updating playbook %s (%s) from %s\n", e.ID, a.version(e.Dir), a.pretty(e.Dir))
 	if len(plan.Conflicts()) > 0 {
 		a.printConflicts(plan)
@@ -506,7 +506,7 @@ func (a *App) cmdRemove(args []string) error {
 	final := playbook.Entries(set.name, updated.Playbooks, a.Base)
 	var plan playbook.Plan
 	if set.enabled {
-		plan, err = playbook.Build(final, e, st.targets, st.others(set.name))
+		plan, err = playbook.Build(final, e, st.agentsConfigDirs, st.others(set.name))
 		if err != nil {
 			return err
 		}

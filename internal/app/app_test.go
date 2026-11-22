@@ -118,20 +118,20 @@ func (e *env) assertMissing(path string) {
 // config returns the first enabled set.
 func (e *env) config() *config.Set {
 	e.t.Helper()
-	cfg, err := config.LoadSet(e.home, e.install().Enabled[0])
+	cfg, err := config.LoadSet(e.home, e.baseConfig().Enabled[0])
 	if err != nil {
 		e.t.Fatal(err)
 	}
 	return cfg
 }
 
-func (e *env) install() *config.Install {
+func (e *env) baseConfig() *config.BaseConfig {
 	e.t.Helper()
-	inst, err := config.LoadInstall(e.home)
+	conf, err := config.LoadBaseConfig(e.home)
 	if err != nil {
 		e.t.Fatal(err)
 	}
-	return inst
+	return conf
 }
 
 // writeSet replaces the content of a set's file.
@@ -163,22 +163,22 @@ func TestInit(t *testing.T) {
 	if !fsutil.IsDir(filepath.Join(e.home, ".agents")) {
 		t.Fatal("~/.agents not created")
 	}
-	if inst := e.install(); strings.Join(inst.Types, ",") != "agents" || strings.Join(inst.Enabled, ",") != "default" {
-		t.Fatalf("install = %+v", inst)
+	if conf := e.baseConfig(); strings.Join(conf.Types, ",") != "agents" || strings.Join(conf.Enabled, ",") != "default" {
+		t.Fatalf("base config = %+v", conf)
 	}
 	if n := len(e.config().Playbooks); n != 0 {
 		t.Fatalf("%d playbooks", n)
 	}
 	_, errOut := e.mustRun(ExitFailure, "init", "~", "--type", "claude")
-	if !strings.Contains(errOut, "already initialized") || !strings.Contains(errOut, "aiplam type") {
+	if !strings.Contains(errOut, "is already set up as a base folder") || !strings.Contains(errOut, "aiplam type") {
 		t.Fatalf("unexpected message: %s", errOut)
 	}
 
 	e2 := newEnv(t)
 	e2.mustRun(ExitOK, "init", "-g", "--type", "agents,claude", "-s", "work")
-	if inst := e2.install(); strings.Join(inst.Types, ",") != "agents,claude" ||
-		strings.Join(inst.Enabled, ",") != "work" {
-		t.Fatalf("install = %+v", inst)
+	if conf := e2.baseConfig(); strings.Join(conf.Types, ",") != "agents,claude" ||
+		strings.Join(conf.Enabled, ",") != "work" {
+		t.Fatalf("base config = %+v", conf)
 	}
 	if config.SetExists(e2.home, "default") {
 		t.Fatal("the default set should not be created")
@@ -186,7 +186,7 @@ func TestInit(t *testing.T) {
 	if !fsutil.IsDir(filepath.Join(e2.home, ".claude")) {
 		t.Fatal("~/.claude not created")
 	}
-	e2.mustRun(ExitUsage, "init", "-g", "-t", "agents", "-s", config.InstallName)
+	e2.mustRun(ExitUsage, "init", "-g", "-t", "agents", "-s", config.BaseConfigName)
 }
 
 func TestAddLinksPrefixedSkillsOnly(t *testing.T) {
@@ -199,8 +199,8 @@ func TestAddLinksPrefixedSkillsOnly(t *testing.T) {
 	e.app.Cwd = pb
 	e.mustRun(ExitOK, "add", "arxila", ".")
 
-	for _, target := range []string{".agents", ".claude"} {
-		dir := filepath.Join(e.home, target, "skills")
+	for _, folder := range []string{".agents", ".claude"} {
+		dir := filepath.Join(e.home, folder, "skills")
 		e.assertLink(filepath.Join(dir, "arxila-one"), filepath.Join(pb, "skills", "arxila-one"))
 		e.assertLink(filepath.Join(dir, "arxila-two"), filepath.Join(pb, "skills", "arxila-two"))
 		e.assertMissing(filepath.Join(dir, "other-skill"))
@@ -475,7 +475,7 @@ func TestCheckInvalidConfig(t *testing.T) {
 	e.writeSet("default", "")
 	e.mustRun(ExitOK, "check") // an empty file is an empty set
 
-	file := config.InstallFile(e.home)
+	file := config.BaseConfigFile(e.home)
 	for _, content := range []string{
 		"enabled: [default]\n",
 		"types: []\nenabled: [default]\n",
@@ -493,8 +493,8 @@ func TestCheckInvalidConfig(t *testing.T) {
 		}
 		e.mustRun(ExitFailure, "check")
 		_, errOut := e.mustRun(ExitFailure, "list")
-		if !strings.Contains(errOut, config.InstallName+".yaml") {
-			t.Fatalf("list should point to the installation file for %q: %s", content, errOut)
+		if !strings.Contains(errOut, config.BaseConfigName+".yaml") {
+			t.Fatalf("list should point to the base config file for %q: %s", content, errOut)
 		}
 	}
 }
@@ -591,7 +591,7 @@ func TestSets(t *testing.T) {
 	}
 	e.mustRun(ExitOK, "set", "add", "work")
 	e.mustRun(ExitFailure, "set", "add", "work")
-	e.mustRun(ExitUsage, "set", "add", config.InstallName)
+	e.mustRun(ExitUsage, "set", "add", config.BaseConfigName)
 
 	// A set that is not enabled is only recorded: nothing is linked or unlinked.
 	out, _ := e.mustRun(ExitOK, "add", "y", pbB, "-s", "work")
@@ -615,7 +615,7 @@ func TestSets(t *testing.T) {
 	e.mustRun(ExitOK, "set", "enable", "work")
 	e.assertLink(filepath.Join(e.agentsSkills(), "x-a"), filepath.Join(pbA, "skills", "x-a"))
 	e.assertLink(filepath.Join(e.agentsSkills(), "y-b"), filepath.Join(pbB, "skills", "y-b"))
-	if got := strings.Join(e.install().Enabled, ","); got != "default,work" {
+	if got := strings.Join(e.baseConfig().Enabled, ","); got != "default,work" {
 		t.Fatalf("enabled = %s", got)
 	}
 	out, _ = e.mustRun(ExitOK, "set", "list")
@@ -704,7 +704,7 @@ func TestSetEnableCollisions(t *testing.T) {
 		t.Fatalf("unexpected message: %s", errOut)
 	}
 	e.assertMissing(filepath.Join(e.agentsSkills(), "y-a"))
-	if got := strings.Join(e.install().Enabled, ","); got != "default" {
+	if got := strings.Join(e.baseConfig().Enabled, ","); got != "default" {
 		t.Fatalf("enabled = %s", got)
 	}
 
@@ -749,7 +749,7 @@ func TestSetSwitch(t *testing.T) {
 	}
 	e.assertLink(filepath.Join(e.agentsSkills(), "x-a"), filepath.Join(pb, "skills", "x-a"))
 	e.assertLink(filepath.Join(e.agentsSkills(), "y-a"), filepath.Join(other, "skills", "y-a"))
-	if got := strings.Join(e.install().Enabled, ","); got != "work,more" {
+	if got := strings.Join(e.baseConfig().Enabled, ","); got != "work,more" {
 		t.Fatalf("enabled = %s", got)
 	}
 	e.mustRun(ExitOK, "set", "switch", "more")
@@ -791,7 +791,7 @@ func TestType(t *testing.T) {
 	}
 	e.assertMissing(filepath.Join(e.agentsSkills(), "x-a"))
 	e.assertLink(filepath.Join(claude, "x-a"), filepath.Join(pb, "skills", "x-a"))
-	if got := e.install().Types; strings.Join(got, ",") != "claude" {
+	if got := e.baseConfig().Types; strings.Join(got, ",") != "claude" {
 		t.Fatalf("types = %v", got)
 	}
 
@@ -814,9 +814,9 @@ func TestShortOptions(t *testing.T) {
 	e := newEnv(t)
 	claude := filepath.Join(e.home, ".claude")
 	e.mustRun(ExitOK, "init", "-g", "-t", "agents", "-t=claude", "-s", "main")
-	if inst := e.install(); strings.Join(inst.Types, ",") != "agents,claude" ||
-		strings.Join(inst.Enabled, ",") != "main" {
-		t.Fatalf("install = %+v", inst)
+	if conf := e.baseConfig(); strings.Join(conf.Types, ",") != "agents,claude" ||
+		strings.Join(conf.Enabled, ",") != "main" {
+		t.Fatalf("base config = %+v", conf)
 	}
 	e.mustRun(ExitOK, "set", "add", "work")
 
@@ -1022,7 +1022,7 @@ func TestBaseFolders(t *testing.T) {
 	if strings.Contains(out, "git repository") ||
 		!strings.Contains(out, "the home folder is also being used as a base folder for playbook management, and "+
 			"agents always read") {
-		t.Fatalf("unexpected notes: %s", out) // not inside a repository; outside home, so home is a higher level
+		t.Fatalf("unexpected notes: %s", out) // not inside a repository; outside home, so home is a higher-level base folder
 	}
 	if !fsutil.IsDir(filepath.Join(project, ".agents")) || fsutil.IsDir(filepath.Join(project, ".claude")) {
 		t.Fatal("init should create the .agents folder only")
@@ -1050,8 +1050,8 @@ func TestBaseFolders(t *testing.T) {
 		t.Fatalf("unexpected message: %s", errOut)
 	}
 
-	// The home folder is a higher level for a project outside it: a skill installed in either cannot be installed in
-	// the other.
+	// The home folder is a higher-level base folder for a project outside it: a skill linked from either cannot be
+	// linked from the other.
 	e.app.Cwd = module
 	_, errOut = e.mustRun(ExitFailure, "add", "z", other)
 	if !strings.Contains(errOut, "higher-level base folder") || !strings.Contains(errOut, "--base <basefolder>") ||
@@ -1067,7 +1067,7 @@ func TestBaseFolders(t *testing.T) {
 	e.mustRun(ExitOK, "remove", "x", "-g")
 	e.mustRun(ExitOK, "check")
 
-	// list --all shows every level, nearest first.
+	// list --all lists every base folder, nearest first.
 	out, _ = e.mustRun(ExitOK, "list", "--all", "--json")
 	var levels []listOutput
 	if err := json.Unmarshal([]byte(out), &levels); err != nil {
@@ -1153,19 +1153,19 @@ func TestBaseDiscoveryAndHints(t *testing.T) {
 	}
 	e.mustRun(ExitOK, "init", ".")
 
-	// list --all reports a higher level it cannot read and lists the others.
+	// list --all reports a higher-level base folder it cannot read and lists the others.
 	nested := filepath.Join(project, "nested")
 	if err := os.MkdirAll(nested, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	e.app.Cwd = nested
 	e.mustRun(ExitOK, "init", ".")
-	if err := os.WriteFile(config.InstallFile(project), []byte("types: [nope]\n"), 0o644); err != nil {
+	if err := os.WriteFile(config.BaseConfigFile(project), []byte("types: [nope]\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	out, errOut = e.mustRun(ExitFailure, "list", "--all")
 	if !strings.Contains(out, "Base folder: "+nested) || !strings.Contains(out, "Base folder: ~") ||
-		!strings.Contains(errOut, config.InstallName+".yaml") {
+		!strings.Contains(errOut, config.BaseConfigName+".yaml") {
 		t.Fatalf("unexpected list: %s / %s", out, errOut)
 	}
 }

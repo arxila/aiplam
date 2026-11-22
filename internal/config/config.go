@@ -20,7 +20,7 @@
 // its base folder (the user's home, or any other folder, such as a project's), and its artifacts are linked from the
 // agents configuration folders next to it (.agents, .claude, ...):
 //
-//   - aiplam-config.yaml, the installation's configuration: the types of agents configuration folders where
+//   - aiplam-config.yaml, the base folder's configuration: the types of agents configuration folders where
 //     artifacts are linked from, and the enabled sets.
 //   - <set>.yaml, one file per set: the playbooks registered in the set. Only the enabled sets' playbooks are
 //     linked from the agents configuration folders.
@@ -45,18 +45,18 @@ import (
 const (
 	// DirName is the name of aiplam's configuration folder in a base folder.
 	DirName = ".aiplam"
-	// InstallName is the name (without extension) of the installation's configuration file. It cannot be a set name.
-	InstallName = "aiplam-config"
+	// BaseConfigName is the name (without extension) of the base folder's configuration file. It cannot be a set name.
+	BaseConfigName = "aiplam-config"
 	// FileExt is the extension of the configuration files.
 	FileExt = ".yaml"
 	// DefaultSet is the set that 'aiplam init' creates and enables when no set is given.
 	DefaultSet = "default"
-	// DefaultSkillsPath is the folder, relative to a playbook's folder, where its skills live by default.
+	// DefaultSkillsPath is the folder, relative to a playbook folder, where its skills live by default.
 	DefaultSkillsPath = "skills"
 )
 
 var (
-	// ErrNotInitialized is returned by LoadInstall when the installation's configuration file does not exist.
+	// ErrNotInitialized is returned by LoadBaseConfig when the base folder's configuration file does not exist.
 	ErrNotInitialized = errors.New("not initialized")
 	// ErrNoSet is returned by LoadSet when the set's file does not exist.
 	ErrNoSet = errors.New("no such set")
@@ -81,8 +81,8 @@ func TypeNames() []string {
 	return names
 }
 
-// Install is the content of aiplam-config.yaml.
-type Install struct {
+// BaseConfig is the content of aiplam-config.yaml.
+type BaseConfig struct {
 	// Types are the types of the agents configuration folders where artifacts are linked from (for example agents,
 	// for the base folder's .agents folder); skills go to their skills/ subfolder.
 	Types []string `yaml:"types"`
@@ -100,7 +100,7 @@ type Set struct {
 type Playbook struct {
 	// Name is the prefix of the playbook's artifacts: they are named "<name>-...".
 	Name string `yaml:"name"`
-	// Folder is the path of the playbook's folder (usually a git checkout), relative to the base folder, in slash
+	// Folder is the path of the playbook folder (usually a git checkout), relative to the base folder, in slash
 	// form, so that the configuration can be shared (for example, committed to a project's repository).
 	Folder string `yaml:"folder"`
 	// Artifacts says where each kind of artifact lives in the folder.
@@ -114,8 +114,8 @@ type Artifacts struct {
 
 // Skills holds the settings of the skills artifact kind.
 type Skills struct {
-	// Path is the folder, relative to the playbook's folder, holding the skill folders ("." for the folder itself). It
-	// cannot lead outside the playbook's folder.
+	// Path is the folder, relative to the playbook folder, holding the skill folders ("." for the folder itself). It
+	// cannot lead outside the playbook folder.
 	Path string `yaml:"path"`
 }
 
@@ -124,9 +124,9 @@ func Dir(base string) string {
 	return filepath.Join(base, DirName)
 }
 
-// InstallFile returns the path of the installation's configuration file of a base folder.
-func InstallFile(base string) string {
-	return filepath.Join(Dir(base), InstallName+FileExt)
+// BaseConfigFile returns the path of the configuration file of a base folder.
+func BaseConfigFile(base string) string {
+	return filepath.Join(Dir(base), BaseConfigName+FileExt)
 }
 
 // SetFile returns the path of a set's file.
@@ -198,9 +198,9 @@ func ValidName(name string) bool {
 }
 
 // ValidSetName reports whether name can be a set name: letters, digits, '_' and '-', starting with a letter or digit,
-// and not the name of the installation's configuration file.
+// and not the name of the base folder's configuration file.
 func ValidSetName(name string) bool {
-	return setNameRegexp.MatchString(name) && !strings.EqualFold(name, InstallName)
+	return setNameRegexp.MatchString(name) && !strings.EqualFold(name, BaseConfigName)
 }
 
 // Sets returns the names of the existing sets, sorted.
@@ -239,21 +239,21 @@ func SameSet(base, a, b string) bool {
 	return errA == nil && errB == nil && os.SameFile(fa, fb)
 }
 
-// LoadInstall reads and parses the installation's configuration file. It returns ErrNotInitialized when the file
+// LoadBaseConfig reads and parses the base folder's configuration file. It returns ErrNotInitialized when the file
 // does not exist. Use Validate for semantic checks.
-func LoadInstall(base string) (*Install, error) {
-	data, err := os.ReadFile(InstallFile(base))
+func LoadBaseConfig(base string) (*BaseConfig, error) {
+	data, err := os.ReadFile(BaseConfigFile(base))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, ErrNotInitialized
 	}
 	if err != nil {
 		return nil, err
 	}
-	inst := &Install{}
-	if err := parse(data, inst); err != nil {
+	conf := &BaseConfig{}
+	if err := parse(data, conf); err != nil {
 		return nil, err
 	}
-	return inst, nil
+	return conf, nil
 }
 
 // LoadSet reads and parses a set's file. It returns ErrNoSet when the file does not exist. An empty file is an empty
@@ -288,14 +288,14 @@ func parse(data []byte, v any) error {
 	return nil
 }
 
-// SaveInstall writes the installation's configuration file, replacing it atomically.
-func SaveInstall(base string, inst *Install) error {
-	if inst.Enabled == nil {
-		copied := *inst
+// SaveBaseConfig writes the base folder's configuration file, replacing it atomically.
+func SaveBaseConfig(base string, conf *BaseConfig) error {
+	if conf.Enabled == nil {
+		copied := *conf
 		copied.Enabled = []string{}
-		inst = &copied
+		conf = &copied
 	}
-	return save(InstallFile(base), inst,
+	return save(BaseConfigFile(base), conf,
 		"# aiplam (AI Playbook Manager) configuration of this base folder.\n"+
 			"# types: the agents configuration folders, next to this .aiplam folder, where artifacts are linked from\n"+
 			"#   (skills from their skills/ subfolder): "+typeList()+"; change them with 'aiplam type'.\n"+
@@ -358,13 +358,13 @@ func typeList() string {
 	return strings.Join(items, ", ")
 }
 
-// TargetDirs returns the agents configuration folders of the configuration's types, in the base folder.
-func (c *Install) TargetDirs(base string) []string {
-	return TargetDirs(c.Types, base)
+// AgentsConfigDirs returns the agents configuration folders of the configuration's types, in the base folder.
+func (c *BaseConfig) AgentsConfigDirs(base string) []string {
+	return AgentsConfigDirs(c.Types, base)
 }
 
-// TargetDirs returns the agents configuration folders of the given (known) types, in the base folder.
-func TargetDirs(types []string, base string) []string {
+// AgentsConfigDirs returns the agents configuration folders of the given (known) types, in the base folder.
+func AgentsConfigDirs(types []string, base string) []string {
 	var dirs []string
 	for _, t := range types {
 		if path, ok := Types[t]; ok {
@@ -394,9 +394,9 @@ func ValidateTypes(types []string) []error {
 	return errs
 }
 
-// Validate checks the installation's configuration and returns every problem found. It does not check that the
+// Validate checks the base folder's configuration and returns every problem found. It does not check that the
 // enabled sets exist.
-func (c *Install) Validate() []error {
+func (c *BaseConfig) Validate() []error {
 	errs := ValidateTypes(c.Types)
 	for i, set := range c.Enabled {
 		if !ValidSetName(set) {
@@ -412,7 +412,7 @@ func (c *Install) Validate() []error {
 }
 
 // IsEnabled reports whether set is one of the enabled sets.
-func (c *Install) IsEnabled(base, set string) bool {
+func (c *BaseConfig) IsEnabled(base, set string) bool {
 	for _, e := range c.Enabled {
 		if SameSet(base, e, set) {
 			return true
@@ -429,7 +429,7 @@ func (p Playbook) SkillsPath() string {
 	return p.Artifacts.Skills.Path
 }
 
-// Dir returns the playbook's folder, resolved against the base folder, with links resolved.
+// Dir returns the playbook folder, resolved against the base folder, with links resolved.
 func (p Playbook) Dir(base string) string {
 	return fsutil.Canonical(filepath.Join(base, filepath.FromSlash(p.Folder)))
 }
@@ -449,7 +449,7 @@ func ValidFolder(folder string) bool {
 }
 
 // ValidArtifactPath reports whether path can be the location of a kind of artifact inside a playbook: a relative
-// path, in slash or native form, that does not lead outside the playbook's folder ("." is the folder itself).
+// path, in slash or native form, that does not lead outside the playbook folder ("." is the folder itself).
 func ValidArtifactPath(path string) bool {
 	return path != "" && filepath.IsLocal(filepath.FromSlash(path))
 }
@@ -471,9 +471,9 @@ func (s *Set) Validate(base string) []error {
 		}
 		switch {
 		case p.Folder == "":
-			add("%s has no folder", label)
+			add("%s has no folder (its playbook folder)", label)
 		case !ValidFolder(p.Folder):
-			add("%s: folder '%s' must be a path relative to the base folder (the folder that holds %s)", label,
+			add("%s: playbook folder '%s' must be a path relative to the base folder (the folder that holds %s)", label,
 				p.Folder, DirName)
 		}
 		if sp := p.Artifacts.Skills.Path; sp == "" {
@@ -490,7 +490,8 @@ func (s *Set) Validate(base string) []error {
 			if fsutil.SamePath(p.Dir(base), q.Dir(base)) {
 				add("%s is registered more than once for playbook folder '%s'", label, p.Folder)
 			} else if fsutil.SameName(filepath.Base(p.Dir(base)), filepath.Base(q.Dir(base))) {
-				add("%s is registered for '%s' and '%s', whose last segments are equal, so their ids collide",
+				add("%s is registered for playbook folders '%s' and '%s', whose last segments are equal, so their ids "+
+					"collide",
 					label, q.Folder, p.Folder)
 			}
 		}

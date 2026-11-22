@@ -38,7 +38,7 @@ func TestTestdataPlaybooks(t *testing.T) {
 	tomato := filepath.Join(pbs, "aiplam-tomato-playbook")
 	blueberry := filepath.Join(pbs, "aiplam-blueberry-playbook")
 
-	installed := func() []string {
+	linked := func() []string {
 		t.Helper()
 		items, err := os.ReadDir(e.agentsSkills())
 		if err != nil {
@@ -54,8 +54,8 @@ func TestTestdataPlaybooks(t *testing.T) {
 	expect := func(want ...string) {
 		t.Helper()
 		sort.Strings(want)
-		if got := installed(); strings.Join(got, " ") != strings.Join(want, " ") {
-			t.Fatalf("installed skills = %v, want %v", got, want)
+		if got := linked(); strings.Join(got, " ") != strings.Join(want, " ") {
+			t.Fatalf("linked skills = %v, want %v", got, want)
 		}
 	}
 
@@ -103,7 +103,7 @@ func TestTestdataPlaybooks(t *testing.T) {
 	e.mustRun(ExitOK, "check")
 
 	// A second set: it collides with the first one (both provide aiplam-tomato), so it can replace it but not join it.
-	all := installed()
+	all := linked()
 	e.mustRun(ExitOK, "set", "add", "other")
 	e.mustRun(ExitOK, "add", "aiplam-tomato", tomato, "-sp", ".", "-s", "other")
 	e.mustRun(ExitFailure, "set", "enable", "other")
@@ -126,7 +126,8 @@ func TestTestdataPlaybooks(t *testing.T) {
 		t.Fatalf("unexpected message: %s", errOut)
 	}
 
-	// A project configuration: a skill installed in the home folder's cannot be installed in it.
+	// A project base folder: a skill linked from the home folder's agents configuration folder cannot be linked
+	// from the project's.
 	project := filepath.Join(e.home, "projects", "demo")
 	if err := os.MkdirAll(filepath.Join(project, "module"), 0o755); err != nil {
 		t.Fatal(err)

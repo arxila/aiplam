@@ -55,10 +55,10 @@ Examples:
 `
 
 type listOutput struct {
-	Base          string    `json:"base"`
-	Types         []string  `json:"types"`
-	AgentsFolders []string  `json:"agentsConfigurationFolders"`
-	Sets          []listSet `json:"sets"`
+	Base             string    `json:"base"`
+	Types            []string  `json:"types"`
+	AgentsConfigDirs []string  `json:"agentsConfigurationFolders"`
+	Sets             []listSet `json:"sets"`
 }
 
 type listSet struct {
@@ -102,13 +102,13 @@ func (a *App) cmdList(args []string) error {
 	if len(p.positional) > 0 {
 		return usagef("unexpected argument: %s", p.positional[0])
 	}
-	levels, asJSON := p.bools["all"], p.bools["json"]
-	if levels && a.Set != "" {
+	all, asJSON := p.bools["all"], p.bools["json"]
+	if all && a.Set != "" {
 		return usagef("--all cannot be used with --set")
 	}
 	a.baseShown = true // the base folder is part of the listing
 	bases := []string{a.Base}
-	if levels {
+	if all {
 		bases = append(bases, config.Ancestors(a.Base, a.Home)...)
 	}
 	outs := []listOutput{}
@@ -116,7 +116,7 @@ func (a *App) cmdList(args []string) error {
 	base0, baseArg0, global0 := a.Base, a.baseArg, a.global
 	for i, base := range bases {
 		if i > 0 {
-			// Commands suggested for a higher level must name its base folder.
+			// Commands suggested for a higher-level base folder must name it.
 			a.Base, a.baseArg, a.global = base, base, false
 		}
 		st, err := a.load()
@@ -124,16 +124,16 @@ func (a *App) cmdList(args []string) error {
 			return err
 		}
 		if err != nil {
-			// A higher level that cannot be read: report it and list the others.
+			// A higher-level base folder that cannot be read: report it and list the others.
 			if !errors.Is(err, errSilent) {
-				a.errorf("the configuration of '%s' cannot be listed: %s", a.pretty(base), err)
+				a.errorf("the configuration of base folder '%s' cannot be listed: %s", a.pretty(base), err)
 			}
 			failed = true
 			continue
 		}
-		out := listOutput{Base: base, Types: st.inst.Types, AgentsFolders: st.targets, Sets: []listSet{}}
+		out := listOutput{Base: base, Types: st.conf.Types, AgentsConfigDirs: st.agentsConfigDirs, Sets: []listSet{}}
 		for _, set := range st.sets {
-			out.Sets = append(out.Sets, a.listSet(set, st.targets))
+			out.Sets = append(out.Sets, a.listSet(set, st.agentsConfigDirs))
 		}
 		outs = append(outs, out)
 		if !asJSON {
@@ -149,7 +149,7 @@ func (a *App) cmdList(args []string) error {
 	if asJSON {
 		enc := json.NewEncoder(a.Stdout)
 		enc.SetIndent("", "  ")
-		if levels {
+		if all {
 			if err := enc.Encode(outs); err != nil {
 				return err
 			}
@@ -162,7 +162,8 @@ func (a *App) cmdList(args []string) error {
 		return nil
 	}
 	if notLinked {
-		a.printf("\nSome artifacts are not linked: run '%s', or '%s' for details (with --base for a higher level).\n",
+		a.printf("\nSome artifacts are not linked: run '%s', or '%s' for details (with --base for a higher-level "+
+			"base folder).\n",
 			a.hint("update --all"), a.hint("check"))
 	}
 	if failed {
@@ -175,7 +176,7 @@ func (a *App) cmdList(args []string) error {
 // linked from every agents configuration folder.
 func (a *App) printListing(st *state, out listOutput) bool {
 	var folders []string
-	for _, t := range out.AgentsFolders {
+	for _, t := range out.AgentsConfigDirs {
 		folders = append(folders, a.pretty(t))
 	}
 	a.printf("Base folder: %s\nAgents configuration folders: %s\n", a.pretty(out.Base), strings.Join(folders, ", "))
@@ -208,7 +209,8 @@ func (a *App) printListing(st *state, out listOutput) bool {
 	return notLinked
 }
 
-// listPlaybooks prints a set's playbooks and reports whether any of their artifacts is not linked from every target.
+// listPlaybooks prints a set's playbooks and reports whether any of their artifacts is not linked from every agents
+// configuration folder.
 func (a *App) listPlaybooks(ls listSet) bool {
 	notLinked := false
 	for _, lp := range ls.Playbooks {
@@ -242,7 +244,7 @@ func (a *App) listPlaybooks(ls listSet) bool {
 }
 
 // listSet gathers the information of a set's playbooks.
-func (a *App) listSet(set *setState, targets []string) listSet {
+func (a *App) listSet(set *setState, agentsConfigDirs []string) listSet {
 	ls := listSet{Name: set.name, Enabled: set.enabled, Playbooks: []listPlaybook{}}
 	for _, e := range set.entries {
 		lp := listPlaybook{ID: e.ID, Name: e.Name, Folder: e.Dir, Problems: []string{},
@@ -271,7 +273,7 @@ func (a *App) listSet(set *setState, targets []string) listSet {
 			}
 			for _, s := range skills {
 				item := listSkill{Name: s.Name, Source: s.Source, MissingIn: []string{}}
-				for _, t := range targets {
+				for _, t := range agentsConfigDirs {
 					if !set.enabled {
 						break // a set that is not enabled has nothing linked
 					}

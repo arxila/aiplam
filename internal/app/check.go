@@ -64,22 +64,22 @@ func (a *App) cmdCheck(args []string) error {
 		a.warnf(format, args...)
 	}
 
-	instFile := a.pretty(config.InstallFile(a.Base))
-	inst, err := config.LoadInstall(a.Base)
+	confFile := a.pretty(config.BaseConfigFile(a.Base))
+	conf, err := config.LoadBaseConfig(a.Base)
 	if errors.Is(err, config.ErrNotInitialized) {
 		return a.notInitialized()
 	}
 	a.showBase()
-	a.printf("Configuration: %s\n", instFile)
+	a.printf("Configuration: %s\n", confFile)
 	if err == nil {
-		for _, e := range inst.Validate() {
-			problem("%s: %s", instFile, e)
+		for _, e := range conf.Validate() {
+			problem("%s: %s", confFile, e)
 		}
 	} else {
-		problem("%s: %s", instFile, err)
+		problem("%s: %s", confFile, err)
 	}
 	if attention > 0 {
-		a.errorf("fix %s by hand; nothing else was checked.", instFile)
+		a.errorf("fix %s by hand; nothing else was checked.", confFile)
 		return errSilent
 	}
 	a.printf("  format and content are valid\n")
@@ -88,7 +88,7 @@ func (a *App) cmdCheck(args []string) error {
 	if a.Set != "" && !config.SetExists(a.Base, a.Set) {
 		return fmt.Errorf("set '%s' does not exist ('%s' lists the sets)", a.Set, a.hint("set list"))
 	}
-	st := &state{inst: inst, targets: inst.TargetDirs(a.Base)}
+	st := &state{conf: conf, agentsConfigDirs: conf.AgentsConfigDirs(a.Base)}
 	loadSet := func(name string, enabled bool) *setState {
 		file := a.setFile(name)
 		if !config.SetExists(a.Base, name) {
@@ -110,7 +110,7 @@ func (a *App) cmdCheck(args []string) error {
 		}
 		return &setState{name: name, cfg: cfg, enabled: enabled, entries: playbook.Entries(name, cfg.Playbooks, a.Base)}
 	}
-	for _, name := range inst.Enabled {
+	for _, name := range conf.Enabled {
 		if s := loadSet(name, true); s != nil {
 			st.enabled = append(st.enabled, s)
 			if a.Set == "" || config.SameSet(a.Base, name, a.Set) {
@@ -118,7 +118,7 @@ func (a *App) cmdCheck(args []string) error {
 			}
 		}
 	}
-	if a.Set != "" && len(st.sets) == 0 && !inst.IsEnabled(a.Base, a.Set) {
+	if a.Set != "" && len(st.sets) == 0 && !conf.IsEnabled(a.Base, a.Set) {
 		if s := loadSet(a.Set, false); s != nil {
 			st.sets = append(st.sets, s)
 		}
@@ -128,9 +128,9 @@ func (a *App) cmdCheck(args []string) error {
 		return errSilent
 	}
 
-	targets := st.targets
+	agentsConfigDirs := st.agentsConfigDirs
 	a.printf("Agents configuration folders:\n")
-	for _, t := range targets {
+	for _, t := range agentsConfigDirs {
 		if !fsutil.IsDir(t) {
 			problem("agents configuration folder '%s' does not exist; it is created when an artifact is next linked from it",
 				a.pretty(t))
@@ -160,8 +160,8 @@ func (a *App) cmdCheck(args []string) error {
 	a.hintSet = ""
 
 	// Broken links that no playbook plan covers (for example, links to an unregistered or moved playbook), and links
-	// whose skill is also in the agents configuration folder of the same type of a higher-level base folder.
-	for _, t := range targets {
+	// whose artifact is also in the agents configuration folder of the same type of a higher-level base folder.
+	for _, t := range agentsConfigDirs {
 		dir := playbook.SkillsFolder(t)
 		items, err := os.ReadDir(dir)
 		if err != nil {
@@ -177,7 +177,7 @@ func (a *App) cmdCheck(args []string) error {
 				problem("broken link %s -> %s (not managed by any registered playbook; remove it by hand)",
 					a.pretty(link), a.pretty(current))
 			}
-			for _, higher := range a.ancestorTargets()[t] {
+			for _, higher := range a.ancestorAgentsConfigDirs()[t] {
 				other := filepath.Join(playbook.SkillsFolder(higher), item.Name())
 				if _, err := os.Lstat(other); err == nil {
 					problem("%s is also in '%s', an agents configuration folder of the same type of a higher-level base "+
@@ -196,7 +196,8 @@ func (a *App) cmdCheck(args []string) error {
 	return nil
 }
 
-// checkPlaybook checks a playbook's folders and, for an enabled set, whether 'aiplam update' would change anything.
+// checkPlaybook checks a playbook's playbook folder and skills folder and, for an enabled set, whether 'aiplam
+// update' would change anything.
 func (a *App) checkPlaybook(st *state, set *setState, e playbook.Entry, reported map[string]bool,
 	problem func(string, ...any)) {
 	a.printf("Playbook %s (%s) at %s\n", e.ID, a.version(e.Dir), a.pretty(e.Dir))
@@ -216,16 +217,16 @@ func (a *App) checkPlaybook(st *state, set *setState, e playbook.Entry, reported
 				strings.Join(others, ", "), a.hint("set enable "+set.name))
 		}
 		if len(overlaps) == 0 {
-			a.printf("  playbook folders are valid (not linked: the set is not enabled)\n")
+			a.printf("  playbook folder and skills folder are valid (not linked: the set is not enabled)\n")
 		}
 		return
 	}
-	plan, err := playbook.Build(set.entries, e, st.targets, st.others(set.name))
+	plan, err := playbook.Build(set.entries, e, st.agentsConfigDirs, st.others(set.name))
 	if err != nil {
 		problem("playbook %s: %s", e.ID, err)
 		return
 	}
-	playbook.MarkAncestors(&plan, a.ancestorTargets())
+	playbook.MarkAncestors(&plan, a.ancestorAgentsConfigDirs())
 	var changes []playbook.Action
 	for _, act := range plan.Changes() {
 		// A link can match several playbooks of the same folder (prefixes x and x-y): report it once.

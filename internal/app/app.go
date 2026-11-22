@@ -303,28 +303,28 @@ func (a *App) baseOption() string {
 	return ""
 }
 
-// ancestorTargets maps each agents configuration folder the base folder can have (one per type) to the agents
+// ancestorAgentsConfigDirs maps each agents configuration folder the base folder can have (one per type) to the agents
 // configuration folders of the same type of the higher-level base folders (see config.Ancestors), which agents may
 // read besides the base folder's: artifacts in them cannot be linked from its folder of that type. A configuration
 // that cannot be read is skipped with a warning.
-func (a *App) ancestorTargets() map[string][]string {
+func (a *App) ancestorAgentsConfigDirs() map[string][]string {
 	if a.ancestors != nil {
 		return a.ancestors
 	}
 	a.ancestors = map[string][]string{}
 	for _, r := range config.Ancestors(a.Base, a.Home) {
-		inst, err := config.LoadInstall(r)
-		if err == nil && len(inst.Validate()) > 0 {
+		conf, err := config.LoadBaseConfig(r)
+		if err == nil && len(conf.Validate()) > 0 {
 			err = errors.New("its content is not valid")
 		}
 		if err != nil {
-			a.warnf("the configuration of '%s' cannot be read (%s): its agents configuration folders are not "+
+			a.warnf("the configuration of base folder '%s' cannot be read (%s): its agents configuration folders are not "+
 				"checked for artifacts already linked from them.", a.pretty(r), err)
 			continue
 		}
-		for _, t := range inst.Types {
-			own := config.TargetDirs([]string{t}, a.Base)[0]
-			a.ancestors[own] = append(a.ancestors[own], config.TargetDirs([]string{t}, r)[0])
+		for _, t := range conf.Types {
+			own := config.AgentsConfigDirs([]string{t}, a.Base)[0]
+			a.ancestors[own] = append(a.ancestors[own], config.AgentsConfigDirs([]string{t}, r)[0])
 		}
 	}
 	return a.ancestors
@@ -406,7 +406,7 @@ func (a *App) version(folder string) gitinfo.Version {
 
 func invalidSetName(name string) error {
 	return usagef("invalid set name '%s': use letters, digits, '_' and '-', starting with a letter or digit ('%s' is "+
-		"reserved)", name, config.InstallName)
+		"reserved)", name, config.BaseConfigName)
 }
 
 // cmd returns an aiplam command line to suggest to the user, with the --set option when the command acts on a set
@@ -432,10 +432,10 @@ func (a *App) noSetOption(command string) error {
 	return nil
 }
 
-// loadInstall loads the installation's configuration and fails when it does not exist or is not valid.
-func (a *App) loadInstall() (*config.Install, error) {
-	file := a.pretty(config.InstallFile(a.Base))
-	inst, err := config.LoadInstall(a.Base)
+// loadBaseConfig loads the base folder's configuration and fails when it does not exist or is not valid.
+func (a *App) loadBaseConfig() (*config.BaseConfig, error) {
+	file := a.pretty(config.BaseConfigFile(a.Base))
+	conf, err := config.LoadBaseConfig(a.Base)
 	if errors.Is(err, config.ErrNotInitialized) {
 		return nil, a.notInitialized()
 	}
@@ -443,23 +443,27 @@ func (a *App) loadInstall() (*config.Install, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w; fix it by hand", file, err)
 	}
-	if errs := inst.Validate(); len(errs) > 0 {
+	if errs := conf.Validate(); len(errs) > 0 {
 		for _, e := range errs {
 			a.errorf("%s: %s", file, e)
 		}
 		a.errorf("fix %s by hand; '%s' lists its problems.", file, a.hint("check"))
 		return nil, errSilent
 	}
-	return inst, nil
+	return conf, nil
 }
 
 // notInitialized returns the error for a base folder without configuration.
 func (a *App) notInitialized() error {
-	if a.baseArg != "" || a.global {
-		return fmt.Errorf("aiplam is not initialized in '%s': run 'aiplam init %s' first", a.pretty(a.Base),
-			a.pretty(a.Base))
+	if a.baseArg != "" || a.global || config.IsBase(a.Base) {
+		arg := a.pretty(a.Base)
+		if fsutil.SamePath(a.Base, fsutil.Canonical(a.Home)) {
+			arg = "--global"
+		}
+		return fmt.Errorf("'%s' is not set up as a base folder (%s is missing): run 'aiplam init %s' first",
+			a.pretty(a.Base), a.pretty(config.BaseConfigFile(a.Base)), arg)
 	}
-	return errors.New("no aiplam configuration was found in the current folder, its parents or the home folder: run " +
+	return errors.New("no base folder was found from the current folder up, nor in the home folder: run " +
 		"'aiplam init <basefolder>' (or 'aiplam init --global', for the home folder) first")
 }
 
@@ -473,10 +477,10 @@ type setState struct {
 
 // state is what commands that act on sets work with.
 type state struct {
-	inst    *config.Install
-	targets []string
-	sets    []*setState // the sets acted on: the one given with --set, or the enabled ones
-	enabled []*setState // every enabled set
+	conf             *config.BaseConfig
+	agentsConfigDirs []string
+	sets             []*setState // the sets acted on: the one given with --set, or the enabled ones
+	enabled          []*setState // every enabled set
 }
 
 // others returns the entries of the enabled sets other than set, one slice per set.
@@ -514,15 +518,15 @@ func (a *App) setFile(set string) string {
 	return a.pretty(config.SetFile(a.Base, set))
 }
 
-// load loads the installation's configuration, every enabled set, and the set given with --set (which must exist).
+// load loads the base folder's configuration, every enabled set, and the set given with --set (which must exist).
 // It fails when any of them is missing or not valid.
 func (a *App) load() (*state, error) {
-	inst, err := a.loadInstall()
+	conf, err := a.loadBaseConfig()
 	if err != nil {
 		return nil, err
 	}
-	st := &state{inst: inst, targets: inst.TargetDirs(a.Base)}
-	for _, name := range inst.Enabled {
+	st := &state{conf: conf, agentsConfigDirs: conf.AgentsConfigDirs(a.Base)}
+	for _, name := range conf.Enabled {
 		if !config.SetExists(a.Base, name) {
 			return nil, fmt.Errorf("the enabled set '%s' does not exist (%s is missing): disable it with '%s', or "+
 				"create it again with '%s'", name, a.setFile(name), a.hint("set disable "+name), a.hint("set add "+name))
@@ -751,8 +755,8 @@ func (a *App) printConflicts(plan playbook.Plan) {
 	}
 }
 
-// conflictTexts describes the conflicts of a plan, once each (a skill provided by two playbooks conflicts in every
-// target).
+// conflictTexts describes the conflicts of a plan, once each (an artifact provided by two playbooks conflicts in
+// every agents configuration folder).
 func (a *App) conflictTexts(plan playbook.Plan) []string {
 	var texts []string
 	seen := map[string]bool{}
@@ -784,7 +788,7 @@ func (a *App) conflictText(c playbook.Action) string {
 	return fmt.Sprintf("%s %s: %s", c.Artifact, c.Name, why)
 }
 
-// checkPlaybookFolders returns an error when a playbook's folder or skills folder is missing, or its skills folder
+// checkPlaybookFolders returns an error when a playbook folder or skills folder is missing, or its skills folder
 // lies outside its folder (through a link).
 func (a *App) checkPlaybookFolders(e playbook.Entry) error {
 	switch {

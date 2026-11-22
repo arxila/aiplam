@@ -58,27 +58,27 @@ func (a *App) cmdType(args []string) error {
 	if err != nil {
 		return err
 	}
-	inst, err := a.loadInstall()
+	conf, err := a.loadBaseConfig()
 	if err != nil {
 		return err
 	}
-	current := inst.TargetDirs(a.Base)
+	current := conf.AgentsConfigDirs(a.Base)
 	if len(types) == 0 {
-		a.printTypes(inst.Types)
+		a.printTypes(conf.Types)
 		return nil
 	}
-	updated := *inst
+	updated := *conf
 	updated.Types = types
 	if errs := updated.Validate(); len(errs) > 0 {
 		return errs[0]
 	}
-	if sameTypes(inst.Types, types) {
+	if sameTypes(conf.Types, types) {
 		a.printf("The types are unchanged.\n")
 		return nil
 	}
-	next := updated.TargetDirs(a.Base)
+	next := updated.AgentsConfigDirs(a.Base)
 
-	sets, err := a.enabledSets(inst)
+	sets, err := a.enabledSets(conf)
 	if err != nil {
 		return err
 	}
@@ -94,17 +94,17 @@ func (a *App) cmdType(args []string) error {
 	if err != nil {
 		return err
 	}
-	playbook.MarkAncestors(&plan, a.ancestorTargets())
+	playbook.MarkAncestors(&plan, a.ancestorAgentsConfigDirs())
 	if len(plan.Conflicts()) > 0 {
 		a.printConflicts(plan)
 		a.errorf("the types were not changed: %s.", a.conflictAdvice(plan))
 		return errSilent
 	}
 
-	if len(inst.Enabled) == 0 {
+	if len(conf.Enabled) == 0 {
 		a.printf("Changing the types (no set is enabled)\n")
 	} else {
-		a.printf("Changing the types (enabled sets: %s)\n", strings.Join(inst.Enabled, ", "))
+		a.printf("Changing the types (enabled sets: %s)\n", strings.Join(conf.Enabled, ", "))
 	}
 	for _, dir := range next {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -114,7 +114,7 @@ func (a *App) cmdType(args []string) error {
 	if err := playbook.Apply(plan, a.printAction); err != nil {
 		return fmt.Errorf("%w; the types were not changed", err)
 	}
-	if err := config.SaveInstall(a.Base, &updated); err != nil {
+	if err := config.SaveBaseConfig(a.Base, &updated); err != nil {
 		return a.undo(plan, err, "the types were not changed")
 	}
 	a.printTypes(updated.Types)
@@ -123,7 +123,7 @@ func (a *App) cmdType(args []string) error {
 
 // printTypes prints types and their agents configuration folders: "agents  ~/.agents".
 func (a *App) printTypes(types []string) {
-	dirs := config.TargetDirs(types, a.Base)
+	dirs := config.AgentsConfigDirs(types, a.Base)
 	for i, t := range types {
 		a.printf("%-8s %s\n", t, a.pretty(dirs[i]))
 	}

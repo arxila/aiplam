@@ -17,7 +17,7 @@
 // =========================================================================
 
 // Package playbook computes playbook ids, discovers the artifacts (skills) of each registered playbook, and plans the
-// link changes needed to add, update or remove a playbook in the agents configuration folders (its targets).
+// link changes needed to add, update or remove a playbook in the agents configuration folders.
 package playbook
 
 import (
@@ -42,7 +42,7 @@ type Entry struct {
 	ID string
 	// Set is the set the playbook is registered in.
 	Set string
-	// Dir is the playbook's folder, resolved against the base folder, with links resolved.
+	// Dir is the playbook folder, resolved against the base folder, with links resolved.
 	Dir string
 	// SkillsDir is the folder holding the playbook's skills, with links resolved.
 	SkillsDir string
@@ -111,7 +111,7 @@ func Owner(entries []Entry, skillsDir, name string) *Entry {
 
 // Skills returns the skills that belong to e when entries (which must include e) are registered: the skill folders
 // in its skills folder named "<name>-...", except those claimed by an entry with a longer matching name on the same
-// skills folder, and those that are links leading outside the playbook's folder. It fails when the skills folder
+// skills folder, and those that are links leading outside the playbook folder. It fails when the skills folder
 // cannot be read.
 func Skills(entries []Entry, e Entry) ([]Skill, error) {
 	candidates, err := candidateSkills(e.SkillsDir, e.Name)
@@ -162,14 +162,14 @@ const (
 	Ancestor
 )
 
-// Action is one planned change for one artifact in one target folder.
+// Action is one planned change for one artifact in one agents configuration folder.
 type Action struct {
 	Kind ActionKind
 	// Kind of artifact ("skill").
 	Artifact string
 	// Name of the artifact.
 	Name string
-	// Link is the path of the link in the target folder.
+	// Link is the path of the link in the agents configuration folder.
 	Link string
 	// Source is the folder the link points (or must point) to.
 	Source string
@@ -208,25 +208,25 @@ func (p Plan) filter(kind ActionKind) []Action {
 	return out
 }
 
-// SkillsFolder returns the folder of a target where skills are linked from.
-func SkillsFolder(target string) string {
-	return filepath.Join(target, "skills")
+// SkillsFolder returns the folder of an agents configuration folder where skills are linked from.
+func SkillsFolder(agentsConfigDir string) string {
+	return filepath.Join(agentsConfigDir, "skills")
 }
 
-// Build plans the changes for playbook e in the given targets, for the state in which final are the registered
-// entries of e's set and others are the entries of the other enabled sets, one slice per set. When e is in final (by
-// name and folder), its artifacts must be linked (add or update); otherwise e is being removed and all of its links go.
-// Links that point into e's skills folder and are named after e are removed unless some entry in final or others wants
-// exactly that link. A desired link whose path holds anything other than a link to the same skill is a conflict, as is
-// a skill name that another playbook of final or others also provides.
-func Build(final []Entry, e Entry, targets []string, others [][]Entry) (Plan, error) {
-	return build(final, e, targets, nil, others, false)
+// Build plans the changes for playbook e in the given agents configuration folders, for the state in which final
+// are the registered entries of e's set and others are the entries of the other enabled sets, one slice per set.
+// When e is in final (by name and folder), its artifacts must be linked (add or update); otherwise e is being
+// removed and all of its links go. Links that point into e's skills folder and are named after e are removed unless
+// some entry in final or others wants exactly that link. A desired link whose path holds anything other than a link
+// to the same artifact is a conflict, as is an artifact name that another playbook of final or others also provides.
+func Build(final []Entry, e Entry, agentsConfigDirs []string, others [][]Entry) (Plan, error) {
+	return build(final, e, agentsConfigDirs, nil, others, false)
 }
 
 // build is Build for a state in which the links in gone have already been removed. With strict, a desired link that
 // already exists is a conflict even when it is right.
-func build(final []Entry, e Entry, targets []string, gone map[string]bool, others [][]Entry, strict bool) (Plan,
-	error) {
+func build(final []Entry, e Entry, agentsConfigDirs []string, gone map[string]bool, others [][]Entry,
+	strict bool) (Plan, error) {
 	plan := Plan{Entry: e}
 	inspect := func(link string) (fsutil.LinkState, string, error) {
 		if gone[link] {
@@ -287,8 +287,8 @@ func build(final []Entry, e Entry, targets []string, gone map[string]bool, other
 		mineByName[s.Name] = s
 	}
 
-	for _, target := range targets {
-		dir := SkillsFolder(target)
+	for _, agentsConfigDir := range agentsConfigDirs {
+		dir := SkillsFolder(agentsConfigDir)
 		for _, s := range mine {
 			link := filepath.Join(dir, s.Name)
 			action := Action{Artifact: "skill", Name: s.Name, Link: link, Source: s.Source}
@@ -376,17 +376,17 @@ func Overlaps(final []Entry, e Entry) (map[string][]string, error) {
 }
 
 // Switch plans the move from one linked state to another. Each argument holding entries has one slice per set:
-// the links of the sets in from are removed from fromTargets, the sets in to are linked in toTargets, and the sets
-// in stay remain linked (their links are neither removed nor shared). Links that from and to both want (same path,
-// same skill) are left alone. Conflicts are planned as in Build, except that links being removed are not in the way;
-// with strict, any other link already in place of a link to create is a conflict. Entries of to must have their
-// skills folders. dropReason explains the removals of links in folders that are no longer targets; reason explains
-// the others.
-func Switch(from, to, stay [][]Entry, fromTargets, toTargets []string, reason, dropReason string, strict bool) (Plan,
-	error) {
+// the links of the sets in from are removed from the agents configuration folders fromAgentsConfigDirs, the sets in
+// to are linked from toAgentsConfigDirs, and the sets in stay remain linked (their links are neither removed nor
+// shared). Links that from and to both want (same path, same skill) are left alone. Conflicts are planned as in
+// Build, except that links being removed are not in the way; with strict, any other link already in place of a link
+// to create is a conflict. Entries of to must have their skills folders. dropReason explains the removals of links
+// in agents configuration folders that are no longer used; reason explains the others.
+func Switch(from, to, stay [][]Entry, fromAgentsConfigDirs, toAgentsConfigDirs []string, reason, dropReason string,
+	strict bool) (Plan, error) {
 	var plan Plan
-	isTarget := func(link string) bool {
-		for _, t := range toTargets {
+	inNewAgentsConfigDir := func(link string) bool {
+		for _, t := range toAgentsConfigDirs {
 			if fsutil.SamePath(SkillsFolder(t), filepath.Dir(link)) {
 				return true
 			}
@@ -397,14 +397,14 @@ func Switch(from, to, stay [][]Entry, fromTargets, toTargets []string, reason, d
 	var removals []Action
 	for _, group := range from {
 		for _, e := range group {
-			p, err := build(nil, e, fromTargets, nil, stay, false)
+			p, err := build(nil, e, fromAgentsConfigDirs, nil, stay, false)
 			if err != nil {
 				return plan, err
 			}
 			for _, a := range p.Actions {
 				if _, dup := removed[a.Link]; a.Kind == Remove && !dup {
 					a.Reason = reason
-					if !isTarget(a.Link) {
+					if !inNewAgentsConfigDir(a.Link) {
 						a.Reason = dropReason
 					}
 					removed[a.Link] = a
@@ -427,7 +427,7 @@ func Switch(from, to, stay [][]Entry, fromTargets, toTargets []string, reason, d
 			}
 		}
 		for _, e := range group {
-			p, err := build(group, e, toTargets, gone, others, strict)
+			p, err := build(group, e, toAgentsConfigDirs, gone, others, strict)
 			if err != nil {
 				return plan, err
 			}
@@ -480,15 +480,15 @@ func wantedExactly(skills []Skill, source string) bool {
 
 // MarkAncestors turns into Ancestor conflicts the creations of a plan whose artifact name already exists in the skills
 // folder of an agents configuration folder of a higher-level base folder, so that agents reading several levels
-// never see an artifact twice. ancestors maps each agents configuration folder of the plan's targets to the
+// never see an artifact twice. ancestors maps each agents configuration folder of the plan to the
 // higher-level agents configuration folders of the same type.
 func MarkAncestors(plan *Plan, ancestors map[string][]string) {
 	for i, act := range plan.Actions {
 		if act.Kind != Create {
 			continue
 		}
-		target := filepath.Dir(filepath.Dir(act.Link)) // the link is in the target's skills folder
-		for _, t := range ancestors[target] {
+		dir := filepath.Dir(filepath.Dir(act.Link)) // the link is in an agents configuration folder's skills folder
+		for _, t := range ancestors[dir] {
 			path := filepath.Join(SkillsFolder(t), act.Name)
 			if _, err := os.Lstat(path); err == nil {
 				plan.Actions[i].Kind, plan.Actions[i].Cause, plan.Actions[i].Current = Conflict, Ancestor, path
@@ -504,9 +504,9 @@ func sameFolder(a, b string) bool {
 	return fsutil.SamePath(fsutil.Canonical(a), fsutil.Canonical(b))
 }
 
-// Apply performs the creations and removals of a plan that has no conflicts, creating the targets' skills folders
-// when needed. It is all-or-nothing: when a change fails, the changes already made are undone (and report has been
-// called for them) before returning the error.
+// Apply performs the creations and removals of a plan that has no conflicts, creating the skills folders of the
+// agents configuration folders when needed. It is all-or-nothing: when a change fails, the changes already made are
+// undone (and report has been called for them) before returning the error.
 func Apply(plan Plan, report func(Action)) error {
 	if len(plan.Conflicts()) > 0 {
 		return errors.New("the plan has conflicts")

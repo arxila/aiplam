@@ -21,7 +21,7 @@ What each one covers:
   prefix) are not skills.
 - `aiplam-tomato-playbook`: skills at the root of the repository, with two unrelated prefixes (`aiplam-tomato` and
   `aiplam-garlic`); `docs/` is not a skill.
-- `aiplam-lettuce-fork`: the name `aiplam-lettuce` from a second folder, with a custom skills path.
+- `aiplam-lettuce-fork`: the name `aiplam-lettuce` from a second playbook folder, with a custom skills path.
 - `aiplam-blueberry-playbook`: registered as `aiplam-lettuce` it is cancelled, because `aiplam-lettuce-review` is
   already provided; registered as `aiplam-blueberry` it works.
 
@@ -45,7 +45,7 @@ aiplam add aiplam-lettuce aiplam-lettuce-fork --skills-path ai/skills
 # cancelled: aiplam-lettuce-review is already provided
 aiplam add aiplam-lettuce aiplam-blueberry-playbook
 aiplam add aiplam-blueberry aiplam-blueberry-playbook
-# skills at the root, two prefixes in the same folder
+# skills at the root, two prefixes in the same playbook folder
 aiplam add aiplam-tomato aiplam-tomato-playbook --skills-path .
 aiplam add aiplam-garlic aiplam-tomato-playbook --skills-path .
 aiplam list
