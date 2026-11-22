@@ -102,6 +102,18 @@ func TestTestdataPlaybooks(t *testing.T) {
 		filepath.Join(lettuce, "skills", "aiplam-lettuce-data-clean"))
 	e.mustRun(ExitOK, "check")
 
+	// A second set, enabled instead of the first one, then the first one again; then a single target.
+	all := installed()
+	e.mustRun(ExitOK, "set", "add", "other")
+	e.mustRun(ExitOK, "add", "aiplam-tomato", tomato, "-sp", ".", "-s", "other")
+	e.mustRun(ExitOK, "set", "enable", "other")
+	expect("aiplam-tomato-onboard", "aiplam-tomato-style")
+	e.mustRun(ExitOK, "set", "enable", "default")
+	expect(all...)
+	e.mustRun(ExitOK, "target", "agents")
+	e.assertMissing(filepath.Join(e.home, ".claude", "skills", "aiplam-lettuce-review"))
+	e.mustRun(ExitOK, "check")
+
 	e.mustRun(ExitOK, "remove", "aiplam-lettuce@aiplam-lettuce-fork")
 	e.mustRun(ExitOK, "remove", "aiplam-lettuce")
 	e.mustRun(ExitOK, "remove", "aiplam-blueberry")

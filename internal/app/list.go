@@ -32,14 +32,16 @@ import (
 const listUsage = `Usage: aiplam list [--json] [-s|--set SET]
 
 Lists the playbooks registered in a set (id, name, folder and checked-out version: its tags, or else its branch) and,
-for each, the artifacts it provides, marking those not installed in every target ('aiplam update' installs them).
+for each, the artifacts it provides. For the enabled set, it marks the artifacts not installed in every target
+('aiplam update' installs them).
 
   --json          print the information as JSON, for other tools
-  -s, --set SET   the configuration set (default: 'default')
+  -s, --set SET   the set (default: the enabled set)
 `
 
 type listOutput struct {
 	Set       string         `json:"set"`
+	Enabled   bool           `json:"enabled"`
 	Targets   []string       `json:"targets"`
 	Playbooks []listPlaybook `json:"playbooks"`
 }
@@ -79,14 +81,14 @@ func (a *App) cmdList(args []string) error {
 	if len(p.positional) > 0 {
 		return usagef("unexpected argument: %s", p.positional[0])
 	}
-	cfg, err := a.loadConfig(false)
+	st, err := a.load()
 	if err != nil {
 		return err
 	}
-	targets := cfg.TargetDirs(a.Home)
-	entries := playbook.Entries(cfg.Playbooks, a.Home)
+	targets := st.targets
+	entries := playbook.Entries(st.cfg.Playbooks, a.Home)
 
-	out := listOutput{Set: a.set(), Targets: targets, Playbooks: []listPlaybook{}}
+	out := listOutput{Set: st.set, Enabled: st.enabled, Targets: targets, Playbooks: []listPlaybook{}}
 	for _, e := range entries {
 		lp := listPlaybook{ID: e.ID, Name: e.Name, Folder: e.Dir, Problems: []string{},
 			Artifacts: listArtifacts{Skills: listSkills{Path: e.SkillsPath(), Folder: e.SkillsDir,
@@ -115,13 +117,16 @@ func (a *App) cmdList(args []string) error {
 			for _, s := range skills {
 				item := listSkill{Name: s.Name, Source: s.Source, MissingIn: []string{}}
 				for _, t := range targets {
+					if !st.enabled {
+						break // a set that is not enabled has nothing installed
+					}
 					state, current, err := fsutil.Inspect(filepath.Join(playbook.SkillsFolder(t), s.Name))
 					if err != nil || state != fsutil.Link ||
 						!fsutil.SamePath(fsutil.Canonical(current), fsutil.Canonical(s.Source)) {
 						item.MissingIn = append(item.MissingIn, t)
 					}
 				}
-				item.Installed = len(item.MissingIn) == 0
+				item.Installed = st.enabled && len(item.MissingIn) == 0
 				lp.Artifacts.Skills.Items = append(lp.Artifacts.Skills.Items, item)
 			}
 		}
@@ -138,7 +143,14 @@ func (a *App) cmdList(args []string) error {
 	for _, t := range targets {
 		prettyTargets = append(prettyTargets, a.pretty(t))
 	}
-	a.printf("Set %s (%s), targets: %s\n", a.set(), a.configFile(), strings.Join(prettyTargets, ", "))
+	status := "enabled"
+	if !st.enabled {
+		status = "not enabled"
+	}
+	a.printf("Set %s (%s), %s; targets: %s\n", st.set, a.setFile(st.set), status, strings.Join(prettyTargets, ", "))
+	if !st.enabled {
+		a.printf("Nothing of this set is installed: %s.\n", a.notEnabledNote(st.set))
+	}
 	if len(out.Playbooks) == 0 {
 		a.printf("\nNo playbooks are registered. Register one with '%s'.\n", a.cmd("add <name> <folder>"))
 		return nil
@@ -159,7 +171,7 @@ func (a *App) cmdList(args []string) error {
 		}
 		a.printf("\n")
 		for _, s := range lp.Artifacts.Skills.Items {
-			if s.Installed {
+			if s.Installed || !st.enabled {
 				a.printf("    %s\n", s.Name)
 				continue
 			}

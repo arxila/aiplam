@@ -16,9 +16,12 @@
 //
 // =========================================================================
 
-// Package config reads, validates and writes aiplam's configuration. The configuration is split into sets: each set is
-// an independent configuration (target folders where artifacts are installed, and registered playbooks) stored in its
-// own file, ~/.aiplam/<set>.yaml. Commands act on the "default" set unless told otherwise.
+// Package config reads, validates and writes aiplam's configuration, kept in ~/.aiplam:
+//
+//   - aiplam-config.yaml, the installation's configuration: the target folders where artifacts are installed, and the
+//     enabled set.
+//   - <set>.yaml, one file per set: the playbooks registered in the set. Only the enabled set's playbooks are
+//     installed in the targets.
 package config
 
 import (
@@ -40,24 +43,36 @@ import (
 const (
 	// DirName is the name of aiplam's folder in the user's home.
 	DirName = ".aiplam"
-	// FileExt is the extension of the set configuration files inside DirName.
+	// InstallName is the name (without extension) of the installation's configuration file. It cannot be a set name.
+	InstallName = "aiplam-config"
+	// FileExt is the extension of the configuration files.
 	FileExt = ".yaml"
-	// DefaultSet is the set that commands act on when no set is given.
+	// DefaultSet is the set that 'aiplam init' creates and enables when no set is given.
 	DefaultSet = "default"
 	// DefaultSkillsPath is the folder, relative to a playbook's folder, where its skills live by default.
 	DefaultSkillsPath = "skills"
 )
 
-// ErrNotInitialized is returned by Load when the set's configuration file does not exist.
-var ErrNotInitialized = errors.New("not initialized")
+var (
+	// ErrNotInitialized is returned by LoadInstall when the installation's configuration file does not exist.
+	ErrNotInitialized = errors.New("not initialized")
+	// ErrNoSet is returned by LoadSet when the set's file does not exist.
+	ErrNoSet = errors.New("no such set")
+)
 
-// Config is the content of a set's configuration file.
-type Config struct {
+// Install is the content of aiplam-config.yaml.
+type Install struct {
 	// Targets are the folders where artifacts are installed (for example ~/.agents and ~/.claude); skills go to their
 	// skills/ subfolder. A leading "~" stands for the user's home.
 	Targets []string `yaml:"targets"`
-	// Playbooks are the registered playbooks.
-	Playbooks []Playbook `yaml:"playbooks,omitempty"`
+	// Enabled is the set whose playbooks are installed in the targets.
+	Enabled string `yaml:"enabled"`
+}
+
+// Set is the content of a set's file.
+type Set struct {
+	// Playbooks are the playbooks registered in the set.
+	Playbooks []Playbook `yaml:"playbooks"`
 }
 
 // Playbook is a registered playbook. Its id is not stored: it is computed from its name and folder.
@@ -88,8 +103,13 @@ func Dir(home string) string {
 	return filepath.Join(home, DirName)
 }
 
-// File returns the path of a set's configuration file for the given home folder.
-func File(home, set string) string {
+// InstallFile returns the path of the installation's configuration file.
+func InstallFile(home string) string {
+	return filepath.Join(Dir(home), InstallName+FileExt)
+}
+
+// SetFile returns the path of a set's file.
+func SetFile(home, set string) string {
 	return filepath.Join(Dir(home), set+FileExt)
 }
 
@@ -98,12 +118,19 @@ var (
 	setNameRegexp = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
 )
 
-// ValidSetName reports whether name can be a set name: letters, digits, '_' and '-', starting with a letter or digit.
-func ValidSetName(name string) bool {
-	return setNameRegexp.MatchString(name)
+// ValidName reports whether name can be a playbook name: letters, digits, '.', '_' and '-', starting with a letter
+// or digit. In particular, it cannot contain '@' (used in ids) or path separators.
+func ValidName(name string) bool {
+	return nameRegexp.MatchString(name)
 }
 
-// Sets returns the names of the sets that have a configuration file, sorted.
+// ValidSetName reports whether name can be a set name: letters, digits, '_' and '-', starting with a letter or digit,
+// and not the name of the installation's configuration file.
+func ValidSetName(name string) bool {
+	return setNameRegexp.MatchString(name) && !strings.EqualFold(name, InstallName)
+}
+
+// Sets returns the names of the existing sets, sorted.
 func Sets(home string) ([]string, error) {
 	items, err := os.ReadDir(Dir(home))
 	if errors.Is(err, os.ErrNotExist) {
@@ -123,58 +150,106 @@ func Sets(home string) ([]string, error) {
 	return sets, nil
 }
 
-// ValidName reports whether name can be a playbook name: letters, digits, '.', '_' and '-', starting with a letter
-// or digit. In particular, it cannot contain '@' (used in ids) or path separators.
-func ValidName(name string) bool {
-	return nameRegexp.MatchString(name)
+// SetExists reports whether a set's file exists.
+func SetExists(home, set string) bool {
+	return fsutil.IsFile(SetFile(home, set))
 }
 
-// Load reads and parses a set's configuration file. It returns ErrNotInitialized when the file does not exist. Use
-// Validate for semantic checks.
-func Load(home, set string) (*Config, error) {
-	data, err := os.ReadFile(File(home, set))
+// SameSet reports whether two set names designate the same set: equal names, or names of the same file (on file
+// systems that ignore case, "Work" and "work" are the same set).
+func SameSet(home, a, b string) bool {
+	if a == b {
+		return true
+	}
+	fa, errA := os.Stat(SetFile(home, a))
+	fb, errB := os.Stat(SetFile(home, b))
+	return errA == nil && errB == nil && os.SameFile(fa, fb)
+}
+
+// LoadInstall reads and parses the installation's configuration file. It returns ErrNotInitialized when the file
+// does not exist. Use Validate for semantic checks.
+func LoadInstall(home string) (*Install, error) {
+	data, err := os.ReadFile(InstallFile(home))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, ErrNotInitialized
 	}
 	if err != nil {
 		return nil, err
 	}
-	return Parse(data)
+	inst := &Install{}
+	if err := parse(data, inst); err != nil {
+		return nil, err
+	}
+	return inst, nil
 }
 
-// Parse parses the content of a configuration file, rejecting unknown fields.
-func Parse(data []byte) (*Config, error) {
-	cfg := &Config{}
+// LoadSet reads and parses a set's file. It returns ErrNoSet when the file does not exist. An empty file is an empty
+// set. Use Validate for semantic checks.
+func LoadSet(home, set string) (*Set, error) {
+	data, err := os.ReadFile(SetFile(home, set))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, ErrNoSet
+	}
+	if err != nil {
+		return nil, err
+	}
+	s := &Set{}
+	if err := parse(data, s); err != nil && !errors.Is(err, errEmpty) {
+		return nil, err
+	}
+	return s, nil
+}
+
+var errEmpty = errors.New("the file is empty")
+
+// parse decodes a configuration file into v, rejecting unknown fields.
+func parse(data []byte, v any) error {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
-	if err := dec.Decode(cfg); err != nil {
+	if err := dec.Decode(v); err != nil {
 		if errors.Is(err, io.EOF) {
-			return nil, errors.New("the configuration file is empty")
+			return errEmpty
 		}
-		return nil, fmt.Errorf("invalid configuration file format: %w", err)
+		return fmt.Errorf("invalid file format: %w", err)
 	}
-	return cfg, nil
+	return nil
 }
 
-// Save writes a set's configuration file, replacing it atomically.
-func Save(home, set string, cfg *Config) error {
-	dir := Dir(home)
+// SaveInstall writes the installation's configuration file, replacing it atomically.
+func SaveInstall(home string, inst *Install) error {
+	return save(InstallFile(home), inst,
+		"# aiplam (AI Playbook Manager) installation configuration.\n"+
+			"# targets: folders where artifacts are installed (skills go to their skills/ subfolder); change them with\n"+
+			"#   'aiplam target'.\n"+
+			"# enabled: the set whose playbooks are installed; change it with 'aiplam set enable'.\n")
+}
+
+// SaveSet writes a set's file, replacing it atomically.
+func SaveSet(home, set string, s *Set) error {
+	if s.Playbooks == nil {
+		s = &Set{Playbooks: []Playbook{}}
+	}
+	return save(SetFile(home, set), s, fmt.Sprintf(
+		"# aiplam (AI Playbook Manager) set '%s'.\n"+
+			"# playbooks: registered playbooks, managed with 'aiplam add', 'aiplam update' and 'aiplam remove'.\n", set))
+}
+
+func save(file string, v any, header string) error {
+	dir := filepath.Dir(file)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	var buf bytes.Buffer
-	fmt.Fprintf(&buf, "# aiplam (AI Playbook Manager) configuration of set '%s'.\n", set)
-	buf.WriteString("# targets: folders where artifacts are installed (skills go to their skills/ subfolder).\n")
-	buf.WriteString("# playbooks: registered playbooks, managed with 'aiplam add', 'aiplam update' and 'aiplam remove'.\n")
+	buf.WriteString(header)
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
-	if err := enc.Encode(cfg); err != nil {
+	if err := enc.Encode(v); err != nil {
 		return err
 	}
 	if err := enc.Close(); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(dir, set+FileExt+".*.tmp")
+	tmp, err := os.CreateTemp(dir, filepath.Base(file)+".*.tmp")
 	if err != nil {
 		return err
 	}
@@ -188,7 +263,7 @@ func Save(home, set string, cfg *Config) error {
 		os.Remove(tmpName)
 		return err
 	}
-	if err := os.Rename(tmpName, File(home, set)); err != nil {
+	if err := os.Rename(tmpName, file); err != nil {
 		os.Remove(tmpName)
 		return err
 	}
@@ -196,12 +271,54 @@ func Save(home, set string, cfg *Config) error {
 }
 
 // TargetDirs returns the target folders with "~" expanded.
-func (c *Config) TargetDirs(home string) []string {
-	dirs := make([]string, len(c.Targets))
-	for i, t := range c.Targets {
+func (c *Install) TargetDirs(home string) []string {
+	return TargetDirs(c.Targets, home)
+}
+
+// TargetDirs returns the given target folders with "~" expanded.
+func TargetDirs(targets []string, home string) []string {
+	dirs := make([]string, len(targets))
+	for i, t := range targets {
 		dirs[i] = filepath.Clean(fsutil.ExpandHome(t, home))
 	}
 	return dirs
+}
+
+// ValidateTargets checks a list of target folders and returns every problem found.
+func ValidateTargets(targets []string, home string) []error {
+	var errs []error
+	add := func(format string, args ...any) { errs = append(errs, fmt.Errorf(format, args...)) }
+	if len(targets) == 0 {
+		add("no targets: list at least one folder under 'targets' (for example ~/.agents)")
+	}
+	for i, t := range targets {
+		dir := fsutil.ExpandHome(t, home)
+		switch {
+		case t == "":
+			add("targets[%d] is empty", i)
+		case !filepath.IsAbs(dir):
+			add("target '%s' is not an absolute path (a leading ~ stands for the home folder)", t)
+		}
+		for j := 0; j < i; j++ {
+			if t != "" && fsutil.SamePath(fsutil.ExpandHome(targets[j], home), dir) {
+				add("target '%s' is listed more than once", t)
+			}
+		}
+	}
+	return errs
+}
+
+// Validate checks the installation's configuration and returns every problem found. It does not check that the
+// enabled set exists.
+func (c *Install) Validate(home string) []error {
+	errs := ValidateTargets(c.Targets, home)
+	switch {
+	case c.Enabled == "":
+		errs = append(errs, errors.New("no enabled set: set 'enabled' to the name of a set"))
+	case !ValidSetName(c.Enabled):
+		errs = append(errs, fmt.Errorf("enabled set '%s' is not a valid set name", c.Enabled))
+	}
+	return errs
 }
 
 // SkillsPath returns the playbook's skills path, or the default when none is set.
@@ -228,30 +345,11 @@ func ValidArtifactPath(path string) bool {
 	return path != "" && filepath.IsLocal(filepath.FromSlash(path))
 }
 
-// Validate checks the configuration's content and returns every problem found.
-func (c *Config) Validate(home string) []error {
+// Validate checks the set's content and returns every problem found.
+func (s *Set) Validate(home string) []error {
 	var errs []error
 	add := func(format string, args ...any) { errs = append(errs, fmt.Errorf(format, args...)) }
-
-	if len(c.Targets) == 0 {
-		add("no targets: list at least one folder under 'targets' (for example ~/.agents)")
-	}
-	for i, t := range c.Targets {
-		dir := fsutil.ExpandHome(t, home)
-		switch {
-		case t == "":
-			add("targets[%d] is empty", i)
-		case !filepath.IsAbs(dir):
-			add("target '%s' is not an absolute path (a leading ~ stands for the home folder)", t)
-		}
-		for j := 0; j < i; j++ {
-			if t != "" && fsutil.SamePath(fsutil.ExpandHome(c.Targets[j], home), dir) {
-				add("target '%s' is listed more than once", t)
-			}
-		}
-	}
-
-	for i, p := range c.Playbooks {
+	for i, p := range s.Playbooks {
 		label := fmt.Sprintf("playbooks[%d]", i)
 		if p.Name != "" {
 			label = fmt.Sprintf("playbook '%s'", p.Name)
@@ -275,7 +373,7 @@ func (c *Config) Validate(home string) []error {
 			add("%s: artifacts.skills.path '%s' must be a path inside the playbook folder, relative to it", label, sp)
 		}
 		for j := 0; j < i; j++ {
-			q := c.Playbooks[j]
+			q := s.Playbooks[j]
 			if p.Name == "" || p.Folder == "" || p.Name != q.Name {
 				continue
 			}
@@ -288,42 +386,4 @@ func (c *Config) Validate(home string) []error {
 		}
 	}
 	return errs
-}
-
-// SharedTarget is a target folder that two sets list.
-type SharedTarget struct {
-	Target string // the target folder, with "~" expanded
-	Set    string // the other set that lists it
-}
-
-// SharedTargets returns the targets of cfg (the configuration of set) that other sets also list. Sets cannot share
-// targets: their links would get in each other's way. Other sets whose files cannot be read or parsed are skipped.
-func SharedTargets(home, set string, cfg *Config) ([]SharedTarget, error) {
-	sets, err := Sets(home)
-	if err != nil {
-		return nil, err
-	}
-	own, _ := os.Stat(File(home, set))
-	var shared []SharedTarget
-	for _, other := range sets {
-		if other == set {
-			continue
-		}
-		// On file systems that ignore case (macOS, Windows), "Work" and "work" are the same set.
-		if fi, err := os.Stat(File(home, other)); err == nil && own != nil && os.SameFile(own, fi) {
-			continue
-		}
-		otherCfg, err := Load(home, other)
-		if err != nil {
-			continue
-		}
-		for _, t := range cfg.TargetDirs(home) {
-			for _, o := range otherCfg.TargetDirs(home) {
-				if fsutil.SamePath(t, o) {
-					shared = append(shared, SharedTarget{Target: t, Set: other})
-				}
-			}
-		}
-	}
-	return shared, nil
 }

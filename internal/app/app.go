@@ -54,10 +54,11 @@ type App struct {
 	Stdout io.Writer
 	Stderr io.Writer
 	Git    *gitinfo.Reader
-	// Set is the configuration set that commands act on; Run sets it from the --set option (default: "default").
+	// Set is the set given with the --set option, or "" (commands then act on the enabled set). Run sets it.
 	Set string
 
 	gitWarned bool
+	hintSet   string // the set to name with --set in suggested commands, when it is not the enabled one
 }
 
 // New returns an App for the current user, working directory and standard streams.
@@ -87,13 +88,14 @@ var commands []command
 
 func init() {
 	commands = []command{
-		{"init", "create a set's configuration file and its target folders", initUsage, (*App).cmdInit},
+		{"init", "set up aiplam: its target folders and a first, enabled set", initUsage, (*App).cmdInit},
 		{"add", "register a playbook and install its artifacts", addUsage, (*App).cmdAdd},
 		{"update", "install new artifacts of a playbook and remove deleted ones", updateUsage, (*App).cmdUpdate},
 		{"remove", "uninstall a playbook's artifacts and unregister it", removeUsage, (*App).cmdRemove},
 		{"list", "list registered playbooks, their versions and artifacts", listUsage, (*App).cmdList},
 		{"check", "check the configuration and whether any update is needed", checkUsage, (*App).cmdCheck},
-		{"sets", "list the configuration sets", setsUsage, (*App).cmdSets},
+		{"set", "list, add, remove or enable sets of playbooks", setUsage, (*App).cmdSet},
+		{"target", "show or change the target folders", targetUsage, (*App).cmdTarget},
 	}
 }
 
@@ -106,9 +108,9 @@ func (a *App) mainUsage() string {
 	for _, c := range commands {
 		fmt.Fprintf(&b, "  %-8s %s\n", c.name, c.summary)
 	}
-	b.WriteString("\nOptions for every command:\n")
-	b.WriteString("  -s, --set SET   act on configuration set SET, stored in ~/.aiplam/SET.yaml (default: 'default').\n")
-	b.WriteString("                  Each set has its own targets and playbooks.\n")
+	b.WriteString("\nPlaybooks are registered in sets; only the enabled set is installed in the targets.\n")
+	b.WriteString("\nOption for add, update, remove, list and check:\n")
+	b.WriteString("  -s, --set SET   act on set SET instead of the enabled one\n")
 	b.WriteString("\nRun 'aiplam <command> --help' for a command's options, 'aiplam --version' for the version.\n")
 	return b.String()
 }
@@ -120,6 +122,7 @@ func (a *App) Run(args []string) int {
 		return a.exitCode(err, a.mainUsage())
 	}
 	a.Set = set
+	a.hintSet = ""
 	if len(args) == 0 {
 		fmt.Fprint(a.Stderr, a.mainUsage())
 		return ExitUsage
@@ -161,9 +164,9 @@ func (a *App) Run(args []string) int {
 }
 
 // extractSet removes the --set/-s options (allowed anywhere before "--") from args and returns the set they give, or
-// the default set.
+// "".
 func extractSet(args []string) ([]string, string, error) {
-	set := config.DefaultSet
+	set := ""
 	var rest []string
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -188,8 +191,7 @@ func extractSet(args []string) ([]string, string, error) {
 			continue
 		}
 		if !config.ValidSetName(value) {
-			return nil, "", usagef("invalid set name '%s': use letters, digits, '_' and '-', starting with a letter "+
-				"or digit", value)
+			return nil, "", invalidSetName(value)
 		}
 		set = value
 	}
@@ -262,74 +264,123 @@ func (a *App) version(folder string) gitinfo.Version {
 	return a.Git.Read(folder)
 }
 
-// cmd returns an aiplam command line to suggest to the user, with the --set option when the set is not the default.
+func invalidSetName(name string) error {
+	return usagef("invalid set name '%s': use letters, digits, '_' and '-', starting with a letter or digit ('%s' is "+
+		"reserved)", name, config.InstallName)
+}
+
+// cmd returns an aiplam command line to suggest to the user, with the --set option when the command acts on a set
+// that is not the enabled one.
 func (a *App) cmd(command string) string {
-	if a.Set == "" || a.Set == config.DefaultSet {
+	if a.hintSet == "" {
 		return "aiplam " + command
 	}
-	return "aiplam " + command + " --set " + a.Set
+	return "aiplam " + command + " --set " + a.hintSet
 }
 
-// configFile returns the path of the current set's configuration file, for display.
-func (a *App) configFile() string {
-	return a.pretty(config.File(a.Home, a.set()))
-}
-
-func (a *App) set() string {
-	if a.Set == "" {
-		return config.DefaultSet
+// noSetOption fails when --set was given to a command that does not take it.
+func (a *App) noSetOption(command string) error {
+	if a.Set != "" {
+		return usagef("'aiplam %s' does not take --set", command)
 	}
-	return a.Set
+	return nil
 }
 
-// notInitialized returns the error for a set whose configuration file does not exist.
-func (a *App) notInitialized() error {
-	if a.set() == config.DefaultSet {
-		return fmt.Errorf("aiplam is not initialized: run 'aiplam init' first")
-	}
-	return fmt.Errorf("set '%s' is not initialized: run '%s' first", a.set(), a.cmd("init"))
-}
-
-// loadConfig loads the current set's configuration and fails when it does not exist or is not valid. With
-// exclusive, it also fails when another set lists one of its targets, as commands that change links must not run
-// then.
-func (a *App) loadConfig(exclusive bool) (*config.Config, error) {
-	cfg, err := config.Load(a.Home, a.set())
+// loadInstall loads the installation's configuration and fails when it does not exist or is not valid.
+func (a *App) loadInstall() (*config.Install, error) {
+	file := a.pretty(config.InstallFile(a.Home))
+	inst, err := config.LoadInstall(a.Home)
 	if errors.Is(err, config.ErrNotInitialized) {
-		return nil, a.notInitialized()
+		return nil, errors.New("aiplam is not initialized: run 'aiplam init --target <folder>' first")
 	}
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w; fix it by hand", a.configFile(), err)
+		return nil, fmt.Errorf("%s: %w; fix it by hand", file, err)
+	}
+	if errs := inst.Validate(a.Home); len(errs) > 0 {
+		for _, e := range errs {
+			a.errorf("%s: %s", file, e)
+		}
+		a.errorf("fix %s by hand; 'aiplam check' lists its problems.", file)
+		return nil, errSilent
+	}
+	return inst, nil
+}
+
+// state is what commands that act on a set work with.
+type state struct {
+	inst    *config.Install
+	targets []string
+	set     string      // the set acted on
+	cfg     *config.Set // its content
+	enabled bool        // whether it is the enabled set (installed in the targets)
+}
+
+// file returns the path of the set's file, for display.
+func (a *App) setFile(set string) string {
+	return a.pretty(config.SetFile(a.Home, set))
+}
+
+// load loads the installation's configuration and the set to act on (the one given with --set, which must exist, or
+// the enabled one), and fails when either is missing or not valid.
+func (a *App) load() (*state, error) {
+	inst, err := a.loadInstall()
+	if err != nil {
+		return nil, err
+	}
+	st := &state{inst: inst, targets: inst.TargetDirs(a.Home), set: inst.Enabled}
+	if a.Set != "" {
+		st.set = a.Set
+		if !config.SetExists(a.Home, a.Set) {
+			return nil, fmt.Errorf("set '%s' does not exist; create it with 'aiplam set add %s' ('aiplam set list' "+
+				"lists the sets)", a.Set, a.Set)
+		}
+	} else if !config.SetExists(a.Home, inst.Enabled) {
+		return nil, fmt.Errorf("the enabled set '%s' does not exist (%s is missing): enable another set with "+
+			"'aiplam set enable <set>', or create it again with 'aiplam set add %s'", inst.Enabled,
+			a.setFile(inst.Enabled), inst.Enabled)
+	}
+	st.enabled = config.SameSet(a.Home, st.set, inst.Enabled)
+	if !st.enabled {
+		a.hintSet = st.set
+	}
+	cfg, err := a.loadSet(st.set)
+	if err != nil {
+		return nil, err
+	}
+	st.cfg = cfg
+	return st, nil
+}
+
+// loadSet loads a set and fails when it is missing or not valid.
+func (a *App) loadSet(set string) (*config.Set, error) {
+	cfg, err := config.LoadSet(a.Home, set)
+	if errors.Is(err, config.ErrNoSet) {
+		return nil, fmt.Errorf("set '%s' does not exist ('aiplam set list' lists the sets)", set)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w; fix it by hand", a.setFile(set), err)
 	}
 	if errs := cfg.Validate(a.Home); len(errs) > 0 {
 		for _, e := range errs {
-			a.errorf("%s: %s", a.configFile(), e)
+			a.errorf("%s: %s", a.setFile(set), e)
 		}
-		a.errorf("fix %s manually; '%s' lists its problems.", a.configFile(), a.cmd("check"))
+		a.errorf("fix %s by hand; '%s' lists its problems.", a.setFile(set), a.cmd("check"))
 		return nil, errSilent
 	}
-	if exclusive {
-		shared, err := config.SharedTargets(a.Home, a.set(), cfg)
-		if err != nil {
-			return nil, err
-		}
-		if len(shared) > 0 {
-			for _, st := range shared {
-				a.errorf("%s: target '%s' is also listed by set '%s'", a.configFile(), a.pretty(st.Target), st.Set)
-			}
-			a.errorf("sets cannot share targets, as their links would get in each other's way: edit the files in " +
-				"~/.aiplam by hand so that each target belongs to one set.")
-			return nil, errSilent
-		}
-	}
 	return cfg, nil
+}
+
+// notEnabledNote explains that a set's playbooks are not installed.
+func (a *App) notEnabledNote(set string) string {
+	return fmt.Sprintf("set '%s' is not enabled (its playbooks are linked into the targets when it is enabled with "+
+		"'aiplam set enable %s')", set, set)
 }
 
 // selectEntry finds the registered playbook that args designate:
 //   - no argument: the playbook registered for the current folder (it must be the only one there);
 //   - one argument: an id, else a name (which must be unique), else a folder (with a single playbook);
 //   - two arguments: a name and a folder, which must match a registered playbook.
-func (a *App) selectEntry(entries []playbook.Entry, args []string) (playbook.Entry, error) {
+func (a *App) selectEntry(entries []playbook.Entry, args []string, set string) (playbook.Entry, error) {
 	byFolder := func(folder string) []playbook.Entry {
 		var out []playbook.Entry
 		for _, e := range entries {
@@ -352,7 +403,7 @@ func (a *App) selectEntry(entries []playbook.Entry, args []string) (playbook.Ent
 		switch len(matches) {
 		case 0:
 			return playbook.Entry{}, fmt.Errorf("no playbook is registered for the current folder '%s' in set '%s'; give "+
-				"a name, id or folder ('%s' shows them)", a.pretty(a.Cwd), a.set(), a.cmd("list"))
+				"a name, id or folder ('%s' shows them)", a.pretty(a.Cwd), set, a.cmd("list"))
 		case 1:
 			return matches[0], nil
 		default:
@@ -383,7 +434,7 @@ func (a *App) selectEntry(entries []playbook.Entry, args []string) (playbook.Ent
 		switch len(matches) {
 		case 0:
 			return playbook.Entry{}, fmt.Errorf("no playbook is registered with name, id or folder '%s' in set '%s' "+
-				"('%s' shows them)", arg, a.set(), a.cmd("list"))
+				"('%s' shows them)", arg, set, a.cmd("list"))
 		case 1:
 			return matches[0], nil
 		default:
@@ -414,9 +465,23 @@ func (a *App) printAction(act playbook.Action) {
 }
 
 func (a *App) printConflicts(plan playbook.Plan) {
-	for _, c := range plan.Conflicts() {
-		a.warnf("%s", a.conflictText(c))
+	for _, text := range a.conflictTexts(plan) {
+		a.warnf("%s", text)
 	}
+}
+
+// conflictTexts describes the conflicts of a plan, once each (a skill provided by two playbooks conflicts in every
+// target).
+func (a *App) conflictTexts(plan playbook.Plan) []string {
+	var texts []string
+	seen := map[string]bool{}
+	for _, c := range plan.Conflicts() {
+		if text := a.conflictText(c); !seen[text] {
+			seen[text] = true
+			texts = append(texts, text)
+		}
+	}
+	return texts
 }
 
 // conflictText describes a conflicting action: "skill x-a: '~/.agents/skills/x-a' already exists and ...".

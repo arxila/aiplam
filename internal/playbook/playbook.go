@@ -21,6 +21,7 @@
 package playbook
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -210,7 +211,18 @@ func SkillsFolder(target string) string {
 // some entry in final wants exactly that link. A desired link whose path holds anything other than a link to the
 // same skill is a conflict, as is a skill name that another playbook in final also provides from another folder.
 func Build(final []Entry, e Entry, targets []string) (Plan, error) {
+	return build(final, e, targets, nil)
+}
+
+// build is Build for a state in which the links in gone have already been removed.
+func build(final []Entry, e Entry, targets []string, gone map[string]bool) (Plan, error) {
 	plan := Plan{Entry: e}
+	inspect := func(link string) (fsutil.LinkState, string, error) {
+		if gone[link] {
+			return fsutil.Missing, "", nil
+		}
+		return fsutil.Inspect(link)
+	}
 
 	present := false
 	for _, f := range final {
@@ -268,7 +280,7 @@ func Build(final []Entry, e Entry, targets []string) (Plan, error) {
 				plan.Actions = append(plan.Actions, action)
 				continue
 			}
-			state, current, err := fsutil.Inspect(link)
+			state, current, err := inspect(link)
 			if err != nil {
 				return plan, err
 			}
@@ -294,10 +306,10 @@ func Build(final []Entry, e Entry, targets []string) (Plan, error) {
 		}
 		for _, item := range items {
 			name := item.Name()
-			if _, ok := mineByName[name]; ok || !strings.HasPrefix(name, e.Name+"-") {
+			link := filepath.Join(dir, name)
+			if _, ok := mineByName[name]; ok || gone[link] || !strings.HasPrefix(name, e.Name+"-") {
 				continue
 			}
-			link := filepath.Join(dir, name)
 			state, current, err := fsutil.Inspect(link)
 			if err != nil || state != fsutil.Link ||
 				!fsutil.SamePath(fsutil.Canonical(filepath.Dir(current)), e.SkillsDir) {
@@ -316,6 +328,102 @@ func Build(final []Entry, e Entry, targets []string) (Plan, error) {
 				Source: current, Reason: reason})
 		}
 	}
+	return plan, nil
+}
+
+// Overlaps returns, for each skill of e that other entries in final also provide, the ids of those entries. It
+// ignores entries whose skills folder does not exist.
+func Overlaps(final []Entry, e Entry) (map[string][]string, error) {
+	providers := map[string][]string{}
+	for _, f := range final {
+		if !fsutil.IsDir(f.SkillsDir) {
+			continue
+		}
+		skills, err := Skills(final, f)
+		if err != nil {
+			return nil, err
+		}
+		for _, s := range skills {
+			providers[s.Name] = append(providers[s.Name], f.ID)
+		}
+	}
+	overlaps := map[string][]string{}
+	for name, ids := range providers {
+		if others := otherProviders(ids, e.ID); len(others) > 0 && len(others) < len(ids) {
+			overlaps[name] = others
+		}
+	}
+	return overlaps, nil
+}
+
+// Switch plans the move from one installed state (the entries of a set, linked into some targets) to another: it
+// removes the links of every entry of from in fromTargets, and installs every entry of to in toTargets. Links that
+// both states want (same path, same skill) are left alone. Conflicts are planned as in Build, except that links being
+// removed are not in the way. Entries of to must have their skills folders. The removals of links in targets that are
+// no longer targets are explained as such; reason explains the others.
+func Switch(from, to []Entry, fromTargets, toTargets []string, reason string) (Plan, error) {
+	isTarget := func(link string) bool {
+		for _, t := range toTargets {
+			if fsutil.SamePath(SkillsFolder(t), filepath.Dir(link)) {
+				return true
+			}
+		}
+		return false
+	}
+	var plan Plan
+	removed := map[string]Action{}
+	var removals []Action
+	for _, e := range from {
+		p, err := Build(nil, e, fromTargets)
+		if err != nil {
+			return plan, err
+		}
+		for _, a := range p.Actions {
+			if _, dup := removed[a.Link]; a.Kind == Remove && !dup {
+				a.Reason = reason
+				if !isTarget(a.Link) {
+					a.Reason = "no longer a target"
+				}
+				removed[a.Link] = a
+				removals = append(removals, a)
+			}
+		}
+	}
+	gone := map[string]bool{}
+	for link := range removed {
+		gone[link] = true
+	}
+	var installs []Action
+	kept := map[string]bool{}
+	for _, e := range to {
+		p, err := build(to, e, toTargets, gone)
+		if err != nil {
+			return plan, err
+		}
+		for _, a := range p.Actions {
+			if r, ok := removed[a.Link]; ok && a.Kind == Create && sameFolder(r.Source, a.Source) {
+				kept[a.Link] = true // wanted by both states: leave it
+				continue
+			}
+			if a.Kind == Remove {
+				// Playbooks of one folder with overlapping names (x, x-y) can both plan removing a link.
+				if _, dup := removed[a.Link]; dup {
+					continue
+				}
+				removed[a.Link] = a
+				gone[a.Link] = true
+			}
+			if a.Kind != Keep {
+				installs = append(installs, a)
+			}
+		}
+	}
+	for _, r := range removals {
+		if !kept[r.Link] {
+			plan.Actions = append(plan.Actions, r)
+		}
+	}
+	plan.Actions = append(plan.Actions, installs...)
 	return plan, nil
 }
 
@@ -349,7 +457,7 @@ func sameFolder(a, b string) bool {
 // called for them) before returning the error.
 func Apply(plan Plan, report func(Action)) error {
 	if len(plan.Conflicts()) > 0 {
-		return fmt.Errorf("playbook %s has conflicts", plan.Entry.ID)
+		return errors.New("the plan has conflicts")
 	}
 	var done []Action
 	for _, a := range plan.Actions {

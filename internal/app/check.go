@@ -20,8 +20,10 @@ package app
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"arxila.io/aiplam/internal/config"
 	"arxila.io/aiplam/internal/fsutil"
@@ -30,12 +32,12 @@ import (
 
 const checkUsage = `Usage: aiplam check [-s|--set SET]
 
-Changes nothing. Checks the format and content of the set's configuration file (~/.aiplam/<set>.yaml), that no other
-set lists its targets, the target and playbook folders, and, for every registered playbook, whether 'aiplam update'
-would change anything (links to create or remove) or would be cancelled by a conflict. Also reports broken links in
-the targets' skills folders. Exits with 1 when anything needs attention.
+Changes nothing. Checks the format and content of the installation's configuration (~/.aiplam/aiplam-config.yaml) and
+of a set's file (~/.aiplam/<set>.yaml), the target and playbook folders and, if the set is enabled, whether 'aiplam
+update' would change anything for each of its playbooks (links to create or remove) or would be cancelled by a
+conflict. Also reports broken links in the targets' skills folders. Exits with 1 when anything needs attention.
 
-  -s, --set SET   the configuration set (default: 'default')
+  -s, --set SET   the set (default: the enabled set)
 `
 
 func (a *App) cmdCheck(args []string) error {
@@ -46,42 +48,65 @@ func (a *App) cmdCheck(args []string) error {
 	if len(p.positional) > 0 {
 		return usagef("unexpected argument: %s", p.positional[0])
 	}
-	file := a.configFile()
-	cfg, err := config.Load(a.Home, a.set())
-	if err != nil {
-		if errors.Is(err, config.ErrNotInitialized) {
-			return a.notInitialized()
-		}
-		a.errorf("%s: %s", file, err)
-		return errSilent
-	}
-
 	attention := 0
 	problem := func(format string, args ...any) {
 		attention++
 		a.warnf(format, args...)
 	}
-
-	a.printf("Set %s: %s\n", a.set(), file)
-	if errs := cfg.Validate(a.Home); len(errs) > 0 {
+	invalid := func(file string, errs []error) error {
 		for _, e := range errs {
 			problem("%s: %s", file, e)
 		}
-		a.errorf("%d problem(s) in %s: fix them by hand; playbooks were not checked.", len(errs), file)
+		a.errorf("%d problem(s) in %s: fix them by hand; nothing else was checked.", len(errs), file)
 		return errSilent
+	}
+
+	instFile := a.pretty(config.InstallFile(a.Home))
+	inst, err := config.LoadInstall(a.Home)
+	if errors.Is(err, config.ErrNotInitialized) {
+		return errors.New("aiplam is not initialized: run 'aiplam init --target <folder>' first")
+	}
+	if err != nil {
+		return invalid(instFile, []error{err})
+	}
+	a.printf("Installation: %s\n", instFile)
+	if errs := inst.Validate(a.Home); len(errs) > 0 {
+		return invalid(instFile, errs)
 	}
 	a.printf("  format and content are valid\n")
 
-	shared, err := config.SharedTargets(a.Home, a.set(), cfg)
+	set := inst.Enabled
+	if a.Set != "" {
+		set = a.Set
+	}
+	file := a.setFile(set)
+	if !config.SetExists(a.Home, set) {
+		if a.Set == "" {
+			problem("the enabled set '%s' does not exist (%s is missing): enable another set with 'aiplam set enable "+
+				"<set>', or create it again with 'aiplam set add %s'", set, file, set)
+			return errSilent
+		}
+		return fmt.Errorf("set '%s' does not exist ('aiplam set list' lists the sets)", set)
+	}
+	enabled := config.SameSet(a.Home, set, inst.Enabled)
+	if !enabled {
+		a.hintSet = set
+	}
+	cfg, err := config.LoadSet(a.Home, set)
 	if err != nil {
-		return err
+		return invalid(file, []error{err})
 	}
-	for _, st := range shared {
-		problem("target '%s' is also listed by set '%s': sets cannot share targets; 'add', 'update' and 'remove' "+
-			"refuse to run until one of the files is fixed by hand", a.pretty(st.Target), st.Set)
+	status := "enabled"
+	if !enabled {
+		status = "not enabled"
 	}
+	a.printf("Set %s (%s): %s\n", set, status, file)
+	if errs := cfg.Validate(a.Home); len(errs) > 0 {
+		return invalid(file, errs)
+	}
+	a.printf("  format and content are valid\n")
 
-	targets := cfg.TargetDirs(a.Home)
+	targets := inst.TargetDirs(a.Home)
 	a.printf("Targets:\n")
 	for _, t := range targets {
 		if !fsutil.IsDir(t) {
@@ -103,6 +128,22 @@ func (a *App) cmdCheck(args []string) error {
 			problem("%s", err)
 			continue
 		}
+		if !enabled {
+			// Nothing is installed; the set must only stay installable.
+			overlaps, err := playbook.Overlaps(entries, e)
+			if err != nil {
+				problem("playbook %s: %s", e.ID, err)
+				continue
+			}
+			for name, others := range overlaps {
+				problem("playbook %s: skill %s: also provided by playbook %s; 'aiplam set enable %s' would be "+
+					"cancelled", e.ID, name, strings.Join(others, ", "), set)
+			}
+			if len(overlaps) == 0 {
+				a.printf("  folders are valid (not installed: the set is not enabled)\n")
+			}
+			continue
+		}
 		plan, err := playbook.Build(entries, e, targets)
 		if err != nil {
 			problem("playbook %s: %s", e.ID, err)
@@ -118,9 +159,9 @@ func (a *App) cmdCheck(args []string) error {
 		for _, act := range plan.Actions {
 			reported[act.Link] = true
 		}
-		if conflicts := plan.Conflicts(); len(conflicts) > 0 {
-			for _, c := range conflicts {
-				problem("playbook %s: %s", e.ID, a.conflictText(c))
+		if len(plan.Conflicts()) > 0 {
+			for _, text := range a.conflictTexts(plan) {
+				problem("playbook %s: %s", e.ID, text)
 			}
 			problem("playbook %s: '%s' would be cancelled until the conflicts are resolved", e.ID,
 				a.cmd("update "+e.ID))
