@@ -4,8 +4,8 @@ An **AI playbook** is a git repository of agent artifacts (such as skills) share
 family of related projects. Each developer keeps a local clone of each playbook, checked out at the tag (or commit)
 they want to use. `aiplam` registers those clones and links their artifacts from the **agents configuration
 folders** that coding agents read (`.agents`, `.claude`), so that switching a clone to another tag and running
-`aiplam update` is all an update takes. It can do so in the home folder (`~/.agents`) and in any other folder where
-agent sessions are started, such as the top folder of a large project with many modules: each of them is a
+`aiplam update` is all an update takes. It can do so in the home folder (`~/.agents`) and in other folders where
+agent sessions may start, such as the top folder of a large project with many modules: each of them is a
 [base folder](#base-folders).
 
 `aiplam` never clones, fetches, pulls or switches a playbook checkout: selecting versions is the developer's job.

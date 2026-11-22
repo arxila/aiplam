@@ -127,7 +127,7 @@ Commands:
 	}
 	b.WriteString(`
 How it works:
-  - a base folder is the home folder, or any folder where agent sessions start (such as a project's top folder),
+  - a base folder is the home folder, or a folder where agent sessions may start (such as a project's top folder),
     that holds:
       - a .aiplam folder, with aiplam's configuration for that base folder;
       - agents configuration folders, the ones agents read: .agents, .claude;
