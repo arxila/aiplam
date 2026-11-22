@@ -72,7 +72,7 @@ func (a *App) cmdInit(args []string) error {
 	if config.SetExists(a.Home, set) {
 		return fmt.Errorf("%s already exists: remove it, or choose another set with --set", a.setFile(set))
 	}
-	inst := &config.Install{Targets: targets, Enabled: set}
+	inst := &config.Install{Targets: targets, Enabled: []string{set}}
 	if errs := inst.Validate(a.Home); len(errs) > 0 {
 		return errs[0]
 	}
@@ -121,18 +121,18 @@ func (a *App) parseTargets(values []string) ([]string, error) {
 
 const addUsage = `Usage: aiplam add <name> <folder> [-sp|--skills-path PATH] [-s|--set SET]
 
-Registers the playbook in <folder> (for example '.') with the given name in a set (the enabled one, unless --set is
-given) and, if the set is enabled, links its skills into the targets. The name is the prefix of the playbook's
+Registers the playbook in <folder> (for example '.') with the given name in a set and, if the set is enabled, links
+its skills into the targets. The set is the one given with --set, which is needed unless exactly one set is enabled. The name is the prefix of the playbook's
 artifacts: its skills are the folders named '<name>-*' holding a SKILL.md in its skills folder. Several playbooks can
 share a name if their folders' last segments differ; their ids are then '<name>@<last folder segment>'. The playbook
 is installed at whatever tag or commit is checked out.
 
 Nothing is changed if any link cannot be created because something else is already in its place, or if another
-playbook of the set provides a skill with the same name.
+playbook of the set (or of another enabled set, if the set is enabled) provides a skill with the same name.
 
   -sp, --skills-path PATH   the skills folder, inside <folder> and relative to it (default: skills; '.' for <folder>
                             itself)
-  -s, --set SET             the set to register it in (default: the enabled set)
+  -s, --set SET             the set to register it in (default: the enabled set, if only one is)
 `
 
 func (a *App) cmdAdd(args []string) error {
@@ -164,14 +164,23 @@ func (a *App) cmdAdd(args []string) error {
 	if err != nil {
 		return err
 	}
-	current := playbook.Entries(st.cfg.Playbooks, a.Home)
+	if len(st.sets) != 1 {
+		if len(st.sets) == 0 {
+			return errors.New("no set is enabled: choose the set to register the playbook in with --set")
+		}
+		return fmt.Errorf("%d sets are enabled (%s): choose the one to register the playbook in with --set",
+			len(st.sets), setNames(st.sets))
+	}
+	set := st.sets[0]
+	a.useSet(st, set)
+	current := set.entries
 	for _, e := range current {
 		if e.Name != name {
 			continue
 		}
 		if fsutil.SamePath(e.Dir, folder) {
 			return fmt.Errorf("playbook '%s' is already registered for '%s' in set '%s' (id %s); use '%s'", name,
-				a.pretty(folder), st.set, e.ID, a.cmd("update "+e.ID))
+				a.pretty(folder), set.name, e.ID, a.cmd("update "+e.ID))
 		}
 		if fsutil.SameName(filepath.Base(e.Folder), filepath.Base(folder)) {
 			return fmt.Errorf("a playbook named '%s' is already registered for '%s', whose last segment equals that of "+
@@ -189,13 +198,13 @@ func (a *App) cmdAdd(args []string) error {
 		return fmt.Errorf("skills folder '%s' leads outside the playbook folder (through a link)",
 			a.pretty(entry.SkillsDir(a.Home)))
 	}
-	updated := &config.Set{Playbooks: append(append([]config.Playbook{}, st.cfg.Playbooks...), entry)}
-	final := playbook.Entries(updated.Playbooks, a.Home)
+	updated := &config.Set{Playbooks: append(append([]config.Playbook{}, set.cfg.Playbooks...), entry)}
+	final := playbook.Entries(set.name, updated.Playbooks, a.Home)
 	e := final[len(final)-1]
 
 	var plan playbook.Plan
-	if st.enabled {
-		plan, err = playbook.Build(final, e, st.targets)
+	if set.enabled {
+		plan, err = playbook.Build(final, e, st.targets, st.others(set.name))
 		if err != nil {
 			return err
 		}
@@ -216,11 +225,11 @@ func (a *App) cmdAdd(args []string) error {
 		return errSilent
 	}
 
-	a.printf("Adding playbook %s (%s) from %s to set '%s'\n", e.ID, a.version(folder), a.pretty(folder), st.set)
+	a.printf("Adding playbook %s (%s) from %s to set '%s'\n", e.ID, a.version(folder), a.pretty(folder), set.name)
 	if err := playbook.Apply(plan, a.printAction); err != nil {
 		return fmt.Errorf("%w; the playbook was not registered: fix the problem and run '%s' again", err, a.cmd("add"))
 	}
-	if err := config.SaveSet(a.Home, st.set, updated); err != nil {
+	if err := config.SaveSet(a.Home, set.name, updated); err != nil {
 		return a.undo(plan, err, "the playbook was not registered")
 	}
 	skills, _ := playbook.Skills(final, e)
@@ -229,8 +238,8 @@ func (a *App) cmdAdd(args []string) error {
 			a.pretty(e.SkillsDir))
 	}
 	a.printf("Added %s with %d skill(s).\n", e.ID, len(skills))
-	if !st.enabled {
-		a.printf("Nothing was linked: %s.\n", a.notEnabledNote(st.set))
+	if !set.enabled {
+		a.printf("Nothing was linked: %s.\n", a.notEnabledNote(set.name))
 	}
 	a.reportRenamedIDs(current, final)
 	return nil
@@ -252,7 +261,7 @@ func (a *App) reportRenamedIDs(before, after []playbook.Entry) {
 const updateUsage = `Usage: aiplam update [<name|id|folder>] [<folder>] [-s|--set SET]
        aiplam update --all [-s|--set SET]
 
-Brings the installed artifacts of a playbook of the enabled set in line with its folder as currently checked out:
+Brings the installed artifacts of a playbook of the enabled sets in line with its folder as currently checked out:
 links new skills and removes the links of skills that no longer exist. The playbook is the one registered for the
 current folder, or the one given by id, by name (if unique), by folder (if unique), or by name and folder. aiplam
 never fetches, pulls or switches a checkout: select the version in the playbook's folder first. A set that is not
@@ -260,8 +269,8 @@ enabled has nothing installed, so there is nothing to update in it.
 
 Nothing is changed for a playbook if any link cannot be created because something else is already in its place.
 
-  --all           update every playbook of the set
-  -s, --set SET   the set (default: the enabled set)
+  --all           update every playbook of the enabled sets (or of the set given with --set)
+  -s, --set SET   the set (default: the enabled sets)
 `
 
 func (a *App) cmdUpdate(args []string) error {
@@ -276,20 +285,19 @@ func (a *App) cmdUpdate(args []string) error {
 	if err != nil {
 		return err
 	}
-	entries := playbook.Entries(st.cfg.Playbooks, a.Home)
-	selected := entries
+	selected := st.entries()
 	if !p.bools["all"] {
-		e, err := a.selectEntry(entries, p.positional, st.set)
+		e, err := a.selectEntry(st, p.positional)
 		if err != nil {
 			return err
 		}
 		selected = []playbook.Entry{e}
-	} else if len(entries) == 0 {
-		a.printf("No playbooks are registered in set '%s'.\n", st.set)
+	} else if len(selected) == 0 {
+		a.printf("No playbooks are registered in %s.\n", st.where())
 		return nil
 	}
-	if !st.enabled {
-		a.printf("Nothing to update: %s.\n", a.notEnabledNote(st.set))
+	if len(st.sets) == 1 && !st.sets[0].enabled {
+		a.printf("Nothing to update: %s.\n", a.notEnabledNote(st.sets[0].name))
 		return nil
 	}
 
@@ -298,7 +306,9 @@ func (a *App) cmdUpdate(args []string) error {
 		if i > 0 {
 			a.printf("\n")
 		}
-		if err := a.updateOne(entries, e, st.targets); err != nil {
+		set := st.set(e.Set)
+		a.useSet(st, set)
+		if err := a.updateOne(set.entries, e, st.targets, st.others(set.name)); err != nil {
 			if !errors.Is(err, errSilent) {
 				a.errorf("%s", err)
 			}
@@ -311,11 +321,12 @@ func (a *App) cmdUpdate(args []string) error {
 	return nil
 }
 
-func (a *App) updateOne(entries []playbook.Entry, e playbook.Entry, targets []string) error {
+func (a *App) updateOne(entries []playbook.Entry, e playbook.Entry, targets []string,
+	others [][]playbook.Entry) error {
 	if err := a.checkPlaybookFolders(e); err != nil {
 		return err
 	}
-	plan, err := playbook.Build(entries, e, targets)
+	plan, err := playbook.Build(entries, e, targets, others)
 	if err != nil {
 		return err
 	}
@@ -336,11 +347,12 @@ func (a *App) updateOne(entries []playbook.Entry, e playbook.Entry, targets []st
 
 const removeUsage = `Usage: aiplam remove <name|id|folder> [<folder>] [-s|--set SET]
 
-Unregisters a playbook from a set and, if the set is enabled, removes the links to its artifacts from the targets.
-The playbook is given by id, by name (if unique), by folder (if unique), or by name and folder. Only links are
+Unregisters a playbook from its set and, if the set is enabled, removes the links to its artifacts from the targets.
+The playbook is looked for in the enabled sets (or in the set given with --set), by id, by name (if unique), by
+folder (if unique), or by name and folder. Only links are
 removed: the playbook's folder and anything that is not a link to it are left in place.
 
-  -s, --set SET   the set (default: the enabled set)
+  -s, --set SET   the set (default: the enabled sets)
 `
 
 func (a *App) cmdRemove(args []string) error {
@@ -355,35 +367,36 @@ func (a *App) cmdRemove(args []string) error {
 	if err != nil {
 		return err
 	}
-	entries := playbook.Entries(st.cfg.Playbooks, a.Home)
-	e, err := a.selectEntry(entries, p.positional, st.set)
+	e, err := a.selectEntry(st, p.positional)
 	if err != nil {
 		return err
 	}
+	set := st.set(e.Set)
+	a.useSet(st, set)
 	updated := &config.Set{}
-	for _, pb := range st.cfg.Playbooks {
+	for _, pb := range set.cfg.Playbooks {
 		if !(pb.Name == e.Name && fsutil.SamePath(pb.Dir(a.Home), e.Dir)) {
 			updated.Playbooks = append(updated.Playbooks, pb)
 		}
 	}
-	final := playbook.Entries(updated.Playbooks, a.Home)
+	final := playbook.Entries(set.name, updated.Playbooks, a.Home)
 	var plan playbook.Plan
-	if st.enabled {
-		plan, err = playbook.Build(final, e, st.targets)
+	if set.enabled {
+		plan, err = playbook.Build(final, e, st.targets, st.others(set.name))
 		if err != nil {
 			return err
 		}
 	}
-	a.printf("Removing playbook %s (%s) from set '%s'\n", e.ID, a.pretty(e.Dir), st.set)
+	a.printf("Removing playbook %s (%s) from set '%s'\n", e.ID, a.pretty(e.Dir), set.name)
 	if err := playbook.Apply(plan, a.printAction); err != nil {
 		return fmt.Errorf("%w; the playbook is still registered: fix the problem and run '%s' again", err,
 			a.cmd("remove"))
 	}
-	if err := config.SaveSet(a.Home, st.set, updated); err != nil {
+	if err := config.SaveSet(a.Home, set.name, updated); err != nil {
 		return a.undo(plan, err, "the playbook is still registered")
 	}
 	a.printf("Removed %s.\n", e.ID)
-	a.reportRenamedIDs(entries, final)
+	a.reportRenamedIDs(set.entries, final)
 	return nil
 }
 

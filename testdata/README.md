@@ -56,13 +56,21 @@ git -C aiplam-lettuce-playbook switch -q --detach v1.0.0
 aiplam check
 aiplam update aiplam-lettuce-data
 
-# a second set: enabling it unlinks the first set's playbooks and links its own
+# a second set that collides with the first one (both provide aiplam-tomato): it can replace it, not join it
 aiplam set add other
 aiplam add aiplam-tomato aiplam-tomato-playbook --skills-path . -s other
-aiplam set enable other
+aiplam set enable other                                   # fails: its links already exist
+aiplam set switch other                                   # disable default, enable other
 aiplam set list
-aiplam set enable default
+aiplam set switch default
 
-# a single target: the enabled set's playbooks are unlinked from ~/.claude
+# a third set that does not collide can be enabled besides the first one
+aiplam set add extra
+aiplam remove aiplam-blueberry
+aiplam add aiplam-blueberry aiplam-blueberry-playbook -s extra
+aiplam set enable extra
+aiplam list
+
+# a single target: the enabled sets' playbooks are unlinked from ~/.claude
 aiplam target agents
 ```

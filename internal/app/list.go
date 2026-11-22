@@ -31,18 +31,22 @@ import (
 
 const listUsage = `Usage: aiplam list [--json] [-s|--set SET]
 
-Lists the playbooks registered in a set (id, name, folder and checked-out version: its tags, or else its branch) and,
-for each, the artifacts it provides. For the enabled set, it marks the artifacts not installed in every target
-('aiplam update' installs them).
+Lists the playbooks registered in the enabled sets, or in the set given with --set (id, name, folder and checked-out
+version: its tags, or else its branch) and, for each, the artifacts it provides. For enabled sets, it marks the
+artifacts not installed in every target ('aiplam update' installs them).
 
   --json          print the information as JSON, for other tools
-  -s, --set SET   the set (default: the enabled set)
+  -s, --set SET   the set (default: the enabled sets)
 `
 
 type listOutput struct {
-	Set       string         `json:"set"`
+	Targets []string  `json:"targets"`
+	Sets    []listSet `json:"sets"`
+}
+
+type listSet struct {
+	Name      string         `json:"name"`
 	Enabled   bool           `json:"enabled"`
-	Targets   []string       `json:"targets"`
 	Playbooks []listPlaybook `json:"playbooks"`
 }
 
@@ -86,10 +90,90 @@ func (a *App) cmdList(args []string) error {
 		return err
 	}
 	targets := st.targets
-	entries := playbook.Entries(st.cfg.Playbooks, a.Home)
+	out := listOutput{Targets: targets, Sets: []listSet{}}
+	for _, set := range st.sets {
+		out.Sets = append(out.Sets, a.listSet(set, targets))
+	}
 
-	out := listOutput{Set: st.set, Enabled: st.enabled, Targets: targets, Playbooks: []listPlaybook{}}
-	for _, e := range entries {
+	if p.bools["json"] {
+		enc := json.NewEncoder(a.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(out)
+	}
+
+	var prettyTargets []string
+	for _, t := range targets {
+		prettyTargets = append(prettyTargets, a.pretty(t))
+	}
+	a.printf("Targets: %s\n", strings.Join(prettyTargets, ", "))
+	if len(out.Sets) == 0 {
+		a.printf("\nNo set is enabled: enable one with 'aiplam set enable <set>' ('aiplam set list' lists them).\n")
+		return nil
+	}
+	notInstalled := false
+	for i, ls := range out.Sets {
+		set := st.sets[i]
+		a.useSet(st, set)
+		status := "enabled"
+		if !ls.Enabled {
+			status = "not enabled"
+		}
+		a.printf("\nSet %s (%s), %s\n", ls.Name, a.setFile(ls.Name), status)
+		if !ls.Enabled {
+			a.printf("Nothing of this set is installed: %s.\n", a.notEnabledNote(ls.Name))
+		}
+		if len(ls.Playbooks) == 0 {
+			a.printf("No playbooks are registered. Register one with '%s'.\n", a.cmd("add <name> <folder>"))
+			continue
+		}
+		if a.listPlaybooks(ls) {
+			notInstalled = true
+		}
+	}
+	a.hintSet = ""
+	if notInstalled {
+		a.printf("\nSome skills are not installed: run 'aiplam update --all', or 'aiplam check' for details.\n")
+	}
+	return nil
+}
+
+// listPlaybooks prints a set's playbooks and reports whether any of their skills is not installed in every target.
+func (a *App) listPlaybooks(ls listSet) bool {
+	notInstalled := false
+	for _, lp := range ls.Playbooks {
+		a.printf("\n%s\n", lp.ID)
+		a.printf("  name:    %s\n", lp.Name)
+		a.printf("  folder:  %s\n", a.pretty(lp.Folder))
+		a.printf("  version: %s\n", lp.Label)
+		for _, problem := range lp.Problems {
+			a.printf("  problem: %s\n", problem)
+		}
+		a.printf("  skills (%s):", lp.Artifacts.Skills.Path)
+		if len(lp.Artifacts.Skills.Items) == 0 {
+			a.printf(" none\n")
+			continue
+		}
+		a.printf("\n")
+		for _, s := range lp.Artifacts.Skills.Items {
+			if s.Installed || !ls.Enabled {
+				a.printf("    %s\n", s.Name)
+				continue
+			}
+			notInstalled = true
+			var where []string
+			for _, t := range s.MissingIn {
+				where = append(where, a.pretty(t))
+			}
+			a.printf("    %s  (not installed in %s)\n", s.Name, strings.Join(where, ", "))
+		}
+	}
+	return notInstalled
+}
+
+// listSet gathers the information of a set's playbooks.
+func (a *App) listSet(set *setState, targets []string) listSet {
+	ls := listSet{Name: set.name, Enabled: set.enabled, Playbooks: []listPlaybook{}}
+	for _, e := range set.entries {
 		lp := listPlaybook{ID: e.ID, Name: e.Name, Folder: e.Dir, Problems: []string{},
 			Artifacts: listArtifacts{Skills: listSkills{Path: e.SkillsPath(), Folder: e.SkillsDir,
 				Items: []listSkill{}}}}
@@ -110,14 +194,14 @@ func (a *App) cmdList(args []string) error {
 		}
 		lp.Label = lp.Version.String()
 		if fsutil.IsDir(e.SkillsDir) {
-			skills, err := playbook.Skills(entries, e)
+			skills, err := playbook.Skills(set.entries, e)
 			if err != nil {
 				lp.Problems = append(lp.Problems, err.Error())
 			}
 			for _, s := range skills {
 				item := listSkill{Name: s.Name, Source: s.Source, MissingIn: []string{}}
 				for _, t := range targets {
-					if !st.enabled {
+					if !set.enabled {
 						break // a set that is not enabled has nothing installed
 					}
 					state, current, err := fsutil.Inspect(filepath.Join(playbook.SkillsFolder(t), s.Name))
@@ -126,66 +210,11 @@ func (a *App) cmdList(args []string) error {
 						item.MissingIn = append(item.MissingIn, t)
 					}
 				}
-				item.Installed = st.enabled && len(item.MissingIn) == 0
+				item.Installed = set.enabled && len(item.MissingIn) == 0
 				lp.Artifacts.Skills.Items = append(lp.Artifacts.Skills.Items, item)
 			}
 		}
-		out.Playbooks = append(out.Playbooks, lp)
+		ls.Playbooks = append(ls.Playbooks, lp)
 	}
-
-	if p.bools["json"] {
-		enc := json.NewEncoder(a.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(out)
-	}
-
-	var prettyTargets []string
-	for _, t := range targets {
-		prettyTargets = append(prettyTargets, a.pretty(t))
-	}
-	status := "enabled"
-	if !st.enabled {
-		status = "not enabled"
-	}
-	a.printf("Set %s (%s), %s; targets: %s\n", st.set, a.setFile(st.set), status, strings.Join(prettyTargets, ", "))
-	if !st.enabled {
-		a.printf("Nothing of this set is installed: %s.\n", a.notEnabledNote(st.set))
-	}
-	if len(out.Playbooks) == 0 {
-		a.printf("\nNo playbooks are registered. Register one with '%s'.\n", a.cmd("add <name> <folder>"))
-		return nil
-	}
-	notInstalled := false
-	for _, lp := range out.Playbooks {
-		a.printf("\n%s\n", lp.ID)
-		a.printf("  name:    %s\n", lp.Name)
-		a.printf("  folder:  %s\n", a.pretty(lp.Folder))
-		a.printf("  version: %s\n", lp.Label)
-		for _, problem := range lp.Problems {
-			a.printf("  problem: %s\n", problem)
-		}
-		a.printf("  skills (%s):", lp.Artifacts.Skills.Path)
-		if len(lp.Artifacts.Skills.Items) == 0 {
-			a.printf(" none\n")
-			continue
-		}
-		a.printf("\n")
-		for _, s := range lp.Artifacts.Skills.Items {
-			if s.Installed || !st.enabled {
-				a.printf("    %s\n", s.Name)
-				continue
-			}
-			notInstalled = true
-			var where []string
-			for _, t := range s.MissingIn {
-				where = append(where, a.pretty(t))
-			}
-			a.printf("    %s  (not installed in %s)\n", s.Name, strings.Join(where, ", "))
-		}
-	}
-	if notInstalled {
-		a.printf("\nSome skills are not installed: run '%s', or '%s' for details.\n", a.cmd("update --all"),
-			a.cmd("check"))
-	}
-	return nil
+	return ls
 }

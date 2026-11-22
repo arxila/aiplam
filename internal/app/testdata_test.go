@@ -102,13 +102,21 @@ func TestTestdataPlaybooks(t *testing.T) {
 		filepath.Join(lettuce, "skills", "aiplam-lettuce-data-clean"))
 	e.mustRun(ExitOK, "check")
 
-	// A second set, enabled instead of the first one, then the first one again; then a single target.
+	// A second set: it collides with the first one (both provide aiplam-tomato), so it can replace it but not join it.
 	all := installed()
 	e.mustRun(ExitOK, "set", "add", "other")
 	e.mustRun(ExitOK, "add", "aiplam-tomato", tomato, "-sp", ".", "-s", "other")
-	e.mustRun(ExitOK, "set", "enable", "other")
+	e.mustRun(ExitFailure, "set", "enable", "other")
+	e.mustRun(ExitOK, "set", "switch", "other")
 	expect("aiplam-tomato-onboard", "aiplam-tomato-style")
-	e.mustRun(ExitOK, "set", "enable", "default")
+	e.mustRun(ExitOK, "set", "switch", "default")
+	expect(all...)
+
+	// A third set that does not collide can be enabled besides the first one.
+	e.mustRun(ExitOK, "set", "add", "extra")
+	e.mustRun(ExitOK, "remove", "aiplam-blueberry")
+	e.mustRun(ExitOK, "add", "aiplam-blueberry", blueberry, "-s", "extra")
+	e.mustRun(ExitOK, "set", "enable", "extra")
 	expect(all...)
 	e.mustRun(ExitOK, "target", "agents")
 	e.assertMissing(filepath.Join(e.home, ".claude", "skills", "aiplam-lettuce-review"))
@@ -117,6 +125,7 @@ func TestTestdataPlaybooks(t *testing.T) {
 	e.mustRun(ExitOK, "remove", "aiplam-lettuce@aiplam-lettuce-fork")
 	e.mustRun(ExitOK, "remove", "aiplam-lettuce")
 	e.mustRun(ExitOK, "remove", "aiplam-blueberry")
+	e.mustRun(ExitOK, "set", "disable", "extra")
 	_, errOut = e.mustRun(ExitFailure, "remove", tomato) // two playbooks are registered there
 	if !strings.Contains(errOut, "aiplam-tomato, aiplam-garlic") {
 		t.Fatalf("unexpected message: %s", errOut)

@@ -32,12 +32,13 @@ import (
 
 const checkUsage = `Usage: aiplam check [-s|--set SET]
 
-Changes nothing. Checks the format and content of the installation's configuration (~/.aiplam/aiplam-config.yaml) and
-of a set's file (~/.aiplam/<set>.yaml), the target and playbook folders and, if the set is enabled, whether 'aiplam
-update' would change anything for each of its playbooks (links to create or remove) or would be cancelled by a
-conflict. Also reports broken links in the targets' skills folders. Exits with 1 when anything needs attention.
+Changes nothing. Checks the format and content of the installation's configuration (~/.aiplam/aiplam-config.yaml)
+and of the enabled sets' files (~/.aiplam/<set>.yaml), the target and playbook folders and, for each playbook of the
+enabled sets, whether 'aiplam update' would change anything (links to create or remove) or would be cancelled by a
+conflict. Also reports broken links in the targets' skills folders. With --set, it checks that set only (and, if it
+is not enabled, only that it could be). Exits with 1 when anything needs attention.
 
-  -s, --set SET   the set (default: the enabled set)
+  -s, --set SET   the set to check (default: the enabled sets)
 `
 
 func (a *App) cmdCheck(args []string) error {
@@ -53,60 +54,71 @@ func (a *App) cmdCheck(args []string) error {
 		attention++
 		a.warnf(format, args...)
 	}
-	invalid := func(file string, errs []error) error {
-		for _, e := range errs {
-			problem("%s: %s", file, e)
-		}
-		a.errorf("%d problem(s) in %s: fix them by hand; nothing else was checked.", len(errs), file)
-		return errSilent
-	}
 
 	instFile := a.pretty(config.InstallFile(a.Home))
 	inst, err := config.LoadInstall(a.Home)
 	if errors.Is(err, config.ErrNotInitialized) {
 		return errors.New("aiplam is not initialized: run 'aiplam init --target <folder>' first")
 	}
-	if err != nil {
-		return invalid(instFile, []error{err})
-	}
 	a.printf("Installation: %s\n", instFile)
-	if errs := inst.Validate(a.Home); len(errs) > 0 {
-		return invalid(instFile, errs)
-	}
-	a.printf("  format and content are valid\n")
-
-	set := inst.Enabled
-	if a.Set != "" {
-		set = a.Set
-	}
-	file := a.setFile(set)
-	if !config.SetExists(a.Home, set) {
-		if a.Set == "" {
-			problem("the enabled set '%s' does not exist (%s is missing): enable another set with 'aiplam set enable "+
-				"<set>', or create it again with 'aiplam set add %s'", set, file, set)
-			return errSilent
+	if err == nil {
+		for _, e := range inst.Validate(a.Home) {
+			problem("%s: %s", instFile, e)
 		}
-		return fmt.Errorf("set '%s' does not exist ('aiplam set list' lists the sets)", set)
+	} else {
+		problem("%s: %s", instFile, err)
 	}
-	enabled := config.SameSet(a.Home, set, inst.Enabled)
-	if !enabled {
-		a.hintSet = set
-	}
-	cfg, err := config.LoadSet(a.Home, set)
-	if err != nil {
-		return invalid(file, []error{err})
-	}
-	status := "enabled"
-	if !enabled {
-		status = "not enabled"
-	}
-	a.printf("Set %s (%s): %s\n", set, status, file)
-	if errs := cfg.Validate(a.Home); len(errs) > 0 {
-		return invalid(file, errs)
+	if attention > 0 {
+		a.errorf("fix %s by hand; nothing else was checked.", instFile)
+		return errSilent
 	}
 	a.printf("  format and content are valid\n")
 
-	targets := inst.TargetDirs(a.Home)
+	// The enabled sets, and the one given with --set.
+	if a.Set != "" && !config.SetExists(a.Home, a.Set) {
+		return fmt.Errorf("set '%s' does not exist ('aiplam set list' lists the sets)", a.Set)
+	}
+	st := &state{inst: inst, targets: inst.TargetDirs(a.Home)}
+	loadSet := func(name string, enabled bool) *setState {
+		file := a.setFile(name)
+		if !config.SetExists(a.Home, name) {
+			problem("the enabled set '%s' does not exist (%s is missing): disable it with 'aiplam set disable %s', "+
+				"or create it again with 'aiplam set add %s'", name, file, name, name)
+			return nil
+		}
+		cfg, err := config.LoadSet(a.Home, name)
+		if err == nil {
+			for _, e := range cfg.Validate(a.Home) {
+				problem("%s: %s", file, e)
+				err = errSilent
+			}
+		} else {
+			problem("%s: %s", file, err)
+		}
+		if err != nil {
+			return nil
+		}
+		return &setState{name: name, cfg: cfg, enabled: enabled, entries: playbook.Entries(name, cfg.Playbooks, a.Home)}
+	}
+	for _, name := range inst.Enabled {
+		if s := loadSet(name, true); s != nil {
+			st.enabled = append(st.enabled, s)
+			if a.Set == "" || config.SameSet(a.Home, name, a.Set) {
+				st.sets = append(st.sets, s)
+			}
+		}
+	}
+	if a.Set != "" && len(st.sets) == 0 && !inst.IsEnabled(a.Home, a.Set) {
+		if s := loadSet(a.Set, false); s != nil {
+			st.sets = append(st.sets, s)
+		}
+	}
+	if attention > 0 {
+		a.errorf("%d problem(s) in the set files: fix them by hand; nothing else was checked.", attention)
+		return errSilent
+	}
+
+	targets := st.targets
 	a.printf("Targets:\n")
 	for _, t := range targets {
 		if !fsutil.IsDir(t) {
@@ -117,70 +129,25 @@ func (a *App) cmdCheck(args []string) error {
 		a.printf("  %s\n", a.pretty(t))
 	}
 
-	entries := playbook.Entries(cfg.Playbooks, a.Home)
+	if len(st.sets) == 0 {
+		a.printf("No set is enabled.\n")
+	}
 	reported := map[string]bool{} // links already reported by a playbook's plan
-	if len(entries) == 0 {
-		a.printf("No playbooks are registered.\n")
-	}
-	for _, e := range entries {
-		a.printf("Playbook %s (%s) at %s\n", e.ID, a.version(e.Dir), a.pretty(e.Dir))
-		if err := a.checkPlaybookFolders(e); err != nil {
-			problem("%s", err)
-			continue
+	for _, set := range st.sets {
+		a.useSet(st, set)
+		status := "enabled"
+		if !set.enabled {
+			status = "not enabled"
 		}
-		if !enabled {
-			// Nothing is installed; the set must only stay installable.
-			overlaps, err := playbook.Overlaps(entries, e)
-			if err != nil {
-				problem("playbook %s: %s", e.ID, err)
-				continue
-			}
-			for name, others := range overlaps {
-				problem("playbook %s: skill %s: also provided by playbook %s; 'aiplam set enable %s' would be "+
-					"cancelled", e.ID, name, strings.Join(others, ", "), set)
-			}
-			if len(overlaps) == 0 {
-				a.printf("  folders are valid (not installed: the set is not enabled)\n")
-			}
-			continue
+		a.printf("Set %s (%s): %s\n", set.name, status, a.setFile(set.name))
+		if len(set.entries) == 0 {
+			a.printf("  no playbooks are registered\n")
 		}
-		plan, err := playbook.Build(entries, e, targets)
-		if err != nil {
-			problem("playbook %s: %s", e.ID, err)
-			continue
-		}
-		var changes []playbook.Action
-		for _, act := range plan.Changes() {
-			// A link can match several playbooks of the same folder (prefixes x and x-y): report it once.
-			if !(act.Kind == playbook.Remove && reported[act.Link]) {
-				changes = append(changes, act)
-			}
-		}
-		for _, act := range plan.Actions {
-			reported[act.Link] = true
-		}
-		if len(plan.Conflicts()) > 0 {
-			for _, text := range a.conflictTexts(plan) {
-				problem("playbook %s: %s", e.ID, text)
-			}
-			problem("playbook %s: '%s' would be cancelled until the conflicts are resolved", e.ID,
-				a.cmd("update "+e.ID))
-		}
-		if len(changes) == 0 && len(plan.Conflicts()) == 0 {
-			a.printf("  up to date\n")
-			continue
-		}
-		for _, act := range changes {
-			switch act.Kind {
-			case playbook.Create:
-				problem("playbook %s: '%s' would link %s -> %s", e.ID, a.cmd("update "+e.ID), a.pretty(act.Link),
-					a.pretty(act.Source))
-			case playbook.Remove:
-				problem("playbook %s: '%s' would remove %s (%s)", e.ID, a.cmd("update "+e.ID), a.pretty(act.Link),
-					act.Reason)
-			}
+		for _, e := range set.entries {
+			a.checkPlaybook(st, set, e, reported, problem)
 		}
 	}
+	a.hintSet = ""
 
 	// Broken links that no playbook plan covers (for example, links to an unregistered or moved playbook).
 	for _, t := range targets {
@@ -208,4 +175,65 @@ func (a *App) cmdCheck(args []string) error {
 	}
 	a.printf("\nEverything is up to date.\n")
 	return nil
+}
+
+// checkPlaybook checks a playbook's folders and, for an enabled set, whether 'aiplam update' would change anything.
+func (a *App) checkPlaybook(st *state, set *setState, e playbook.Entry, reported map[string]bool,
+	problem func(string, ...any)) {
+	a.printf("Playbook %s (%s) at %s\n", e.ID, a.version(e.Dir), a.pretty(e.Dir))
+	if err := a.checkPlaybookFolders(e); err != nil {
+		problem("%s", err)
+		return
+	}
+	if !set.enabled {
+		// Nothing is installed; the set must only stay installable.
+		overlaps, err := playbook.Overlaps(set.entries, e)
+		if err != nil {
+			problem("playbook %s: %s", e.ID, err)
+			return
+		}
+		for name, others := range overlaps {
+			problem("playbook %s: skill %s: also provided by playbook %s; 'aiplam set enable %s' would be cancelled",
+				e.ID, name, strings.Join(others, ", "), set.name)
+		}
+		if len(overlaps) == 0 {
+			a.printf("  folders are valid (not installed: the set is not enabled)\n")
+		}
+		return
+	}
+	plan, err := playbook.Build(set.entries, e, st.targets, st.others(set.name))
+	if err != nil {
+		problem("playbook %s: %s", e.ID, err)
+		return
+	}
+	var changes []playbook.Action
+	for _, act := range plan.Changes() {
+		// A link can match several playbooks of the same folder (prefixes x and x-y): report it once.
+		if !(act.Kind == playbook.Remove && reported[act.Link]) {
+			changes = append(changes, act)
+		}
+	}
+	for _, act := range plan.Actions {
+		reported[act.Link] = true
+	}
+	if len(plan.Conflicts()) > 0 {
+		for _, text := range a.conflictTexts(plan) {
+			problem("playbook %s: %s", e.ID, text)
+		}
+		problem("playbook %s: '%s' would be cancelled until the conflicts are resolved", e.ID, a.cmd("update "+e.ID))
+	}
+	if len(changes) == 0 && len(plan.Conflicts()) == 0 {
+		a.printf("  up to date\n")
+		return
+	}
+	for _, act := range changes {
+		switch act.Kind {
+		case playbook.Create:
+			problem("playbook %s: '%s' would link %s -> %s", e.ID, a.cmd("update "+e.ID), a.pretty(act.Link),
+				a.pretty(act.Source))
+		case playbook.Remove:
+			problem("playbook %s: '%s' would remove %s (%s)", e.ID, a.cmd("update "+e.ID), a.pretty(act.Link),
+				act.Reason)
+		}
+	}
 }

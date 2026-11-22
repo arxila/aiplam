@@ -47,12 +47,14 @@ aiplam update --all
 aiplam remove <name|id|folder> [<folder>]              # remove a playbook's links and unregister it
 aiplam list [--json]                                   # playbooks, versions and skills
 aiplam check                                           # what update would change; config and broken links
-aiplam set list|add|remove|enable [<set>]              # manage sets of playbooks
+aiplam set list|add|remove [<set>]                     # manage sets of playbooks
+aiplam set enable|disable|switch <set>[,<set>...]      # choose the sets installed in the targets
 aiplam target [agents|claude|DIR...]                   # show or change the target folders
 ```
 
-Playbooks are registered in [sets](#sets), and only the enabled set is installed. `add`, `update`, `remove`, `list`
-and `check` act on the enabled set, or on another one given with `--set SET` (or `-s SET`).
+Playbooks are registered in [sets](#sets), and only the enabled sets are installed. `update`, `remove`, `list` and
+`check` act on the enabled sets, or on the one given with `--set SET` (or `-s SET`). `add` needs `--set` unless
+exactly one set is enabled.
 
 Without a selector, `update` acts on the playbook registered for the current folder. A selector is an id, a name
 (when only one playbook has it), a folder (when only one playbook is registered there), or a name and a folder.
@@ -69,27 +71,33 @@ aiplam list
 
 ### Sets
 
-A **set** is a group of registered playbooks. Exactly one set is **enabled**: its playbooks are the ones linked into
-the targets. `init` creates a first set, `default` (or the one given with `--set`), and enables it.
+A **set** is a group of registered playbooks. The **enabled** sets (any number of them) are the ones whose playbooks
+are linked into the targets. `init` creates a first set, `default` (or the one given with `--set`), and enables it.
 
 ```bash
 aiplam set add acme                                       # create an empty set
 aiplam add acme ~/Workspace/acme/acme-ai-playbook -s acme # register in it: nothing is linked yet
-aiplam set enable acme                                    # unlink the enabled set's playbooks, link acme's
-aiplam set list                                           # the sets; '*' marks the enabled one
-aiplam set remove default                                 # delete a set that is not enabled
+aiplam set enable acme                                    # link its playbooks too
+aiplam set disable default                                # unlink default's playbooks
+aiplam set switch default,acme                            # enable exactly these sets
+aiplam set list                                           # the sets; '*' marks the enabled ones
+aiplam set remove old                                     # delete a set that is not enabled
 ```
 
+Sets enabled together cannot collide: `set enable` fails, changing nothing, if any link that a set needs already
+exists in a target, whether another enabled set made it or anything else did. `set switch` disables the sets that
+are not listed first, so their links are not in the way, and leaves alone the links that stay the same. Within the
+enabled sets, `add` and `update` also refuse a skill that another enabled set provides.
+
 In a set that is not enabled, `add` and `remove` only register and unregister playbooks, and `update` has nothing to
-do. Enabling a set is all-or-nothing, like `add` (links that both sets want are left alone). The enabled set cannot
-be removed, but any other can, including `default`. Set names use letters, digits, `_` and `-`; `aiplam-config` is
-reserved.
+do. Enabled sets cannot be removed (disable them first), but any other can, including `default`. Several sets can be
+given at once, separated by commas. Set names use letters, digits, `_` and `-`; `aiplam-config` is reserved.
 
 ### Targets
 
-The **targets** are the folders where the enabled set's artifacts are installed: skills are linked into each
+The **targets** are the folders where the enabled sets' artifacts are installed: skills are linked into each
 target's `skills/` subfolder. `init` needs at least one (`agents` for `~/.agents`, `claude` for `~/.claude`, or any
-folder). `aiplam target` shows them, and `aiplam target agents claude` replaces them: the enabled set's playbooks
+folder). `aiplam target` shows them, and `aiplam target agents claude` replaces them: the enabled sets' playbooks
 are unlinked from the folders that are no longer targets and linked into the new ones, all-or-nothing.
 
 ### Safety
@@ -107,14 +115,15 @@ are unlinked from the folders that are no longer targets and linked into the new
 
 The configuration lives in `~/.aiplam`, in YAML files that aiplam writes and `aiplam check` validates:
 
-- `aiplam-config.yaml`, the installation: the targets and the enabled set. Written by `init`, `target` and
-  `set enable`.
+- `aiplam-config.yaml`, the installation: the targets and the enabled sets. Written by `init`, `target` and
+  `set enable`, `disable` and `switch`.
 
   ```yaml
   targets:
     - ~/.agents
     - ~/.claude
-  enabled: default
+  enabled:
+    - default
   ```
 
 - `<set>.yaml`, one per set: its playbooks. Written by `init`, `set add`, `add` and `remove`.

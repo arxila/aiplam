@@ -19,8 +19,8 @@
 // Package config reads, validates and writes aiplam's configuration, kept in ~/.aiplam:
 //
 //   - aiplam-config.yaml, the installation's configuration: the target folders where artifacts are installed, and the
-//     enabled set.
-//   - <set>.yaml, one file per set: the playbooks registered in the set. Only the enabled set's playbooks are
+//     enabled sets.
+//   - <set>.yaml, one file per set: the playbooks registered in the set. Only the enabled sets' playbooks are
 //     installed in the targets.
 package config
 
@@ -65,8 +65,8 @@ type Install struct {
 	// Targets are the folders where artifacts are installed (for example ~/.agents and ~/.claude); skills go to their
 	// skills/ subfolder. A leading "~" stands for the user's home.
 	Targets []string `yaml:"targets"`
-	// Enabled is the set whose playbooks are installed in the targets.
-	Enabled string `yaml:"enabled"`
+	// Enabled are the sets whose playbooks are installed in the targets (possibly none).
+	Enabled []string `yaml:"enabled"`
 }
 
 // Set is the content of a set's file.
@@ -217,11 +217,17 @@ func parse(data []byte, v any) error {
 
 // SaveInstall writes the installation's configuration file, replacing it atomically.
 func SaveInstall(home string, inst *Install) error {
+	if inst.Enabled == nil {
+		copied := *inst
+		copied.Enabled = []string{}
+		inst = &copied
+	}
 	return save(InstallFile(home), inst,
 		"# aiplam (AI Playbook Manager) installation configuration.\n"+
 			"# targets: folders where artifacts are installed (skills go to their skills/ subfolder); change them with\n"+
 			"#   'aiplam target'.\n"+
-			"# enabled: the set whose playbooks are installed; change it with 'aiplam set enable'.\n")
+			"# enabled: the sets whose playbooks are installed; change them with 'aiplam set enable', 'aiplam set disable'\n"+
+			"#   and 'aiplam set switch'.\n")
 }
 
 // SaveSet writes a set's file, replacing it atomically.
@@ -309,16 +315,30 @@ func ValidateTargets(targets []string, home string) []error {
 }
 
 // Validate checks the installation's configuration and returns every problem found. It does not check that the
-// enabled set exists.
+// enabled sets exist.
 func (c *Install) Validate(home string) []error {
 	errs := ValidateTargets(c.Targets, home)
-	switch {
-	case c.Enabled == "":
-		errs = append(errs, errors.New("no enabled set: set 'enabled' to the name of a set"))
-	case !ValidSetName(c.Enabled):
-		errs = append(errs, fmt.Errorf("enabled set '%s' is not a valid set name", c.Enabled))
+	for i, set := range c.Enabled {
+		if !ValidSetName(set) {
+			errs = append(errs, fmt.Errorf("enabled set '%s' is not a valid set name", set))
+		}
+		for j := 0; j < i; j++ {
+			if strings.EqualFold(set, c.Enabled[j]) {
+				errs = append(errs, fmt.Errorf("set '%s' is listed more than once under 'enabled'", set))
+			}
+		}
 	}
 	return errs
+}
+
+// IsEnabled reports whether set is one of the enabled sets.
+func (c *Install) IsEnabled(home, set string) bool {
+	for _, e := range c.Enabled {
+		if SameSet(home, e, set) {
+			return true
+		}
+	}
+	return false
 }
 
 // SkillsPath returns the playbook's skills path, or the default when none is set.

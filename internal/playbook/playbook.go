@@ -38,17 +38,19 @@ const SkillFile = "SKILL.md"
 // Entry is a registered playbook with its computed id and resolved skills folder.
 type Entry struct {
 	config.Playbook
-	// ID is the name, or "name@<last folder segment>" when several playbooks share the name.
+	// ID is the name, or "name@<last folder segment>" when several playbooks of its set share the name.
 	ID string
+	// Set is the set the playbook is registered in.
+	Set string
 	// Dir is the playbook's folder, with "~" expanded and links resolved.
 	Dir string
 	// SkillsDir is the folder holding the playbook's skills, with links resolved.
 	SkillsDir string
 }
 
-// Entries builds the entries of the given playbooks, computing their ids and resolving their folders ("~" stands for
-// home).
-func Entries(playbooks []config.Playbook, home string) []Entry {
+// Entries builds the entries of the playbooks of a set, computing their ids and resolving their folders ("~" stands
+// for home).
+func Entries(set string, playbooks []config.Playbook, home string) []Entry {
 	count := map[string]int{}
 	for _, p := range playbooks {
 		count[p.Name]++
@@ -59,7 +61,7 @@ func Entries(playbooks []config.Playbook, home string) []Entry {
 		if count[p.Name] > 1 {
 			id = p.Name + "@" + filepath.Base(p.Folder)
 		}
-		entries[i] = Entry{Playbook: p, ID: id, Dir: p.Dir(home), SkillsDir: p.SkillsDir(home)}
+		entries[i] = Entry{Playbook: p, ID: id, Set: set, Dir: p.Dir(home), SkillsDir: p.SkillsDir(home)}
 	}
 	return entries
 }
@@ -153,6 +155,8 @@ const (
 	OtherLink
 	// OtherProvider: other registered playbooks (Action.Others) provide an artifact with the same name.
 	OtherProvider
+	// Exists: the link already exists, even if it is right; enabling a set requires every one of its links to be new.
+	Exists
 )
 
 // Action is one planned change for one artifact in one target folder.
@@ -206,16 +210,19 @@ func SkillsFolder(target string) string {
 }
 
 // Build plans the changes for playbook e in the given targets, for the state in which final are the registered
-// entries. When e is in final (by name and folder), its skills must be installed (add or update); otherwise e is being
-// removed and all of its links go. Links that point into e's skills folder and are named after e are removed unless
-// some entry in final wants exactly that link. A desired link whose path holds anything other than a link to the
-// same skill is a conflict, as is a skill name that another playbook in final also provides from another folder.
-func Build(final []Entry, e Entry, targets []string) (Plan, error) {
-	return build(final, e, targets, nil)
+// entries of e's set and others are the entries of the other enabled sets, one slice per set. When e is in final (by
+// name and folder), its skills must be installed (add or update); otherwise e is being removed and all of its links go.
+// Links that point into e's skills folder and are named after e are removed unless some entry in final or others wants
+// exactly that link. A desired link whose path holds anything other than a link to the same skill is a conflict, as is
+// a skill name that another playbook of final or others also provides.
+func Build(final []Entry, e Entry, targets []string, others [][]Entry) (Plan, error) {
+	return build(final, e, targets, nil, others, false)
 }
 
-// build is Build for a state in which the links in gone have already been removed.
-func build(final []Entry, e Entry, targets []string, gone map[string]bool) (Plan, error) {
+// build is Build for a state in which the links in gone have already been removed. With strict, a desired link that
+// already exists is a conflict even when it is right.
+func build(final []Entry, e Entry, targets []string, gone map[string]bool, others [][]Entry, strict bool) (Plan,
+	error) {
 	plan := Plan{Entry: e}
 	inspect := func(link string) (fsutil.LinkState, string, error) {
 		if gone[link] {
@@ -233,20 +240,26 @@ func build(final []Entry, e Entry, targets []string, gone map[string]bool) (Plan
 		}
 	}
 
-	// What every entry in the final state wants installed, by artifact name.
+	// What every entry in the final state (of e's set and of the other enabled sets) wants installed, by artifact name.
 	wanted := map[string][]Skill{}
 	wantedBy := map[string][]string{}
-	for _, f := range final {
-		if !fsutil.IsDir(f.SkillsDir) {
-			continue
-		}
-		skills, err := Skills(final, f)
-		if err != nil {
-			return plan, err
-		}
-		for _, s := range skills {
-			wanted[s.Name] = append(wanted[s.Name], s)
-			wantedBy[s.Name] = append(wantedBy[s.Name], f.ID)
+	for i, group := range append([][]Entry{final}, others...) {
+		for _, f := range group {
+			if !fsutil.IsDir(f.SkillsDir) {
+				continue
+			}
+			skills, err := Skills(group, f)
+			if err != nil {
+				return plan, err
+			}
+			label := f.ID
+			if i > 0 {
+				label = fmt.Sprintf("%s of set %s", f.ID, f.Set)
+			}
+			for _, s := range skills {
+				wanted[s.Name] = append(wanted[s.Name], s)
+				wantedBy[s.Name] = append(wantedBy[s.Name], label)
+			}
 		}
 	}
 
@@ -287,6 +300,8 @@ func build(final []Entry, e Entry, targets []string, gone map[string]bool) (Plan
 			switch {
 			case state == fsutil.Missing:
 				action.Kind = Create
+			case state == fsutil.Link && sameFolder(current, s.Source) && strict:
+				action.Kind, action.Cause = Conflict, Exists
 			case state == fsutil.Link && sameFolder(current, s.Source):
 				action.Kind = Keep
 			case state == fsutil.Link:
@@ -356,12 +371,15 @@ func Overlaps(final []Entry, e Entry) (map[string][]string, error) {
 	return overlaps, nil
 }
 
-// Switch plans the move from one installed state (the entries of a set, linked into some targets) to another: it
-// removes the links of every entry of from in fromTargets, and installs every entry of to in toTargets. Links that
-// both states want (same path, same skill) are left alone. Conflicts are planned as in Build, except that links being
-// removed are not in the way. Entries of to must have their skills folders. The removals of links in targets that are
-// no longer targets are explained as such; reason explains the others.
-func Switch(from, to []Entry, fromTargets, toTargets []string, reason string) (Plan, error) {
+// Switch plans the move from one installed state to another. Each argument holding entries has one slice per set:
+// the links of the sets in from are removed from fromTargets, the sets in to are installed in toTargets, and the sets
+// in stay remain installed (their links are neither removed nor shared). Links that from and to both want (same path,
+// same skill) are left alone. Conflicts are planned as in Build, except that links being removed are not in the way;
+// with strict, any other link already in place of a link to create is a conflict. Entries of to must have their
+// skills folders. Removals of links in folders that are no longer targets are explained as such; reason explains the
+// others.
+func Switch(from, to, stay [][]Entry, fromTargets, toTargets []string, reason string, strict bool) (Plan, error) {
+	var plan Plan
 	isTarget := func(link string) bool {
 		for _, t := range toTargets {
 			if fsutil.SamePath(SkillsFolder(t), filepath.Dir(link)) {
@@ -370,22 +388,23 @@ func Switch(from, to []Entry, fromTargets, toTargets []string, reason string) (P
 		}
 		return false
 	}
-	var plan Plan
 	removed := map[string]Action{}
 	var removals []Action
-	for _, e := range from {
-		p, err := Build(nil, e, fromTargets)
-		if err != nil {
-			return plan, err
-		}
-		for _, a := range p.Actions {
-			if _, dup := removed[a.Link]; a.Kind == Remove && !dup {
-				a.Reason = reason
-				if !isTarget(a.Link) {
-					a.Reason = "no longer a target"
+	for _, group := range from {
+		for _, e := range group {
+			p, err := build(nil, e, fromTargets, nil, stay, false)
+			if err != nil {
+				return plan, err
+			}
+			for _, a := range p.Actions {
+				if _, dup := removed[a.Link]; a.Kind == Remove && !dup {
+					a.Reason = reason
+					if !isTarget(a.Link) {
+						a.Reason = "no longer a target"
+					}
+					removed[a.Link] = a
+					removals = append(removals, a)
 				}
-				removed[a.Link] = a
-				removals = append(removals, a)
 			}
 		}
 	}
@@ -395,26 +414,34 @@ func Switch(from, to []Entry, fromTargets, toTargets []string, reason string) (P
 	}
 	var installs []Action
 	kept := map[string]bool{}
-	for _, e := range to {
-		p, err := build(to, e, toTargets, gone)
-		if err != nil {
-			return plan, err
-		}
-		for _, a := range p.Actions {
-			if r, ok := removed[a.Link]; ok && a.Kind == Create && sameFolder(r.Source, a.Source) {
-				kept[a.Link] = true // wanted by both states: leave it
-				continue
+	for i, group := range to {
+		others := append([][]Entry{}, stay...)
+		for j, g := range to {
+			if j != i {
+				others = append(others, g)
 			}
-			if a.Kind == Remove {
-				// Playbooks of one folder with overlapping names (x, x-y) can both plan removing a link.
-				if _, dup := removed[a.Link]; dup {
+		}
+		for _, e := range group {
+			p, err := build(group, e, toTargets, gone, others, strict)
+			if err != nil {
+				return plan, err
+			}
+			for _, a := range p.Actions {
+				if r, ok := removed[a.Link]; ok && a.Kind == Create && sameFolder(r.Source, a.Source) {
+					kept[a.Link] = true // wanted by both states: leave it
 					continue
 				}
-				removed[a.Link] = a
-				gone[a.Link] = true
-			}
-			if a.Kind != Keep {
-				installs = append(installs, a)
+				if a.Kind == Remove {
+					// Playbooks of one folder with overlapping names (x, x-y) can both plan removing a link.
+					if _, dup := removed[a.Link]; dup {
+						continue
+					}
+					removed[a.Link] = a
+					gone[a.Link] = true
+				}
+				if a.Kind != Keep {
+					installs = append(installs, a)
+				}
 			}
 		}
 	}

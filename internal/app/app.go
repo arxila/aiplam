@@ -108,9 +108,9 @@ func (a *App) mainUsage() string {
 	for _, c := range commands {
 		fmt.Fprintf(&b, "  %-8s %s\n", c.name, c.summary)
 	}
-	b.WriteString("\nPlaybooks are registered in sets; only the enabled set is installed in the targets.\n")
+	b.WriteString("\nPlaybooks are registered in sets; only the enabled sets are installed in the targets.\n")
 	b.WriteString("\nOption for add, update, remove, list and check:\n")
-	b.WriteString("  -s, --set SET   act on set SET instead of the enabled one\n")
+	b.WriteString("  -s, --set SET   act on set SET instead of the enabled ones\n")
 	b.WriteString("\nRun 'aiplam <command> --help' for a command's options, 'aiplam --version' for the version.\n")
 	return b.String()
 }
@@ -306,13 +306,50 @@ func (a *App) loadInstall() (*config.Install, error) {
 	return inst, nil
 }
 
-// state is what commands that act on a set work with.
+// setState is a loaded set.
+type setState struct {
+	name    string
+	cfg     *config.Set
+	enabled bool             // whether it is enabled (installed in the targets)
+	entries []playbook.Entry // its playbooks
+}
+
+// state is what commands that act on sets work with.
 type state struct {
 	inst    *config.Install
 	targets []string
-	set     string      // the set acted on
-	cfg     *config.Set // its content
-	enabled bool        // whether it is the enabled set (installed in the targets)
+	sets    []*setState // the sets acted on: the one given with --set, or the enabled ones
+	enabled []*setState // every enabled set
+}
+
+// others returns the entries of the enabled sets other than set, one slice per set.
+func (st *state) others(set string) [][]playbook.Entry {
+	var others [][]playbook.Entry
+	for _, s := range st.enabled {
+		if s.name != set {
+			others = append(others, s.entries)
+		}
+	}
+	return others
+}
+
+// entries returns the playbooks of the sets acted on.
+func (st *state) entries() []playbook.Entry {
+	var all []playbook.Entry
+	for _, s := range st.sets {
+		all = append(all, s.entries...)
+	}
+	return all
+}
+
+// set returns the loaded set named name.
+func (st *state) set(name string) *setState {
+	for _, s := range st.sets {
+		if s.name == name {
+			return s
+		}
+	}
+	return nil
 }
 
 // file returns the path of the set's file, for display.
@@ -320,35 +357,62 @@ func (a *App) setFile(set string) string {
 	return a.pretty(config.SetFile(a.Home, set))
 }
 
-// load loads the installation's configuration and the set to act on (the one given with --set, which must exist, or
-// the enabled one), and fails when either is missing or not valid.
+// load loads the installation's configuration, every enabled set, and the set given with --set (which must exist).
+// It fails when any of them is missing or not valid.
 func (a *App) load() (*state, error) {
 	inst, err := a.loadInstall()
 	if err != nil {
 		return nil, err
 	}
-	st := &state{inst: inst, targets: inst.TargetDirs(a.Home), set: inst.Enabled}
-	if a.Set != "" {
-		st.set = a.Set
-		if !config.SetExists(a.Home, a.Set) {
-			return nil, fmt.Errorf("set '%s' does not exist; create it with 'aiplam set add %s' ('aiplam set list' "+
-				"lists the sets)", a.Set, a.Set)
+	st := &state{inst: inst, targets: inst.TargetDirs(a.Home)}
+	for _, name := range inst.Enabled {
+		if !config.SetExists(a.Home, name) {
+			return nil, fmt.Errorf("the enabled set '%s' does not exist (%s is missing): disable it with 'aiplam set "+
+				"disable %s', or create it again with 'aiplam set add %s'", name, a.setFile(name), name, name)
 		}
-	} else if !config.SetExists(a.Home, inst.Enabled) {
-		return nil, fmt.Errorf("the enabled set '%s' does not exist (%s is missing): enable another set with "+
-			"'aiplam set enable <set>', or create it again with 'aiplam set add %s'", inst.Enabled,
-			a.setFile(inst.Enabled), inst.Enabled)
+		s, err := a.loadSetState(name, true)
+		if err != nil {
+			return nil, err
+		}
+		st.enabled = append(st.enabled, s)
 	}
-	st.enabled = config.SameSet(a.Home, st.set, inst.Enabled)
-	if !st.enabled {
-		a.hintSet = st.set
+	if a.Set == "" {
+		st.sets = st.enabled
+		return st, nil
 	}
-	cfg, err := a.loadSet(st.set)
+	if !config.SetExists(a.Home, a.Set) {
+		return nil, fmt.Errorf("set '%s' does not exist; create it with 'aiplam set add %s' ('aiplam set list' lists "+
+			"the sets)", a.Set, a.Set)
+	}
+	for _, s := range st.enabled {
+		if config.SameSet(a.Home, s.name, a.Set) {
+			st.sets = []*setState{s}
+			return st, nil
+		}
+	}
+	s, err := a.loadSetState(a.Set, false)
 	if err != nil {
 		return nil, err
 	}
-	st.cfg = cfg
+	st.sets = []*setState{s}
 	return st, nil
+}
+
+func (a *App) loadSetState(name string, enabled bool) (*setState, error) {
+	cfg, err := a.loadSet(name)
+	if err != nil {
+		return nil, err
+	}
+	return &setState{name: name, cfg: cfg, enabled: enabled,
+		entries: playbook.Entries(name, cfg.Playbooks, a.Home)}, nil
+}
+
+// useSet makes the commands suggested from now on name set with --set, unless it is the only enabled set.
+func (a *App) useSet(st *state, s *setState) {
+	a.hintSet = ""
+	if !s.enabled || len(st.enabled) > 1 {
+		a.hintSet = s.name
+	}
 }
 
 // loadSet loads a set and fails when it is missing or not valid.
@@ -364,7 +428,7 @@ func (a *App) loadSet(set string) (*config.Set, error) {
 		for _, e := range errs {
 			a.errorf("%s: %s", a.setFile(set), e)
 		}
-		a.errorf("fix %s by hand; '%s' lists its problems.", a.setFile(set), a.cmd("check"))
+		a.errorf("fix %s by hand; 'aiplam check --set %s' lists its problems.", a.setFile(set), set)
 		return nil, errSilent
 	}
 	return cfg, nil
@@ -376,79 +440,112 @@ func (a *App) notEnabledNote(set string) string {
 		"'aiplam set enable %s')", set, set)
 }
 
-// selectEntry finds the registered playbook that args designate:
+// setNames returns the names of sets, separated by commas.
+func setNames(sets []*setState) string {
+	var names []string
+	for _, s := range sets {
+		names = append(names, s.name)
+	}
+	return strings.Join(names, ", ")
+}
+
+// where describes the sets acted on, for messages: "set 'x'", "the enabled sets (x, y)" or "no enabled set".
+func (st *state) where() string {
+	switch {
+	case len(st.sets) == 1:
+		return fmt.Sprintf("set '%s'", st.sets[0].name)
+	case len(st.sets) == 0:
+		return "no enabled set"
+	}
+	return "the enabled sets (" + setNames(st.sets) + ")"
+}
+
+// selectEntry finds the registered playbook that args designate among those of the sets acted on:
 //   - no argument: the playbook registered for the current folder (it must be the only one there);
-//   - one argument: an id, else a name (which must be unique), else a folder (with a single playbook);
-//   - two arguments: a name and a folder, which must match a registered playbook.
-func (a *App) selectEntry(entries []playbook.Entry, args []string, set string) (playbook.Entry, error) {
-	byFolder := func(folder string) []playbook.Entry {
+//   - one argument: an id, else a name, else a folder, each of which must designate a single playbook;
+//   - two arguments: a name and a folder, which must match a single registered playbook.
+func (a *App) selectEntry(st *state, args []string) (playbook.Entry, error) {
+	entries := st.entries()
+	several := len(st.sets) > 1
+	label := func(e playbook.Entry) string {
+		if several {
+			return e.ID + " of set " + e.Set
+		}
+		return e.ID
+	}
+	list := func(es []playbook.Entry) string {
+		var s []string
+		for _, e := range es {
+			s = append(s, label(e))
+		}
+		return strings.Join(s, ", ")
+	}
+	filter := func(match func(playbook.Entry) bool) []playbook.Entry {
 		var out []playbook.Entry
 		for _, e := range entries {
-			if fsutil.SamePath(e.Dir, folder) {
+			if match(e) {
 				out = append(out, e)
 			}
 		}
 		return out
 	}
-	ids := func(es []playbook.Entry) string {
-		var s []string
-		for _, e := range es {
-			s = append(s, e.ID)
+	// ambiguous builds the error for several matches, suggesting --set when they belong to different sets.
+	ambiguous := func(what string, matches []playbook.Entry, give string) error {
+		for _, m := range matches[1:] {
+			if m.Set != matches[0].Set {
+				return fmt.Errorf("several playbooks match %s (%s); choose the set with --set", what, list(matches))
+			}
 		}
-		return strings.Join(s, ", ")
+		return fmt.Errorf("several playbooks match %s (%s); %s", what, list(matches), give)
 	}
 	switch len(args) {
 	case 0:
-		matches := byFolder(fsutil.Canonical(a.Cwd))
+		cwd := fsutil.Canonical(a.Cwd)
+		matches := filter(func(e playbook.Entry) bool { return fsutil.SamePath(e.Dir, cwd) })
 		switch len(matches) {
 		case 0:
-			return playbook.Entry{}, fmt.Errorf("no playbook is registered for the current folder '%s' in set '%s'; give "+
-				"a name, id or folder ('%s' shows them)", a.pretty(a.Cwd), set, a.cmd("list"))
+			return playbook.Entry{}, fmt.Errorf("no playbook of %s is registered for the current folder '%s'; give "+
+				"a name, id or folder ('aiplam list' shows them)", st.where(), a.pretty(a.Cwd))
 		case 1:
 			return matches[0], nil
 		default:
-			return playbook.Entry{}, fmt.Errorf("several playbooks are registered for the current folder (%s); "+
-				"give a name or id", ids(matches))
+			return playbook.Entry{}, ambiguous("the current folder", matches, "give a name or id")
 		}
 	case 1:
 		arg := args[0]
-		for _, e := range entries {
-			if e.ID == arg {
-				return e, nil
+		for _, match := range []func(playbook.Entry) bool{
+			func(e playbook.Entry) bool { return e.ID == arg },
+			func(e playbook.Entry) bool { return e.Name == arg },
+		} {
+			if matches := filter(match); len(matches) == 1 {
+				return matches[0], nil
+			} else if len(matches) > 1 {
+				return playbook.Entry{}, ambiguous("'"+arg+"'", matches, "give an id, or the name and the folder")
 			}
 		}
-		var named []playbook.Entry
-		for _, e := range entries {
-			if e.Name == arg {
-				named = append(named, e)
-			}
-		}
-		if len(named) == 1 {
-			return named[0], nil
-		}
-		if len(named) > 1 {
-			return playbook.Entry{}, fmt.Errorf("several playbooks are named '%s' (%s); give an id, or the name and "+
-				"the folder", arg, ids(named))
-		}
-		matches := byFolder(a.absPath(arg))
+		folder := a.absPath(arg)
+		matches := filter(func(e playbook.Entry) bool { return fsutil.SamePath(e.Dir, folder) })
 		switch len(matches) {
 		case 0:
-			return playbook.Entry{}, fmt.Errorf("no playbook is registered with name, id or folder '%s' in set '%s' "+
-				"('%s' shows them)", arg, set, a.cmd("list"))
+			return playbook.Entry{}, fmt.Errorf("no playbook of %s is registered with name, id or folder '%s' "+
+				"('aiplam list' shows them)", st.where(), arg)
 		case 1:
 			return matches[0], nil
 		default:
-			return playbook.Entry{}, fmt.Errorf("several playbooks are registered for folder '%s' (%s); give a name "+
-				"or id", arg, ids(matches))
+			return playbook.Entry{}, ambiguous("folder '"+arg+"'", matches, "give a name or id")
 		}
 	case 2:
 		folder := a.absPath(args[1])
-		for _, e := range entries {
-			if e.Name == args[0] && fsutil.SamePath(e.Dir, folder) {
-				return e, nil
-			}
+		matches := filter(func(e playbook.Entry) bool { return e.Name == args[0] && fsutil.SamePath(e.Dir, folder) })
+		switch len(matches) {
+		case 0:
+			return playbook.Entry{}, fmt.Errorf("no playbook of %s named '%s' is registered for folder '%s'",
+				st.where(), args[0], args[1])
+		case 1:
+			return matches[0], nil
+		default:
+			return playbook.Entry{}, ambiguous("'"+args[0]+"' in folder '"+args[1]+"'", matches, "")
 		}
-		return playbook.Entry{}, fmt.Errorf("no playbook named '%s' is registered for folder '%s'", args[0], args[1])
 	default:
 		return playbook.Entry{}, usagef("too many arguments")
 	}
@@ -492,6 +589,8 @@ func (a *App) conflictText(c playbook.Action) string {
 		why = fmt.Sprintf("'%s' already exists and links to '%s'", a.pretty(c.Link), a.pretty(c.Current))
 	case playbook.OtherProvider:
 		why = "also provided by playbook " + strings.Join(c.Others, ", ")
+	case playbook.Exists:
+		why = fmt.Sprintf("'%s' already exists", a.pretty(c.Link))
 	default:
 		why = fmt.Sprintf("'%s' already exists and is not a link", a.pretty(c.Link))
 	}

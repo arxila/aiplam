@@ -21,6 +21,7 @@ package app
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"arxila.io/aiplam/internal/config"
 	"arxila.io/aiplam/internal/fsutil"
@@ -30,9 +31,9 @@ import (
 const targetUsage = `Usage: aiplam target
        aiplam target agents|claude|DIR...
 
-Without arguments, shows the target folders: where the artifacts of the enabled set's playbooks are installed (skills
+Without arguments, shows the target folders: where the artifacts of the enabled sets' playbooks are installed (skills
 go to their skills/ subfolder). With arguments, replaces them: 'agents' (~/.agents), 'claude' (~/.claude) or any
-folder; several can be given, as separate arguments or separated by commas. The enabled set's playbooks are unlinked
+folder; several can be given, as separate arguments or separated by commas. The enabled sets' playbooks are unlinked
 from the folders that are no longer targets and linked into the new ones. Nothing is changed if any link cannot be
 created because something else is already in its place.
 `
@@ -71,22 +72,18 @@ func (a *App) cmdTarget(args []string) error {
 		return nil
 	}
 
-	var entries []playbook.Entry
-	if config.SetExists(a.Home, inst.Enabled) {
-		cfg, err := a.loadSet(inst.Enabled)
-		if err != nil {
-			return err
-		}
-		entries = playbook.Entries(cfg.Playbooks, a.Home)
-	} else {
-		a.warnf("the enabled set '%s' does not exist: there is nothing to unlink or link.", inst.Enabled)
+	sets, err := a.enabledSets(inst)
+	if err != nil {
+		return err
 	}
-	for _, e := range entries {
-		if err := a.checkPlaybookFolders(e); err != nil {
-			return fmt.Errorf("%w; the targets were not changed", err)
+	for _, s := range sets {
+		for _, e := range s.entries {
+			if err := a.checkPlaybookFolders(e); err != nil {
+				return fmt.Errorf("%w; the targets were not changed", err)
+			}
 		}
 	}
-	plan, err := playbook.Switch(entries, entries, current, next, "no longer in the playbook")
+	plan, err := playbook.Switch(groups(sets), groups(sets), nil, current, next, "no longer in the playbook", false)
 	if err != nil {
 		return err
 	}
@@ -96,7 +93,11 @@ func (a *App) cmdTarget(args []string) error {
 		return errSilent
 	}
 
-	a.printf("Changing the targets (enabled set: '%s')\n", inst.Enabled)
+	if len(inst.Enabled) == 0 {
+		a.printf("Changing the targets (no set is enabled)\n")
+	} else {
+		a.printf("Changing the targets (enabled sets: %s)\n", strings.Join(inst.Enabled, ", "))
+	}
 	for _, dir := range next {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err

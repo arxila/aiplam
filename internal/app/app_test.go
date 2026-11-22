@@ -115,10 +115,10 @@ func (e *env) assertMissing(path string) {
 	}
 }
 
-// config returns the enabled set.
+// config returns the first enabled set.
 func (e *env) config() *config.Set {
 	e.t.Helper()
-	cfg, err := config.LoadSet(e.home, e.install().Enabled)
+	cfg, err := config.LoadSet(e.home, e.install().Enabled[0])
 	if err != nil {
 		e.t.Fatal(err)
 	}
@@ -159,7 +159,8 @@ func TestInit(t *testing.T) {
 	if !fsutil.IsDir(filepath.Join(e.home, ".agents")) {
 		t.Fatal("~/.agents not created")
 	}
-	if inst := e.install(); len(inst.Targets) != 1 || inst.Targets[0] != "~/.agents" || inst.Enabled != "default" {
+	if inst := e.install(); len(inst.Targets) != 1 || inst.Targets[0] != "~/.agents" ||
+		strings.Join(inst.Enabled, ",") != "default" {
 		t.Fatalf("install = %+v", inst)
 	}
 	if n := len(e.config().Playbooks); n != 0 {
@@ -172,7 +173,8 @@ func TestInit(t *testing.T) {
 
 	e2 := newEnv(t)
 	e2.mustRun(ExitOK, "init", "--target", "agents,claude", "-s", "work")
-	if inst := e2.install(); len(inst.Targets) != 2 || inst.Targets[1] != "~/.claude" || inst.Enabled != "work" {
+	if inst := e2.install(); len(inst.Targets) != 2 || inst.Targets[1] != "~/.claude" ||
+		strings.Join(inst.Enabled, ",") != "work" {
 		t.Fatalf("install = %+v", inst)
 	}
 	if config.SetExists(e2.home, "default") {
@@ -267,7 +269,7 @@ func TestSameNameInSeveralFolders(t *testing.T) {
 		t.Fatalf("unexpected list: %s", out)
 	}
 	_, errOut = e.mustRun(ExitFailure, "update", "x")
-	if !strings.Contains(errOut, "several playbooks are named 'x'") {
+	if !strings.Contains(errOut, "several playbooks match 'x' (x@pb-a, x@pb-b)") {
 		t.Fatalf("unexpected message: %s", errOut)
 	}
 	e.mustRun(ExitOK, "update", "x", b)
@@ -348,7 +350,7 @@ func TestUpdate(t *testing.T) {
 
 	e.app.Cwd = e.root
 	_, errOut = e.mustRun(ExitFailure, "update")
-	if !strings.Contains(errOut, "no playbook is registered for the current folder") {
+	if !strings.Contains(errOut, "is registered for the current folder") {
 		t.Fatalf("unexpected message: %s", errOut)
 	}
 }
@@ -369,7 +371,7 @@ func TestLongestPrefixWins(t *testing.T) {
 		t.Fatal(err)
 	}
 	names := map[string][]string{}
-	for _, p := range list.Playbooks {
+	for _, p := range list.Sets[0].Playbooks {
 		for _, s := range p.Artifacts.Skills.Items {
 			names[p.ID] = append(names[p.ID], s.Name)
 		}
@@ -412,7 +414,7 @@ func TestRemoveKeepsRealFolders(t *testing.T) {
 		t.Fatal("a real folder was removed")
 	}
 	_, errOut := e.mustRun(ExitFailure, "remove", "x")
-	if !strings.Contains(errOut, "no playbook is registered") {
+	if !strings.Contains(errOut, "no playbook of set 'default' is registered") {
 		t.Fatalf("unexpected message: %s", errOut)
 	}
 }
@@ -470,10 +472,12 @@ func TestCheckInvalidConfig(t *testing.T) {
 
 	file := config.InstallFile(e.home)
 	for _, content := range []string{
-		"targets: [~/.agents]\n",
-		"targets: []\nenabled: default\n",
-		"targets: [~/.agents]\nenabled: default\nplaybooks: []\n",
-		"targets: [~/.agents]\nenabled: '../x'\n",
+		"enabled: [default]\n",
+		"targets: []\nenabled: [default]\n",
+		"targets: [~/.agents]\nenabled: [default]\nplaybooks: []\n",
+		"targets: [~/.agents]\nenabled: ['../x']\n",
+		"targets: [~/.agents]\nenabled: [default, Default]\n",
+		"targets: [~/.agents]\nenabled: default\n",
 		"",
 	} {
 		if err := os.WriteFile(file, []byte(content), 0o644); err != nil {
@@ -516,10 +520,10 @@ func TestListJSONAndVersions(t *testing.T) {
 		return list
 	}
 	list := readList()
-	if len(list.Playbooks) != 1 {
+	if len(list.Sets) != 1 || len(list.Sets[0].Playbooks) != 1 || !list.Sets[0].Enabled {
 		t.Fatalf("unexpected list: %+v", list)
 	}
-	p := list.Playbooks[0]
+	p := list.Sets[0].Playbooks[0]
 	if p.ID != "x" || p.Name != "x" || p.Folder != pb || p.Label != "branch: main" || !p.Version.Known ||
 		len(p.Artifacts.Skills.Items) != 1 || !p.Artifacts.Skills.Items[0].Installed {
 		t.Fatalf("unexpected playbook: %+v", p)
@@ -528,7 +532,7 @@ func TestListJSONAndVersions(t *testing.T) {
 	git("tag", "v1.0.0")
 	git("tag", "x-1.0.0")
 	git("checkout", "-q", "--detach", "v1.0.0")
-	if got := readList().Playbooks[0].Label; got != "tags: v1.0.0, x-1.0.0" {
+	if got := readList().Sets[0].Playbooks[0].Label; got != "tags: v1.0.0, x-1.0.0" {
 		t.Fatalf("label = %q", got)
 	}
 	out, _ := e.mustRun(ExitOK, "list")
@@ -568,6 +572,7 @@ func TestSets(t *testing.T) {
 	e.mustRun(ExitOK, "init", "-t", "agents")
 	pbA := e.playbook("pa", "x-a")
 	pbB := e.playbook("pb", "y-b")
+	pbC := e.playbook("pc", "z-c")
 	e.mustRun(ExitOK, "add", "x", pbA)
 	e.assertLink(filepath.Join(e.agentsSkills(), "x-a"), filepath.Join(pbA, "skills", "x-a"))
 
@@ -593,76 +598,162 @@ func TestSets(t *testing.T) {
 	e.mustRun(ExitOK, "check", "-s", "work")
 	var list listOutput
 	out, _ = e.mustRun(ExitOK, "list", "--json", "--set=work")
-	if err := json.Unmarshal([]byte(out), &list); err != nil || list.Set != "work" || list.Enabled ||
-		len(list.Playbooks) != 1 || list.Playbooks[0].Artifacts.Skills.Items[0].Installed {
+	if err := json.Unmarshal([]byte(out), &list); err != nil || len(list.Sets) != 1 || list.Sets[0].Name != "work" ||
+		list.Sets[0].Enabled || list.Sets[0].Playbooks[0].Artifacts.Skills.Items[0].Installed {
 		t.Fatalf("unexpected list: %v %s", err, out)
 	}
-	out, _ = e.mustRun(ExitOK, "set", "list")
-	if !strings.Contains(out, "* default") || !strings.Contains(out, "  work") {
-		t.Fatalf("unexpected sets: %s", out)
-	}
 
-	// Enabling a set unlinks the playbooks of the previous one and links its own.
+	// Enabling a set adds it to the enabled ones.
 	e.mustRun(ExitOK, "set", "enable", "work")
-	e.assertMissing(filepath.Join(e.agentsSkills(), "x-a"))
+	e.assertLink(filepath.Join(e.agentsSkills(), "x-a"), filepath.Join(pbA, "skills", "x-a"))
 	e.assertLink(filepath.Join(e.agentsSkills(), "y-b"), filepath.Join(pbB, "skills", "y-b"))
-	if e.install().Enabled != "work" {
-		t.Fatal("work not enabled")
+	if got := strings.Join(e.install().Enabled, ","); got != "default,work" {
+		t.Fatalf("enabled = %s", got)
+	}
+	out, _ = e.mustRun(ExitOK, "set", "list")
+	if !strings.Contains(out, "* default") || !strings.Contains(out, "* work") {
+		t.Fatalf("unexpected sets: %s", out)
 	}
 	out, _ = e.mustRun(ExitOK, "set", "enable", "work")
 	if !strings.Contains(out, "already enabled") {
 		t.Fatalf("unexpected output: %s", out)
 	}
-	// Commands without --set act on the enabled set.
-	e.mustRun(ExitOK, "remove", "y")
+
+	// With several sets enabled: list and check cover them all, add needs --set, and selectors look in all of them.
+	out, _ = e.mustRun(ExitOK, "list")
+	if !strings.Contains(out, "Set default") || !strings.Contains(out, "Set work") {
+		t.Fatalf("unexpected list: %s", out)
+	}
+	e.mustRun(ExitOK, "check")
+	_, errOut = e.mustRun(ExitFailure, "add", "z", pbC)
+	if !strings.Contains(errOut, "--set") {
+		t.Fatalf("unexpected message: %s", errOut)
+	}
+	e.mustRun(ExitOK, "update", "y")
+	e.mustRun(ExitOK, "update", "--all")
+
+	// Sets enabled together cannot provide the same skill.
+	_, errOut = e.mustRun(ExitFailure, "add", "y", pbB, "-s", "default")
+	if !strings.Contains(errOut, "also provided by playbook y of set work") {
+		t.Fatalf("unexpected message: %s", errOut)
+	}
+
+	// Disabling a set unlinks its playbooks only.
+	e.mustRun(ExitOK, "set", "disable", "default")
+	e.assertMissing(filepath.Join(e.agentsSkills(), "x-a"))
+	e.assertLink(filepath.Join(e.agentsSkills(), "y-b"), filepath.Join(pbB, "skills", "y-b"))
+	e.mustRun(ExitFailure, "set", "disable", "default") // not enabled
+	e.mustRun(ExitOK, "remove", "y")                    // the only enabled set
 	e.assertMissing(filepath.Join(e.agentsSkills(), "y-b"))
 	e.mustRun(ExitOK, "add", "y", pbB)
 
-	// The enabled set cannot be removed; others can, unlinking nothing.
+	// The enabled sets cannot be removed; others can, unlinking nothing.
 	_, errOut = e.mustRun(ExitFailure, "set", "remove", "work")
-	if !strings.Contains(errOut, "enable another set first") {
+	if !strings.Contains(errOut, "aiplam set disable work") {
 		t.Fatalf("unexpected message: %s", errOut)
 	}
 	e.mustRun(ExitOK, "set", "remove", "default")
-	e.assertLink(filepath.Join(e.agentsSkills(), "y-b"), filepath.Join(pbB, "skills", "y-b"))
 	e.mustRun(ExitFailure, "list", "-s", "default")
 	e.mustRun(ExitFailure, "set", "enable", "default")
 
-	// Enabling is cancelled, changing nothing, when a link cannot be created.
-	e.mustRun(ExitOK, "set", "add", "other")
-	e.mustRun(ExitOK, "add", "x", pbA, "-s", "other")
-	if err := os.MkdirAll(filepath.Join(e.agentsSkills(), "x-a"), 0o755); err != nil {
-		t.Fatal(err)
+	// No set enabled.
+	e.mustRun(ExitOK, "set", "disable", "work")
+	e.assertMissing(filepath.Join(e.agentsSkills(), "y-b"))
+	out, _ = e.mustRun(ExitOK, "list")
+	if !strings.Contains(out, "No set is enabled") {
+		t.Fatalf("unexpected list: %s", out)
 	}
-	_, errOut = e.mustRun(ExitFailure, "set", "enable", "other")
-	if !strings.Contains(errOut, "was not enabled") {
+	e.mustRun(ExitOK, "check")
+	_, errOut = e.mustRun(ExitFailure, "add", "z", pbC)
+	if !strings.Contains(errOut, "no set is enabled") {
 		t.Fatalf("unexpected message: %s", errOut)
-	}
-	e.assertLink(filepath.Join(e.agentsSkills(), "y-b"), filepath.Join(pbB, "skills", "y-b"))
-	if e.install().Enabled != "work" {
-		t.Fatal("the enabled set changed")
 	}
 
 	e.mustRun(ExitUsage, "set")
 	e.mustRun(ExitUsage, "set", "frob")
+	e.mustRun(ExitUsage, "set", "enable")
+	e.mustRun(ExitUsage, "set", "enable", "a,,b")
 	e.mustRun(ExitUsage, "set", "list", "-s", "work")
 	e.mustRun(ExitUsage, "list", "--set")
 	e.mustRun(ExitUsage, "list", "--set", "../x")
 	e.mustRun(ExitUsage, "list", "-s", "a.b")
 }
 
-func TestSetEnableKeepsSharedLinks(t *testing.T) {
+func TestSetEnableCollisions(t *testing.T) {
 	e := newEnv(t)
 	e.mustRun(ExitOK, "init", "-t", "agents")
 	pb := e.playbook("p", "x-a", "x-b")
+	other := e.playbook("q", "y-a")
 	e.mustRun(ExitOK, "add", "x", pb)
 	e.mustRun(ExitOK, "set", "add", "work")
 	e.mustRun(ExitOK, "add", "x", pb, "-s", "work")
-	out, _ := e.mustRun(ExitOK, "set", "enable", "work")
+	e.mustRun(ExitOK, "set", "add", "more")
+	e.mustRun(ExitOK, "add", "y", other, "-s", "more")
+
+	// Enabling a set whose links already exist (from an enabled set) fails, changing nothing.
+	_, errOut := e.mustRun(ExitFailure, "set", "enable", "work,more")
+	if !strings.Contains(errOut, "collide") {
+		t.Fatalf("unexpected message: %s", errOut)
+	}
+	e.assertMissing(filepath.Join(e.agentsSkills(), "y-a"))
+	if got := strings.Join(e.install().Enabled, ","); got != "default" {
+		t.Fatalf("enabled = %s", got)
+	}
+
+	// Also when the link exists for any other reason, even if it is right.
+	e.mustRun(ExitOK, "set", "disable", "default")
+	if err := fsutil.CreateLink(filepath.Join(e.agentsSkills(), "x-a"), filepath.Join(pb, "skills", "x-a")); err != nil {
+		t.Fatal(err)
+	}
+	_, errOut = e.mustRun(ExitFailure, "set", "enable", "work")
+	if !strings.Contains(errOut, "already exists") {
+		t.Fatalf("unexpected message: %s", errOut)
+	}
+	if err := fsutil.RemoveLink(filepath.Join(e.agentsSkills(), "x-a")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Two sets being enabled together cannot collide either.
+	_, errOut = e.mustRun(ExitFailure, "set", "enable", "default", "work")
+	if !strings.Contains(errOut, "collide") {
+		t.Fatalf("unexpected message: %s", errOut)
+	}
+	e.mustRun(ExitOK, "set", "enable", "work,more")
+	e.assertLink(filepath.Join(e.agentsSkills(), "y-a"), filepath.Join(other, "skills", "y-a"))
+	e.assertLink(filepath.Join(e.agentsSkills(), "x-b"), filepath.Join(pb, "skills", "x-b"))
+}
+
+func TestSetSwitch(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init", "-t", "agents")
+	pb := e.playbook("p", "x-a", "x-b")
+	other := e.playbook("q", "y-a")
+	e.mustRun(ExitOK, "add", "x", pb)
+	e.mustRun(ExitOK, "set", "add", "work")
+	e.mustRun(ExitOK, "add", "x", pb, "-s", "work")
+	e.mustRun(ExitOK, "set", "add", "more")
+	e.mustRun(ExitOK, "add", "y", other, "-s", "more")
+
+	// Switching replaces the enabled sets; links wanted before and after are left alone.
+	out, _ := e.mustRun(ExitOK, "set", "switch", "work,more")
 	if strings.Contains(out, "x-a") {
 		t.Fatalf("links wanted by both sets should be left alone: %s", out)
 	}
 	e.assertLink(filepath.Join(e.agentsSkills(), "x-a"), filepath.Join(pb, "skills", "x-a"))
+	e.assertLink(filepath.Join(e.agentsSkills(), "y-a"), filepath.Join(other, "skills", "y-a"))
+	if got := strings.Join(e.install().Enabled, ","); got != "work,more" {
+		t.Fatalf("enabled = %s", got)
+	}
+	e.mustRun(ExitOK, "set", "switch", "more")
+	e.assertMissing(filepath.Join(e.agentsSkills(), "x-a"))
+	e.assertLink(filepath.Join(e.agentsSkills(), "y-a"), filepath.Join(other, "skills", "y-a"))
+	out, _ = e.mustRun(ExitOK, "set", "switch", "more")
+	if !strings.Contains(out, "unchanged") {
+		t.Fatalf("unexpected output: %s", out)
+	}
+	e.mustRun(ExitFailure, "set", "switch", "default,work") // they collide
+	e.assertLink(filepath.Join(e.agentsSkills(), "y-a"), filepath.Join(other, "skills", "y-a"))
+	e.mustRun(ExitFailure, "set", "switch", "nope")
 }
 
 func TestTarget(t *testing.T) {
@@ -712,7 +803,8 @@ func TestShortOptions(t *testing.T) {
 	e := newEnv(t)
 	claude := filepath.Join(e.home, ".claude")
 	e.mustRun(ExitOK, "init", "-t", "agents", "-t=claude", "-s", "main")
-	if inst := e.install(); len(inst.Targets) != 2 || inst.Targets[1] != "~/.claude" || inst.Enabled != "main" {
+	if inst := e.install(); len(inst.Targets) != 2 || inst.Targets[1] != "~/.claude" ||
+		strings.Join(inst.Enabled, ",") != "main" {
 		t.Fatalf("install = %+v", inst)
 	}
 	e.mustRun(ExitOK, "set", "add", "work")

@@ -21,6 +21,7 @@ package app
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"arxila.io/aiplam/internal/config"
 	"arxila.io/aiplam/internal/playbook"
@@ -29,18 +30,27 @@ import (
 const setUsage = `Usage: aiplam set list
        aiplam set add <set>
        aiplam set remove <set>
-       aiplam set enable <set>
+       aiplam set enable <set>[,<set>...]
+       aiplam set disable <set>[,<set>...]
+       aiplam set switch <set>[,<set>...]
 
-Playbooks are registered in sets, each kept in its own file (~/.aiplam/<set>.yaml). Exactly one set is enabled: its
-playbooks are the ones installed in the targets. 'add', 'update', 'remove', 'list' and 'check' act on the enabled set
-unless given --set.
+Playbooks are registered in sets, each kept in its own file (~/.aiplam/<set>.yaml). The playbooks of the enabled sets
+are the ones installed in the targets. 'add', 'update', 'remove', 'list' and 'check' act on the enabled sets unless
+given --set.
 
-  list     list the sets, marking the enabled one with '*'
-  add      create an empty set (names: letters, digits, '_' and '-'; '` + config.InstallName + `' is reserved)
-  remove   delete a set that is not enabled, unregistering its playbooks (nothing is unlinked, since they are not
-           installed)
-  enable   enable a set: unlink the playbooks of the enabled set from the targets and link those of this set. Nothing
-           is changed if any link cannot be created because something else is in its place
+Sets enabled together cannot collide: enabling a set fails, changing nothing, if any of the links it needs already
+exists in a target, whoever made it (another enabled set, or anything else).
+
+  list      list the sets, marking the enabled ones with '*'
+  add       create an empty set (names: letters, digits, '_' and '-'; '` + config.InstallName + `' is reserved)
+  remove    delete a set that is not enabled, unregistering its playbooks (nothing is unlinked, since they are not
+            installed)
+  enable    enable sets, besides those already enabled, linking their playbooks into the targets
+  disable   disable sets, unlinking their playbooks from the targets
+  switch    enable exactly the given sets: disable the others, then enable these (links that stay the same are left
+            alone)
+
+Several sets can be given at once, separated by commas (or as separate arguments).
 `
 
 func (a *App) cmdSet(args []string) error {
@@ -52,37 +62,79 @@ func (a *App) cmdSet(args []string) error {
 		return err
 	}
 	if len(p.positional) == 0 {
-		return usagef("set needs a subcommand: list, add, remove or enable")
+		return usagef("set needs a subcommand: list, add, remove, enable, disable or switch")
 	}
 	sub, rest := p.positional[0], p.positional[1:]
-	if sub == "list" {
+	switch sub {
+	case "list":
 		if len(rest) > 0 {
 			return usagef("unexpected argument: %s", rest[0])
 		}
 		return a.setList()
-	}
-	if sub != "add" && sub != "remove" && sub != "enable" {
+	case "add", "remove":
+		if len(rest) != 1 {
+			return usagef("set %s needs one set name", sub)
+		}
+		if !config.ValidSetName(rest[0]) {
+			return invalidSetName(rest[0])
+		}
+		inst, err := a.loadInstall()
+		if err != nil {
+			return err
+		}
+		if sub == "add" {
+			return a.setAdd(rest[0])
+		}
+		return a.setRemove(inst, rest[0])
+	case "enable", "disable", "switch":
+		names, err := setNameList(rest)
+		if err != nil {
+			return err
+		}
+		if len(names) == 0 {
+			return usagef("set %s needs one or more set names", sub)
+		}
+		inst, err := a.loadInstall()
+		if err != nil {
+			return err
+		}
+		for _, name := range names {
+			if sub != "disable" && !config.SetExists(a.Home, name) {
+				return fmt.Errorf("set '%s' does not exist; create it with 'aiplam set add %s'", name, name)
+			}
+		}
+		switch sub {
+		case "enable":
+			return a.setEnable(inst, names)
+		case "disable":
+			return a.setDisable(inst, names)
+		default:
+			return a.setSwitch(inst, names)
+		}
+	default:
 		return usagef("unknown set subcommand: %s", sub)
 	}
-	if len(rest) != 1 {
-		return usagef("set %s needs a set name", sub)
+}
+
+// setNameList parses set names given as arguments, each possibly a comma-separated list, dropping repetitions.
+func setNameList(args []string) ([]string, error) {
+	var names []string
+	for _, arg := range args {
+		for _, name := range strings.Split(arg, ",") {
+			name = strings.TrimSpace(name)
+			if !config.ValidSetName(name) {
+				return nil, invalidSetName(name)
+			}
+			dup := false
+			for _, n := range names {
+				dup = dup || strings.EqualFold(n, name)
+			}
+			if !dup {
+				names = append(names, name)
+			}
+		}
 	}
-	name := rest[0]
-	if !config.ValidSetName(name) {
-		return invalidSetName(name)
-	}
-	inst, err := a.loadInstall()
-	if err != nil {
-		return err
-	}
-	switch sub {
-	case "add":
-		return a.setAdd(name)
-	case "remove":
-		return a.setRemove(inst, name)
-	default:
-		return a.setEnable(inst, name)
-	}
+	return names, nil
 }
 
 func (a *App) setList() error {
@@ -94,11 +146,10 @@ func (a *App) setList() error {
 	if err != nil {
 		return err
 	}
-	enabledFound := false
 	for _, set := range sets {
 		mark := " "
-		if config.SameSet(a.Home, set, inst.Enabled) {
-			mark, enabledFound = "*", true
+		if inst.IsEnabled(a.Home, set) {
+			mark = "*"
 		}
 		cfg, err := config.LoadSet(a.Home, set)
 		if err != nil {
@@ -107,8 +158,13 @@ func (a *App) setList() error {
 		}
 		a.printf("%s %-20s %d playbook(s)\n", mark, set, len(cfg.Playbooks))
 	}
-	if !enabledFound {
-		a.warnf("the enabled set '%s' does not exist: enable another set with 'aiplam set enable <set>'.", inst.Enabled)
+	for _, name := range inst.Enabled {
+		if !config.SetExists(a.Home, name) {
+			a.warnf("the enabled set '%s' does not exist: disable it with 'aiplam set disable %s'.", name, name)
+		}
+	}
+	if len(inst.Enabled) == 0 {
+		a.printf("No set is enabled: enable one with 'aiplam set enable <set>'.\n")
 	}
 	return nil
 }
@@ -130,8 +186,9 @@ func (a *App) setRemove(inst *config.Install, name string) error {
 	if !config.SetExists(a.Home, name) {
 		return fmt.Errorf("set '%s' does not exist ('aiplam set list' lists the sets)", name)
 	}
-	if config.SameSet(a.Home, name, inst.Enabled) {
-		return fmt.Errorf("set '%s' is enabled and cannot be removed: enable another set first", name)
+	if inst.IsEnabled(a.Home, name) {
+		return fmt.Errorf("set '%s' is enabled and cannot be removed: disable it first with 'aiplam set disable %s'",
+			name, name)
 	}
 	count := 0
 	if cfg, err := config.LoadSet(a.Home, name); err == nil {
@@ -145,57 +202,178 @@ func (a *App) setRemove(inst *config.Install, name string) error {
 	return nil
 }
 
-func (a *App) setEnable(inst *config.Install, name string) error {
-	if !config.SetExists(a.Home, name) {
-		return fmt.Errorf("set '%s' does not exist; create it with 'aiplam set add %s'", name, name)
-	}
-	if config.SameSet(a.Home, name, inst.Enabled) {
-		a.printf("Set '%s' is already enabled.\n", name)
-		return nil
-	}
-	targets := inst.TargetDirs(a.Home)
-
-	// The playbooks of the enabled set, to unlink. If its file is gone, its links cannot be found.
-	var from []playbook.Entry
-	if config.SetExists(a.Home, inst.Enabled) {
-		old, err := a.loadSet(inst.Enabled)
-		if err != nil {
-			return err
+// enabledSets loads the enabled sets. Those whose file is missing are left out, with a warning: their links (if any)
+// cannot be found.
+func (a *App) enabledSets(inst *config.Install) ([]*setState, error) {
+	var sets []*setState
+	for _, name := range inst.Enabled {
+		if !config.SetExists(a.Home, name) {
+			a.warnf("the enabled set '%s' does not exist: its links (if any) cannot be found; 'aiplam check' reports "+
+				"those that are broken.", name)
+			continue
 		}
-		from = playbook.Entries(old.Playbooks, a.Home)
-	} else {
-		a.warnf("the enabled set '%s' does not exist: its links (if any) cannot be removed; 'aiplam check' reports "+
-			"those that are broken.", inst.Enabled)
+		s, err := a.loadSetState(name, true)
+		if err != nil {
+			return nil, err
+		}
+		sets = append(sets, s)
 	}
-	cfg, err := a.loadSet(name)
+	return sets, nil
+}
+
+// split separates sets into those named in names and the others.
+func (a *App) split(sets []*setState, names []string) (in, out []*setState) {
+	for _, s := range sets {
+		found := false
+		for _, n := range names {
+			found = found || config.SameSet(a.Home, s.name, n)
+		}
+		if found {
+			in = append(in, s)
+		} else {
+			out = append(out, s)
+		}
+	}
+	return in, out
+}
+
+func groups(sets []*setState) [][]playbook.Entry {
+	var g [][]playbook.Entry
+	for _, s := range sets {
+		g = append(g, s.entries)
+	}
+	return g
+}
+
+func (a *App) setEnable(inst *config.Install, names []string) error {
+	current, err := a.enabledSets(inst)
 	if err != nil {
 		return err
 	}
-	to := playbook.Entries(cfg.Playbooks, a.Home)
-	for _, e := range to {
-		if err := a.checkPlaybookFolders(e); err != nil {
-			return fmt.Errorf("%w; set '%s' was not enabled", err, name)
+	var added []*setState
+	for _, name := range names {
+		if inst.IsEnabled(a.Home, name) {
+			a.printf("Set '%s' is already enabled.\n", name)
+			continue
+		}
+		s, err := a.loadSetState(name, true)
+		if err != nil {
+			return err
+		}
+		added = append(added, s)
+	}
+	if len(added) == 0 {
+		return nil
+	}
+	updated := *inst
+	updated.Enabled = append(append([]string{}, inst.Enabled...), namesOf(added)...)
+	return a.changeSets(inst, &updated, nil, added, current)
+}
+
+func (a *App) setDisable(inst *config.Install, names []string) error {
+	var notEnabled []string
+	for _, name := range names {
+		if !inst.IsEnabled(a.Home, name) {
+			notEnabled = append(notEnabled, name)
 		}
 	}
-	plan, err := playbook.Switch(from, to, targets, targets, fmt.Sprintf("set '%s' disabled", inst.Enabled))
+	if len(notEnabled) > 0 {
+		return fmt.Errorf("not enabled: %s ('aiplam set list' shows the enabled sets)", strings.Join(notEnabled, ", "))
+	}
+	current, err := a.enabledSets(inst)
+	if err != nil {
+		return err
+	}
+	removed, stay := a.split(current, names)
+	updated := *inst
+	updated.Enabled = nil
+	for _, e := range inst.Enabled {
+		keep := true
+		for _, n := range names {
+			keep = keep && !config.SameSet(a.Home, e, n) && !strings.EqualFold(e, n)
+		}
+		if keep {
+			updated.Enabled = append(updated.Enabled, e)
+		}
+	}
+	return a.changeSets(inst, &updated, removed, nil, stay)
+}
+
+func (a *App) setSwitch(inst *config.Install, names []string) error {
+	current, err := a.enabledSets(inst)
+	if err != nil {
+		return err
+	}
+	stay, removed := a.split(current, names)
+	var added []*setState
+	for _, name := range names {
+		if inst.IsEnabled(a.Home, name) {
+			continue
+		}
+		s, err := a.loadSetState(name, true)
+		if err != nil {
+			return err
+		}
+		added = append(added, s)
+	}
+	updated := *inst
+	updated.Enabled = names
+	if len(added) == 0 && len(removed) == 0 && len(inst.Enabled) == len(names) {
+		a.printf("The enabled sets are unchanged.\n")
+		return nil
+	}
+	return a.changeSets(inst, &updated, removed, added, stay)
+}
+
+func namesOf(sets []*setState) []string {
+	var names []string
+	for _, s := range sets {
+		names = append(names, s.name)
+	}
+	return names
+}
+
+// changeSets unlinks the playbooks of the sets in removed, links those of the sets in added (every one of their links
+// must be new), keeps those of the sets in stay, and saves updated as the installation's configuration. It is
+// all-or-nothing.
+func (a *App) changeSets(inst, updated *config.Install, removed, added, stay []*setState) error {
+	for _, s := range added {
+		for _, e := range s.entries {
+			if err := a.checkPlaybookFolders(e); err != nil {
+				return fmt.Errorf("%w; set '%s' cannot be enabled, so nothing was changed", err, s.name)
+			}
+		}
+	}
+	targets := inst.TargetDirs(a.Home)
+	plan, err := playbook.Switch(groups(removed), groups(added), groups(stay), targets, targets, "set disabled", true)
 	if err != nil {
 		return err
 	}
 	if len(plan.Conflicts()) > 0 {
 		a.printConflicts(plan)
-		a.errorf("set '%s' was not enabled: remove or rename what is in the way, then try again.", name)
+		a.errorf("nothing was changed: sets enabled together cannot collide, so every link of a set being enabled " +
+			"must be new. Remove or rename what is in the way (or disable the set that provides it), then try again.")
 		return errSilent
 	}
 
-	a.printf("Enabling set '%s' (disabling '%s')\n", name, inst.Enabled)
+	switch {
+	case len(removed) > 0 && len(added) > 0:
+		a.printf("Disabling %s; enabling %s\n", setNames(removed), setNames(added))
+	case len(added) > 0:
+		a.printf("Enabling %s\n", setNames(added))
+	case len(removed) > 0:
+		a.printf("Disabling %s\n", setNames(removed))
+	}
 	if err := playbook.Apply(plan, a.printAction); err != nil {
-		return fmt.Errorf("%w; set '%s' was not enabled", err, name)
+		return fmt.Errorf("%w; the enabled sets were not changed", err)
 	}
-	updated := *inst
-	updated.Enabled = name
-	if err := config.SaveInstall(a.Home, &updated); err != nil {
-		return a.undo(plan, err, fmt.Sprintf("set '%s' is still enabled", inst.Enabled))
+	if err := config.SaveInstall(a.Home, updated); err != nil {
+		return a.undo(plan, err, "the enabled sets were not changed")
 	}
-	a.printf("Set '%s' is enabled, with %d playbook(s).\n", name, len(to))
+	if len(updated.Enabled) == 0 {
+		a.printf("No set is enabled now.\n")
+	} else {
+		a.printf("Enabled sets: %s.\n", strings.Join(updated.Enabled, ", "))
+	}
 	return nil
 }
