@@ -49,7 +49,7 @@ func (p parsedArgs) value(name string) string {
 // shortOptions maps the short forms of options ("-t", "-sp") to their long names. "-h" (help) is handled apart, and
 // "-s" (set) is removed by Run before commands parse their arguments.
 var shortOptions = map[string]string{
-	"t":  "target",
+	"t":  "type",
 	"sp": "skills-path",
 }
 

@@ -16,12 +16,14 @@
 //
 // =========================================================================
 
-// Package config reads, validates and writes aiplam's configuration, kept in ~/.aiplam:
+// Package config reads, validates and writes aiplam's configuration. A configuration lives in the .aiplam folder of
+// its root folder (the user's home, or any other folder, such as a project's), and its artifacts are installed in
+// folders next to it (.agents, .claude, ...):
 //
-//   - aiplam-config.yaml, the installation's configuration: the target folders where artifacts are installed, and the
-//     enabled sets.
+//   - aiplam-config.yaml, the installation's configuration: the types of agent folders where artifacts are installed,
+//     and the enabled sets.
 //   - <set>.yaml, one file per set: the playbooks registered in the set. Only the enabled sets' playbooks are
-//     installed in the targets.
+//     installed in the agent folders.
 package config
 
 import (
@@ -41,7 +43,7 @@ import (
 )
 
 const (
-	// DirName is the name of aiplam's folder in the user's home.
+	// DirName is the name of aiplam's configuration folder in a root folder.
 	DirName = ".aiplam"
 	// InstallName is the name (without extension) of the installation's configuration file. It cannot be a set name.
 	InstallName = "aiplam-config"
@@ -60,12 +62,31 @@ var (
 	ErrNoSet = errors.New("no such set")
 )
 
+// Types maps each type of agent folder to its path, relative to the root folder (in slash form).
+var Types = map[string]string{
+	"agents": ".agents",
+	"claude": ".claude",
+}
+
+// DefaultType is the type that 'aiplam init' uses when none is given.
+const DefaultType = "agents"
+
+// TypeNames returns the known types, sorted.
+func TypeNames() []string {
+	names := make([]string, 0, len(Types))
+	for name := range Types {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // Install is the content of aiplam-config.yaml.
 type Install struct {
-	// Targets are the folders where artifacts are installed (for example ~/.agents and ~/.claude); skills go to their
-	// skills/ subfolder. A leading "~" stands for the user's home.
-	Targets []string `yaml:"targets"`
-	// Enabled are the sets whose playbooks are installed in the targets (possibly none).
+	// Types are the types of the agent folders where artifacts are installed (for example agents, for the root's
+	// .agents folder); skills go to their skills/ subfolder.
+	Types []string `yaml:"types"`
+	// Enabled are the sets whose playbooks are installed in the agent folders (possibly none).
 	Enabled []string `yaml:"enabled"`
 }
 
@@ -79,8 +100,8 @@ type Set struct {
 type Playbook struct {
 	// Name is the prefix of the playbook's artifacts: they are named "<name>-...".
 	Name string `yaml:"name"`
-	// Folder is the absolute path of the playbook's folder (usually a git checkout). A leading "~" stands for the
-	// user's home.
+	// Folder is the path of the playbook's folder (usually a git checkout), relative to the root folder, in slash
+	// form, so that the configuration can be shared (for example, committed to a project's repository).
 	Folder string `yaml:"folder"`
 	// Artifacts says where each kind of artifact lives in the folder.
 	Artifacts Artifacts `yaml:"artifacts"`
@@ -98,19 +119,69 @@ type Skills struct {
 	Path string `yaml:"path"`
 }
 
-// Dir returns the path of aiplam's folder for the given home folder.
-func Dir(home string) string {
-	return filepath.Join(home, DirName)
+// Dir returns the path of the configuration folder of a root folder.
+func Dir(root string) string {
+	return filepath.Join(root, DirName)
 }
 
-// InstallFile returns the path of the installation's configuration file.
-func InstallFile(home string) string {
-	return filepath.Join(Dir(home), InstallName+FileExt)
+// InstallFile returns the path of the installation's configuration file of a root folder.
+func InstallFile(root string) string {
+	return filepath.Join(Dir(root), InstallName+FileExt)
 }
 
 // SetFile returns the path of a set's file.
-func SetFile(home, set string) string {
-	return filepath.Join(Dir(home), set+FileExt)
+func SetFile(root, set string) string {
+	return filepath.Join(Dir(root), set+FileExt)
+}
+
+// IsRoot reports whether dir holds a configuration: a .aiplam folder with an installation's configuration file.
+func IsRoot(dir string) bool {
+	return fsutil.IsFile(InstallFile(dir))
+}
+
+// FindRoot returns the root folder whose configuration commands run in start use: start or its nearest parent that
+// holds a configuration, or else home. start must be absolute.
+func FindRoot(start, home string) string {
+	for dir := filepath.Clean(start); ; {
+		if IsRoot(dir) {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return home
+		}
+		dir = parent
+	}
+}
+
+// Ancestors returns the root folders whose agent folders agents may read besides root's: the parents of root that
+// hold a configuration, nearest first, and home when it holds one and root is not inside it.
+func Ancestors(root, home string) []string {
+	var roots []string
+	for dir := filepath.Clean(root); ; {
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+		if IsRoot(dir) {
+			roots = append(roots, dir)
+		}
+	}
+	if !fsutil.Within(root, home) && IsRoot(home) {
+		roots = append(roots, home)
+	}
+	return roots
+}
+
+// RelFolder returns the path to store for a playbook folder: dir relative to root, in slash form. It fails when there
+// is no relative path (on Windows, when dir is on another drive than root).
+func RelFolder(root, dir string) (string, error) {
+	rel, err := filepath.Rel(root, dir)
+	if err != nil || filepath.IsAbs(rel) || filepath.VolumeName(rel) != "" {
+		return "", fmt.Errorf("folder '%s' must be on the same drive as the root folder '%s'", dir, root)
+	}
+	return filepath.ToSlash(rel), nil
 }
 
 var (
@@ -131,8 +202,8 @@ func ValidSetName(name string) bool {
 }
 
 // Sets returns the names of the existing sets, sorted.
-func Sets(home string) ([]string, error) {
-	items, err := os.ReadDir(Dir(home))
+func Sets(root string) ([]string, error) {
+	items, err := os.ReadDir(Dir(root))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -151,25 +222,25 @@ func Sets(home string) ([]string, error) {
 }
 
 // SetExists reports whether a set's file exists.
-func SetExists(home, set string) bool {
-	return fsutil.IsFile(SetFile(home, set))
+func SetExists(root, set string) bool {
+	return fsutil.IsFile(SetFile(root, set))
 }
 
 // SameSet reports whether two set names designate the same set: equal names, or names of the same file (on file
 // systems that ignore case, "Work" and "work" are the same set).
-func SameSet(home, a, b string) bool {
+func SameSet(root, a, b string) bool {
 	if a == b {
 		return true
 	}
-	fa, errA := os.Stat(SetFile(home, a))
-	fb, errB := os.Stat(SetFile(home, b))
+	fa, errA := os.Stat(SetFile(root, a))
+	fb, errB := os.Stat(SetFile(root, b))
 	return errA == nil && errB == nil && os.SameFile(fa, fb)
 }
 
 // LoadInstall reads and parses the installation's configuration file. It returns ErrNotInitialized when the file
 // does not exist. Use Validate for semantic checks.
-func LoadInstall(home string) (*Install, error) {
-	data, err := os.ReadFile(InstallFile(home))
+func LoadInstall(root string) (*Install, error) {
+	data, err := os.ReadFile(InstallFile(root))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, ErrNotInitialized
 	}
@@ -185,8 +256,8 @@ func LoadInstall(home string) (*Install, error) {
 
 // LoadSet reads and parses a set's file. It returns ErrNoSet when the file does not exist. An empty file is an empty
 // set. Use Validate for semantic checks.
-func LoadSet(home, set string) (*Set, error) {
-	data, err := os.ReadFile(SetFile(home, set))
+func LoadSet(root, set string) (*Set, error) {
+	data, err := os.ReadFile(SetFile(root, set))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, ErrNoSet
 	}
@@ -216,26 +287,26 @@ func parse(data []byte, v any) error {
 }
 
 // SaveInstall writes the installation's configuration file, replacing it atomically.
-func SaveInstall(home string, inst *Install) error {
+func SaveInstall(root string, inst *Install) error {
 	if inst.Enabled == nil {
 		copied := *inst
 		copied.Enabled = []string{}
 		inst = &copied
 	}
-	return save(InstallFile(home), inst,
+	return save(InstallFile(root), inst,
 		"# aiplam (AI Playbook Manager) installation configuration.\n"+
-			"# targets: folders where artifacts are installed (skills go to their skills/ subfolder); change them with\n"+
-			"#   'aiplam target'.\n"+
+			"# types: the agent folders, next to this .aiplam folder, where artifacts are installed (skills go to their\n"+
+			"#   skills/ subfolder): "+typeList()+"; change them with 'aiplam type'.\n"+
 			"# enabled: the sets whose playbooks are installed; change them with 'aiplam set enable', 'aiplam set disable'\n"+
 			"#   and 'aiplam set switch'.\n")
 }
 
 // SaveSet writes a set's file, replacing it atomically.
-func SaveSet(home, set string, s *Set) error {
+func SaveSet(root, set string, s *Set) error {
 	if s.Playbooks == nil {
 		s = &Set{Playbooks: []Playbook{}}
 	}
-	return save(SetFile(home, set), s, fmt.Sprintf(
+	return save(SetFile(root, set), s, fmt.Sprintf(
 		"# aiplam (AI Playbook Manager) set '%s'.\n"+
 			"# playbooks: registered playbooks, managed with 'aiplam add', 'aiplam update' and 'aiplam remove'.\n", set))
 }
@@ -276,38 +347,45 @@ func save(file string, v any, header string) error {
 	return nil
 }
 
-// TargetDirs returns the target folders with "~" expanded.
-func (c *Install) TargetDirs(home string) []string {
-	return TargetDirs(c.Targets, home)
+// typeList describes the known types and their folders: "agents (.agents), claude (.claude)".
+func typeList() string {
+	var items []string
+	for _, name := range TypeNames() {
+		items = append(items, fmt.Sprintf("%s (%s)", name, Types[name]))
+	}
+	return strings.Join(items, ", ")
 }
 
-// TargetDirs returns the given target folders with "~" expanded.
-func TargetDirs(targets []string, home string) []string {
-	dirs := make([]string, len(targets))
-	for i, t := range targets {
-		dirs[i] = filepath.Clean(fsutil.ExpandHome(t, home))
+// TargetDirs returns the agent folders of the configuration's types, in the root folder.
+func (c *Install) TargetDirs(root string) []string {
+	return TargetDirs(c.Types, root)
+}
+
+// TargetDirs returns the agent folders of the given (known) types, in the root folder.
+func TargetDirs(types []string, root string) []string {
+	var dirs []string
+	for _, t := range types {
+		if path, ok := Types[t]; ok {
+			dirs = append(dirs, filepath.Join(root, filepath.FromSlash(path)))
+		}
 	}
 	return dirs
 }
 
-// ValidateTargets checks a list of target folders and returns every problem found.
-func ValidateTargets(targets []string, home string) []error {
+// ValidateTypes checks a list of types and returns every problem found.
+func ValidateTypes(types []string) []error {
 	var errs []error
 	add := func(format string, args ...any) { errs = append(errs, fmt.Errorf(format, args...)) }
-	if len(targets) == 0 {
-		add("no targets: list at least one folder under 'targets' (for example ~/.agents)")
+	if len(types) == 0 {
+		add("no types: list at least one under 'types' (%s)", typeList())
 	}
-	for i, t := range targets {
-		dir := fsutil.ExpandHome(t, home)
-		switch {
-		case t == "":
-			add("targets[%d] is empty", i)
-		case !filepath.IsAbs(dir):
-			add("target '%s' is not an absolute path (a leading ~ stands for the home folder)", t)
+	for i, t := range types {
+		if _, ok := Types[t]; !ok {
+			add("unknown type '%s' (known types: %s)", t, typeList())
 		}
 		for j := 0; j < i; j++ {
-			if t != "" && fsutil.SamePath(fsutil.ExpandHome(targets[j], home), dir) {
-				add("target '%s' is listed more than once", t)
+			if t == types[j] {
+				add("type '%s' is listed more than once", t)
 			}
 		}
 	}
@@ -316,8 +394,8 @@ func ValidateTargets(targets []string, home string) []error {
 
 // Validate checks the installation's configuration and returns every problem found. It does not check that the
 // enabled sets exist.
-func (c *Install) Validate(home string) []error {
-	errs := ValidateTargets(c.Targets, home)
+func (c *Install) Validate() []error {
+	errs := ValidateTypes(c.Types)
 	for i, set := range c.Enabled {
 		if !ValidSetName(set) {
 			errs = append(errs, fmt.Errorf("enabled set '%s' is not a valid set name", set))
@@ -332,9 +410,9 @@ func (c *Install) Validate(home string) []error {
 }
 
 // IsEnabled reports whether set is one of the enabled sets.
-func (c *Install) IsEnabled(home, set string) bool {
+func (c *Install) IsEnabled(root, set string) bool {
 	for _, e := range c.Enabled {
-		if SameSet(home, e, set) {
+		if SameSet(root, e, set) {
 			return true
 		}
 	}
@@ -349,14 +427,23 @@ func (p Playbook) SkillsPath() string {
 	return p.Artifacts.Skills.Path
 }
 
-// Dir returns the playbook's folder with "~" expanded and links resolved.
-func (p Playbook) Dir(home string) string {
-	return fsutil.Canonical(fsutil.ExpandHome(p.Folder, home))
+// Dir returns the playbook's folder, resolved against the root folder, with links resolved.
+func (p Playbook) Dir(root string) string {
+	return fsutil.Canonical(filepath.Join(root, filepath.FromSlash(p.Folder)))
 }
 
 // SkillsDir returns the folder holding the playbook's skills, with links resolved.
-func (p Playbook) SkillsDir(home string) string {
-	return fsutil.Canonical(filepath.Join(p.Dir(home), filepath.FromSlash(p.SkillsPath())))
+func (p Playbook) SkillsDir(root string) string {
+	return fsutil.Canonical(filepath.Join(p.Dir(root), filepath.FromSlash(p.SkillsPath())))
+}
+
+// ValidFolder reports whether folder can be a playbook's stored folder: a relative path (from the root folder), in
+// slash or native form; it can lead outside the root folder with "..".
+func ValidFolder(folder string) bool {
+	native := filepath.FromSlash(folder)
+	return folder != "" && !filepath.IsAbs(native) && filepath.VolumeName(native) == "" &&
+		!strings.HasPrefix(folder, "/") && !strings.HasPrefix(folder, `\`) && folder != "~" &&
+		!strings.HasPrefix(folder, "~/") && !strings.HasPrefix(folder, `~\`)
 }
 
 // ValidArtifactPath reports whether path can be the location of a kind of artifact inside a playbook: a relative
@@ -366,7 +453,7 @@ func ValidArtifactPath(path string) bool {
 }
 
 // Validate checks the set's content and returns every problem found.
-func (s *Set) Validate(home string) []error {
+func (s *Set) Validate(root string) []error {
 	var errs []error
 	add := func(format string, args ...any) { errs = append(errs, fmt.Errorf(format, args...)) }
 	for i, p := range s.Playbooks {
@@ -383,8 +470,9 @@ func (s *Set) Validate(home string) []error {
 		switch {
 		case p.Folder == "":
 			add("%s has no folder", label)
-		case !filepath.IsAbs(fsutil.ExpandHome(p.Folder, home)):
-			add("%s: folder '%s' is not an absolute path (a leading ~ stands for the home folder)", label, p.Folder)
+		case !ValidFolder(p.Folder):
+			add("%s: folder '%s' must be a path relative to the root folder (the folder that holds %s)", label,
+				p.Folder, DirName)
 		}
 		if sp := p.Artifacts.Skills.Path; sp == "" {
 			add("%s has no artifacts.skills.path (use '%s' for the default, '.' for the folder itself)", label,
@@ -397,9 +485,9 @@ func (s *Set) Validate(home string) []error {
 			if p.Name == "" || p.Folder == "" || p.Name != q.Name {
 				continue
 			}
-			if fsutil.SamePath(p.Dir(home), q.Dir(home)) {
+			if fsutil.SamePath(p.Dir(root), q.Dir(root)) {
 				add("%s is registered more than once for folder '%s'", label, p.Folder)
-			} else if fsutil.SameName(filepath.Base(p.Folder), filepath.Base(q.Folder)) {
+			} else if fsutil.SameName(filepath.Base(p.Dir(root)), filepath.Base(q.Dir(root))) {
 				add("%s is registered for '%s' and '%s', whose last segments are equal, so their ids collide",
 					label, q.Folder, p.Folder)
 			}

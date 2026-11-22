@@ -20,8 +20,16 @@
 
 package fsutil
 
-import "os"
+import (
+	"os"
+	"path/filepath"
+)
 
+// createLink creates a symbolic link whose target is relative to the link's folder (with links resolved), so that the
+// link keeps working when a folder holding both the link and its target is moved.
 func createLink(link, target string) error {
+	if rel, err := filepath.Rel(Canonical(filepath.Dir(link)), Canonical(target)); err == nil {
+		target = rel
+	}
 	return os.Symlink(target, link)
 }

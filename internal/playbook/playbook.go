@@ -42,26 +42,26 @@ type Entry struct {
 	ID string
 	// Set is the set the playbook is registered in.
 	Set string
-	// Dir is the playbook's folder, with "~" expanded and links resolved.
+	// Dir is the playbook's folder, resolved against the root folder, with links resolved.
 	Dir string
 	// SkillsDir is the folder holding the playbook's skills, with links resolved.
 	SkillsDir string
 }
 
-// Entries builds the entries of the playbooks of a set, computing their ids and resolving their folders ("~" stands
-// for home).
-func Entries(set string, playbooks []config.Playbook, home string) []Entry {
+// Entries builds the entries of the playbooks of a set, computing their ids and resolving their folders against the
+// root folder.
+func Entries(set string, playbooks []config.Playbook, root string) []Entry {
 	count := map[string]int{}
 	for _, p := range playbooks {
 		count[p.Name]++
 	}
 	entries := make([]Entry, len(playbooks))
 	for i, p := range playbooks {
-		id := p.Name
+		id, dir := p.Name, p.Dir(root)
 		if count[p.Name] > 1 {
-			id = p.Name + "@" + filepath.Base(p.Folder)
+			id = p.Name + "@" + filepath.Base(dir)
 		}
-		entries[i] = Entry{Playbook: p, ID: id, Set: set, Dir: p.Dir(home), SkillsDir: p.SkillsDir(home)}
+		entries[i] = Entry{Playbook: p, ID: id, Set: set, Dir: dir, SkillsDir: p.SkillsDir(root)}
 	}
 	return entries
 }
@@ -157,6 +157,9 @@ const (
 	OtherProvider
 	// Exists: the link already exists, even if it is right; enabling a set requires every one of its links to be new.
 	Exists
+	// Ancestor: an artifact with the same name exists in an agent folder of a higher-level configuration
+	// (Action.Current), which agents may read too.
+	Ancestor
 )
 
 // Action is one planned change for one artifact in one target folder.
@@ -174,7 +177,8 @@ type Action struct {
 	Reason string
 	// Cause explains a Conflict.
 	Cause ConflictCause
-	// Current is the target of the link found in the way, for an OtherLink conflict.
+	// Current is the target of the link found in the way, for an OtherLink conflict, or the artifact found in a
+	// higher-level agent folder, for an Ancestor conflict.
 	Current string
 	// Others are the ids of the other playbooks providing the artifact, for an OtherProvider conflict.
 	Others []string
@@ -473,6 +477,26 @@ func wantedExactly(skills []Skill, source string) bool {
 	return false
 }
 
+// MarkAncestors turns into Ancestor conflicts the creations of a plan whose artifact name already exists in the skills
+// folder of an agent folder of a higher-level configuration, so that agents reading several levels never see an
+// artifact twice. ancestors maps each agent folder of the plan's targets to the higher-level agent folders of the same
+// type.
+func MarkAncestors(plan *Plan, ancestors map[string][]string) {
+	for i, act := range plan.Actions {
+		if act.Kind != Create {
+			continue
+		}
+		target := filepath.Dir(filepath.Dir(act.Link)) // the link is in the target's skills folder
+		for _, t := range ancestors[target] {
+			path := filepath.Join(SkillsFolder(t), act.Name)
+			if _, err := os.Lstat(path); err == nil {
+				plan.Actions[i].Kind, plan.Actions[i].Cause, plan.Actions[i].Current = Conflict, Ancestor, path
+				break
+			}
+		}
+	}
+}
+
 // sameFolder reports whether two paths lead to the same place once links are resolved, so that a link made through
 // a path that has since become a link (for example, a playbook moved and linked from its old location) still counts.
 func sameFolder(a, b string) bool {
@@ -528,7 +552,7 @@ func Revert(actions []Action) error {
 		case Create:
 			if state, current, ierr := fsutil.Inspect(a.Link); ierr != nil {
 				err = ierr
-			} else if state == fsutil.Link && fsutil.SamePath(current, a.Source) {
+			} else if state == fsutil.Link && sameFolder(current, a.Source) {
 				err = fsutil.RemoveLink(a.Link)
 			}
 		case Remove:

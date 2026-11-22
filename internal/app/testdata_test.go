@@ -59,7 +59,7 @@ func TestTestdataPlaybooks(t *testing.T) {
 		}
 	}
 
-	e.mustRun(ExitOK, "init", "--target", "agents,claude")
+	e.mustRun(ExitOK, "init", "-g", "--type", "agents,claude")
 
 	// Standard layout: only aiplam-lettuce-* folders with a SKILL.md are linked.
 	e.mustRun(ExitOK, "add", "aiplam-lettuce", lettuce)
@@ -118,19 +118,38 @@ func TestTestdataPlaybooks(t *testing.T) {
 	e.mustRun(ExitOK, "add", "aiplam-blueberry", blueberry, "-s", "extra")
 	e.mustRun(ExitOK, "set", "enable", "extra")
 	expect(all...)
-	e.mustRun(ExitOK, "target", "agents")
+	e.mustRun(ExitOK, "type", "agents")
 	e.assertMissing(filepath.Join(e.home, ".claude", "skills", "aiplam-lettuce-review"))
 	e.mustRun(ExitOK, "check")
+	_, errOut = e.mustRun(ExitFailure, "remove", tomato) // two playbooks are registered there
+	if !strings.Contains(errOut, "aiplam-tomato of set default, aiplam-garlic") {
+		t.Fatalf("unexpected message: %s", errOut)
+	}
+
+	// A project configuration: a skill installed in the home folder's cannot be installed in it.
+	project := filepath.Join(e.home, "projects", "demo")
+	if err := os.MkdirAll(filepath.Join(project, "module"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e.app.Cwd = project
+	e.mustRun(ExitOK, "init", ".")
+	e.mustRun(ExitFailure, "add", "aiplam-garlic", tomato, "-sp", ".")
+	e.mustRun(ExitOK, "remove", "aiplam-garlic", "--global")
+	e.mustRun(ExitOK, "add", "aiplam-garlic", tomato, "-sp", ".")
+	e.assertLink(filepath.Join(project, ".agents", "skills", "aiplam-garlic-audit"),
+		filepath.Join(tomato, "aiplam-garlic-audit"))
+	e.app.Cwd = filepath.Join(project, "module")
+	out, _ = e.mustRun(ExitOK, "list", "--levels")
+	if strings.Count(out, "Root: ") != 2 {
+		t.Fatalf("unexpected list: %s", out)
+	}
+	e.mustRun(ExitOK, "check")
+	e.app.Cwd = e.root
 
 	e.mustRun(ExitOK, "remove", "aiplam-lettuce@aiplam-lettuce-fork")
 	e.mustRun(ExitOK, "remove", "aiplam-lettuce")
 	e.mustRun(ExitOK, "remove", "aiplam-blueberry")
 	e.mustRun(ExitOK, "set", "disable", "extra")
-	_, errOut = e.mustRun(ExitFailure, "remove", tomato) // two playbooks are registered there
-	if !strings.Contains(errOut, "aiplam-tomato, aiplam-garlic") {
-		t.Fatalf("unexpected message: %s", errOut)
-	}
 	e.mustRun(ExitOK, "remove", "aiplam-tomato")
-	e.mustRun(ExitOK, "remove", "aiplam-garlic", tomato)
 	expect()
 }

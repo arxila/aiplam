@@ -34,7 +34,7 @@ and `aiplam-tomato-playbook` is a git repository on branch `main`; the others ar
 
 ```bash
 cd ~/playbooks
-aiplam init --target agents,claude
+aiplam init --global --type agents,claude
 
 # 4 skills
 aiplam add aiplam-lettuce aiplam-lettuce-playbook
@@ -71,6 +71,17 @@ aiplam add aiplam-blueberry aiplam-blueberry-playbook -s extra
 aiplam set enable extra
 aiplam list
 
-# a single target: the enabled sets' playbooks are unlinked from ~/.claude
-aiplam target agents
+# a single type: the enabled sets' playbooks are unlinked from ~/.claude
+aiplam type agents
+
+# a project configuration, used by the commands run anywhere inside ~/projects/demo
+mkdir -p ~/projects/demo/module && cd ~/projects/demo
+git init -q                                               # init then suggests what to add to .gitignore
+aiplam init .                                             # .aiplam and .agents in ~/projects/demo
+aiplam add aiplam-garlic ~/playbooks/aiplam-tomato-playbook -sp .   # fails: already installed in ~/.agents
+aiplam remove aiplam-garlic --global
+aiplam add aiplam-garlic ~/playbooks/aiplam-tomato-playbook -sp .   # linked into ~/projects/demo/.agents
+cat .aiplam/default.yaml                                  # folder: ../../playbooks/aiplam-tomato-playbook
+cd module
+aiplam list --levels                                      # the project's configuration, then ~'s
 ```

@@ -154,26 +154,29 @@ func TestCommandsNeedInit(t *testing.T) {
 
 func TestInit(t *testing.T) {
 	e := newEnv(t)
-	e.mustRun(ExitUsage, "init") // a target is required
-	e.mustRun(ExitOK, "init", "-t", "agents")
+	e.mustRun(ExitUsage, "init")                  // a folder (or --global) is required
+	e.mustRun(ExitUsage, "init", ".", "-g")       // not both
+	e.mustRun(ExitUsage, "init", "-r", e.home)    // the folder is an argument
+	e.mustRun(ExitUsage, "init", "-g", "-t", "x") // unknown type
+	e.mustRun(ExitFailure, "init", filepath.Join(e.root, "missing"))
+	e.mustRun(ExitOK, "init", "-g") // agents by default
 	if !fsutil.IsDir(filepath.Join(e.home, ".agents")) {
 		t.Fatal("~/.agents not created")
 	}
-	if inst := e.install(); len(inst.Targets) != 1 || inst.Targets[0] != "~/.agents" ||
-		strings.Join(inst.Enabled, ",") != "default" {
+	if inst := e.install(); strings.Join(inst.Types, ",") != "agents" || strings.Join(inst.Enabled, ",") != "default" {
 		t.Fatalf("install = %+v", inst)
 	}
 	if n := len(e.config().Playbooks); n != 0 {
 		t.Fatalf("%d playbooks", n)
 	}
-	_, errOut := e.mustRun(ExitFailure, "init", "--target", "claude")
-	if !strings.Contains(errOut, "already initialized") || !strings.Contains(errOut, "aiplam target") {
+	_, errOut := e.mustRun(ExitFailure, "init", "~", "--type", "claude")
+	if !strings.Contains(errOut, "already initialized") || !strings.Contains(errOut, "aiplam type") {
 		t.Fatalf("unexpected message: %s", errOut)
 	}
 
 	e2 := newEnv(t)
-	e2.mustRun(ExitOK, "init", "--target", "agents,claude", "-s", "work")
-	if inst := e2.install(); len(inst.Targets) != 2 || inst.Targets[1] != "~/.claude" ||
+	e2.mustRun(ExitOK, "init", "-g", "--type", "agents,claude", "-s", "work")
+	if inst := e2.install(); strings.Join(inst.Types, ",") != "agents,claude" ||
 		strings.Join(inst.Enabled, ",") != "work" {
 		t.Fatalf("install = %+v", inst)
 	}
@@ -183,12 +186,12 @@ func TestInit(t *testing.T) {
 	if !fsutil.IsDir(filepath.Join(e2.home, ".claude")) {
 		t.Fatal("~/.claude not created")
 	}
-	e2.mustRun(ExitUsage, "init", "-t", "agents", "-s", config.InstallName)
+	e2.mustRun(ExitUsage, "init", "-g", "-t", "agents", "-s", config.InstallName)
 }
 
 func TestAddLinksPrefixedSkillsOnly(t *testing.T) {
 	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "--target", "agents", "--target", "claude")
+	e.mustRun(ExitOK, "init", "-g", "--type", "agents", "--type", "claude")
 	pb := e.playbook("ws/arxila-ai-playbook", "arxila-one", "arxila-two", "other-skill")
 	if err := os.MkdirAll(filepath.Join(pb, "skills", "arxila-noskill"), 0o755); err != nil {
 		t.Fatal(err)
@@ -204,7 +207,7 @@ func TestAddLinksPrefixedSkillsOnly(t *testing.T) {
 		e.assertMissing(filepath.Join(dir, "arxila-noskill"))
 	}
 	cfg := e.config()
-	if len(cfg.Playbooks) != 1 || cfg.Playbooks[0].Name != "arxila" || cfg.Playbooks[0].Folder != pb ||
+	if len(cfg.Playbooks) != 1 || cfg.Playbooks[0].Name != "arxila" || cfg.Playbooks[0].Dir(e.home) != pb ||
 		cfg.Playbooks[0].Artifacts.Skills.Path != "skills" {
 		t.Fatalf("unexpected config: %+v", cfg.Playbooks)
 	}
@@ -217,7 +220,7 @@ func TestAddLinksPrefixedSkillsOnly(t *testing.T) {
 
 func TestAddSkillsPathRoot(t *testing.T) {
 	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-t", "agents")
+	e.mustRun(ExitOK, "init", "-g", "-t", "agents")
 	repo := filepath.Join(e.root, "repo")
 	e.skill(repo, "x-a")
 	e.skill(repo, "y-b")
@@ -234,7 +237,7 @@ func TestAddSkillsPathRoot(t *testing.T) {
 
 func TestAddConflictCancelsEverything(t *testing.T) {
 	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-t", "agents")
+	e.mustRun(ExitOK, "init", "-g", "-t", "agents")
 	pb := e.playbook("p", "x-a", "x-b")
 	// A real folder (an old copy) where x-b must be linked.
 	e.skill(e.agentsSkills(), "x-b")
@@ -250,7 +253,7 @@ func TestAddConflictCancelsEverything(t *testing.T) {
 
 func TestSameNameInSeveralFolders(t *testing.T) {
 	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-t", "agents")
+	e.mustRun(ExitOK, "init", "-g", "-t", "agents")
 	a := e.playbook("one/pb-a", "x-a")
 	b := e.playbook("two/pb-b", "x-b")
 	collide := e.playbook("three/pb-a", "x-c")
@@ -294,7 +297,7 @@ func TestSameNameInSeveralFolders(t *testing.T) {
 
 func TestAddFailsWhenSkillProvidedByAnotherFolder(t *testing.T) {
 	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-t", "agents")
+	e.mustRun(ExitOK, "init", "-g", "-t", "agents")
 	a := e.playbook("pb-a", "x-same")
 	b := e.playbook("pb-b", "x-same", "x-other")
 	e.mustRun(ExitOK, "add", "x", a)
@@ -310,7 +313,7 @@ func TestAddFailsWhenSkillProvidedByAnotherFolder(t *testing.T) {
 
 func TestUpdate(t *testing.T) {
 	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-t", "agents")
+	e.mustRun(ExitOK, "init", "-g", "-t", "agents")
 	pb := e.playbook("p", "x-a", "x-b")
 	e.mustRun(ExitOK, "add", "x", pb)
 	unrelated := filepath.Join(e.agentsSkills(), "personal")
@@ -357,7 +360,7 @@ func TestUpdate(t *testing.T) {
 
 func TestLongestPrefixWins(t *testing.T) {
 	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-t", "agents")
+	e.mustRun(ExitOK, "init", "-g", "-t", "agents")
 	pb := e.playbook("p", "x-a", "x-y-b")
 	skills := filepath.Join(pb, "skills")
 	e.mustRun(ExitOK, "add", "x", pb)
@@ -405,7 +408,7 @@ func TestLongestPrefixWins(t *testing.T) {
 
 func TestRemoveKeepsRealFolders(t *testing.T) {
 	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-t", "agents")
+	e.mustRun(ExitOK, "init", "-g", "-t", "agents")
 	pb := e.playbook("p", "x-a")
 	e.mustRun(ExitOK, "add", "x", pb)
 	copyDir := e.skill(e.agentsSkills(), "x-copy")
@@ -421,7 +424,7 @@ func TestRemoveKeepsRealFolders(t *testing.T) {
 
 func TestCheck(t *testing.T) {
 	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-t", "agents")
+	e.mustRun(ExitOK, "init", "-g", "-t", "agents")
 	pb := e.playbook("p", "x-a")
 	e.mustRun(ExitOK, "add", "x", pb)
 	out, _ := e.mustRun(ExitOK, "check")
@@ -453,10 +456,12 @@ func TestCheck(t *testing.T) {
 
 func TestCheckInvalidConfig(t *testing.T) {
 	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-t", "agents")
+	e.mustRun(ExitOK, "init", "-g", "-t", "agents")
 	for _, content := range []string{
 		"playbooks: []\nunknown: 1\n",
 		"targets: [~/.agents]\n",
+		"playbooks:\n  - name: x\n    folder: /absolute\n    artifacts:\n      skills:\n        path: skills\n",
+		"playbooks:\n  - name: x\n    folder: ~/p\n    artifacts:\n      skills:\n        path: skills\n",
 		"playbooks:\n  - name: 'x@y'\n    folder: relative\n    artifacts:\n      skills:\n        path: skills\n",
 		"playbooks: [\n",
 	} {
@@ -473,11 +478,14 @@ func TestCheckInvalidConfig(t *testing.T) {
 	file := config.InstallFile(e.home)
 	for _, content := range []string{
 		"enabled: [default]\n",
-		"targets: []\nenabled: [default]\n",
-		"targets: [~/.agents]\nenabled: [default]\nplaybooks: []\n",
-		"targets: [~/.agents]\nenabled: ['../x']\n",
-		"targets: [~/.agents]\nenabled: [default, Default]\n",
-		"targets: [~/.agents]\nenabled: default\n",
+		"types: []\nenabled: [default]\n",
+		"types: [agents, other]\nenabled: [default]\n",
+		"types: [agents, agents]\nenabled: [default]\n",
+		"targets: [~/.agents]\nenabled: [default]\n",
+		"types: [agents]\nenabled: [default]\nplaybooks: []\n",
+		"types: [agents]\nenabled: ['../x']\n",
+		"types: [agents]\nenabled: [default, Default]\n",
+		"types: [agents]\nenabled: default\n",
 		"",
 	} {
 		if err := os.WriteFile(file, []byte(content), 0o644); err != nil {
@@ -496,7 +504,7 @@ func TestListJSONAndVersions(t *testing.T) {
 		t.Skip("git not available")
 	}
 	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-t", "agents")
+	e.mustRun(ExitOK, "init", "-g", "-t", "agents")
 	pb := e.playbook("p", "x-a")
 	git := func(args ...string) {
 		t.Helper()
@@ -552,7 +560,7 @@ func TestUsageErrors(t *testing.T) {
 	e.mustRun(ExitUsage)
 	e.mustRun(ExitUsage, "frobnicate")
 	e.mustRun(ExitUsage, "init", "--bogus")
-	e.mustRun(ExitOK, "init", "-t", "agents")
+	e.mustRun(ExitOK, "init", "-g", "-t", "agents")
 	e.mustRun(ExitUsage, "add", "x")
 	e.mustRun(ExitUsage, "add", "x@y", ".")
 	e.mustRun(ExitUsage, "update", "--all", "x")
@@ -569,7 +577,7 @@ func TestUsageErrors(t *testing.T) {
 
 func TestSets(t *testing.T) {
 	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-t", "agents")
+	e.mustRun(ExitOK, "init", "-g", "-t", "agents")
 	pbA := e.playbook("pa", "x-a")
 	pbB := e.playbook("pb", "y-b")
 	pbC := e.playbook("pc", "z-c")
@@ -681,7 +689,7 @@ func TestSets(t *testing.T) {
 
 func TestSetEnableCollisions(t *testing.T) {
 	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-t", "agents")
+	e.mustRun(ExitOK, "init", "-g", "-t", "agents")
 	pb := e.playbook("p", "x-a", "x-b")
 	other := e.playbook("q", "y-a")
 	e.mustRun(ExitOK, "add", "x", pb)
@@ -725,7 +733,7 @@ func TestSetEnableCollisions(t *testing.T) {
 
 func TestSetSwitch(t *testing.T) {
 	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-t", "agents")
+	e.mustRun(ExitOK, "init", "-g", "-t", "agents")
 	pb := e.playbook("p", "x-a", "x-b")
 	other := e.playbook("q", "y-a")
 	e.mustRun(ExitOK, "add", "x", pb)
@@ -756,54 +764,53 @@ func TestSetSwitch(t *testing.T) {
 	e.mustRun(ExitFailure, "set", "switch", "nope")
 }
 
-func TestTarget(t *testing.T) {
+func TestType(t *testing.T) {
 	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-t", "agents")
+	e.mustRun(ExitOK, "init", "-g", "-t", "agents")
 	pb := e.playbook("p", "x-a")
 	e.mustRun(ExitOK, "add", "x", pb)
-	out, _ := e.mustRun(ExitOK, "target")
-	if strings.TrimSpace(out) != "~"+string(filepath.Separator)+".agents" {
-		t.Fatalf("unexpected targets: %q", out)
+	out, _ := e.mustRun(ExitOK, "type")
+	if !strings.Contains(out, "agents   ~"+string(filepath.Separator)+".agents") {
+		t.Fatalf("unexpected types: %q", out)
 	}
 
-	// Add a target: the enabled set is linked into it.
+	// Add a type: the enabled set is linked into its folder.
 	claude := filepath.Join(e.home, ".claude", "skills")
-	e.mustRun(ExitOK, "target", "agents", "claude")
+	e.mustRun(ExitOK, "type", "agents", "claude")
 	e.assertLink(filepath.Join(claude, "x-a"), filepath.Join(pb, "skills", "x-a"))
 	e.assertLink(filepath.Join(e.agentsSkills(), "x-a"), filepath.Join(pb, "skills", "x-a"))
-	out, _ = e.mustRun(ExitOK, "target", "claude,agents")
+	out, _ = e.mustRun(ExitOK, "type", "claude,agents")
 	if !strings.Contains(out, "unchanged") {
 		t.Fatalf("unexpected output: %s", out)
 	}
 
-	// Replace the targets: the old one is unlinked.
-	other := filepath.Join(e.root, "other")
-	e.mustRun(ExitOK, "target", "claude", other)
+	// Replace the types: the old folder is unlinked.
+	e.mustRun(ExitOK, "type", "claude")
 	e.assertMissing(filepath.Join(e.agentsSkills(), "x-a"))
 	e.assertLink(filepath.Join(claude, "x-a"), filepath.Join(pb, "skills", "x-a"))
-	e.assertLink(filepath.Join(other, "skills", "x-a"), filepath.Join(pb, "skills", "x-a"))
-	if got := e.install().Targets; len(got) != 2 || got[0] != "~/.claude" || got[1] != other {
-		t.Fatalf("targets = %v", got)
+	if got := e.install().Types; strings.Join(got, ",") != "claude" {
+		t.Fatalf("types = %v", got)
 	}
 
-	// A conflict in a new target cancels everything.
+	// A conflict in a new folder cancels everything.
 	if err := os.MkdirAll(filepath.Join(e.agentsSkills(), "x-a"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	_, errOut := e.mustRun(ExitFailure, "target", "agents")
+	_, errOut := e.mustRun(ExitFailure, "type", "agents")
 	if !strings.Contains(errOut, "not changed") {
 		t.Fatalf("unexpected message: %s", errOut)
 	}
 	e.assertLink(filepath.Join(claude, "x-a"), filepath.Join(pb, "skills", "x-a"))
-	e.mustRun(ExitUsage, "target", "agents", "-s", "default")
-	e.mustRun(ExitFailure, "target", "relative/../../x/..", "agents,agents") // listed twice
+	e.mustRun(ExitUsage, "type", "agents", "-s", "default")
+	e.mustRun(ExitUsage, "type", "other")
+	e.mustRun(ExitFailure, "type", "agents,agents") // listed twice
 }
 
 func TestShortOptions(t *testing.T) {
 	e := newEnv(t)
 	claude := filepath.Join(e.home, ".claude")
-	e.mustRun(ExitOK, "init", "-t", "agents", "-t=claude", "-s", "main")
-	if inst := e.install(); len(inst.Targets) != 2 || inst.Targets[1] != "~/.claude" ||
+	e.mustRun(ExitOK, "init", "-g", "-t", "agents", "-t=claude", "-s", "main")
+	if inst := e.install(); strings.Join(inst.Types, ",") != "agents,claude" ||
 		strings.Join(inst.Enabled, ",") != "main" {
 		t.Fatalf("install = %+v", inst)
 	}
@@ -843,7 +850,7 @@ func TestVersion(t *testing.T) {
 
 func TestPlaybookBehindSymlink(t *testing.T) {
 	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-t", "agents")
+	e.mustRun(ExitOK, "init", "-g", "-t", "agents")
 	pb := e.playbook("p", "x-a")
 	e.mustRun(ExitOK, "add", "x", pb)
 
@@ -866,23 +873,32 @@ func TestPlaybookBehindSymlink(t *testing.T) {
 	e.assertMissing(filepath.Join(e.agentsSkills(), "x-a"))
 }
 
-func TestFolderWithTilde(t *testing.T) {
+func TestFoldersAreRelativeToRoot(t *testing.T) {
 	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-t", "agents")
-	pb := filepath.Join(e.home, "playbooks", "p")
-	e.skill(filepath.Join(pb, "skills"), "x-a")
-	e.writeSet("default", "playbooks:\n  - name: x\n    folder: ~/playbooks/p\n    artifacts:\n"+
-		"      skills:\n        path: skills\n")
-	e.mustRun(ExitOK, "update", "x")
-	e.assertLink(filepath.Join(e.agentsSkills(), "x-a"), filepath.Join(pb, "skills", "x-a"))
+	e.mustRun(ExitOK, "init", "-g", "-t", "agents")
+	inside := filepath.Join(e.home, "playbooks", "p")
+	e.skill(filepath.Join(inside, "skills"), "x-a")
+	outside := e.playbook("q", "y-a")
+	e.mustRun(ExitOK, "add", "x", inside)
+	e.mustRun(ExitOK, "add", "y", outside)
+	cfg := e.config()
+	if cfg.Playbooks[0].Folder != "playbooks/p" || cfg.Playbooks[1].Folder != "../q" {
+		t.Fatalf("folders = %q, %q", cfg.Playbooks[0].Folder, cfg.Playbooks[1].Folder)
+	}
+	// Links are relative too (junctions on Windows are always absolute).
+	link := filepath.Join(e.agentsSkills(), "x-a")
+	if target, err := os.Readlink(link); runtime.GOOS != "windows" && (err != nil || filepath.IsAbs(target)) {
+		t.Fatalf("link target = %q (%v), want a relative path", target, err)
+	}
+	e.assertLink(link, filepath.Join(inside, "skills", "x-a"))
 	e.mustRun(ExitOK, "check")
-	e.mustRun(ExitOK, "remove", pb)
-	e.assertMissing(filepath.Join(e.agentsSkills(), "x-a"))
+	e.mustRun(ExitOK, "remove", inside)
+	e.assertMissing(link)
 }
 
 func TestArtifactsStayInsidePlaybook(t *testing.T) {
 	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-t", "agents")
+	e.mustRun(ExitOK, "init", "-g", "-t", "agents")
 	pb := e.playbook("p", "x-a")
 	other := e.playbook("other", "x-b")
 	for _, sp := range []string{"..", "../other/skills", "skills/../..", filepath.Join(e.root, "other")} {
@@ -915,7 +931,7 @@ func TestArtifactsStayInsidePlaybook(t *testing.T) {
 
 func TestSetNameCase(t *testing.T) {
 	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-t", "agents", "-s", "work")
+	e.mustRun(ExitOK, "init", "-g", "-t", "agents", "-s", "work")
 	if !config.SetExists(e.home, "Work") {
 		t.Skip("the file system distinguishes case: Work and work are different sets")
 	}
@@ -934,7 +950,7 @@ func TestFailedAddIsUndone(t *testing.T) {
 		t.Skip("needs a folder the current user cannot write to")
 	}
 	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-t", "agents,claude")
+	e.mustRun(ExitOK, "init", "-g", "-t", "agents,claude")
 	pb := e.playbook("p", "x-a")
 	locked := filepath.Join(e.home, ".claude", "skills")
 	if err := os.MkdirAll(locked, 0o755); err != nil {
@@ -957,7 +973,7 @@ func TestFailedAddIsUndone(t *testing.T) {
 
 func TestMessagesUseSetAndHome(t *testing.T) {
 	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-t", "agents")
+	e.mustRun(ExitOK, "init", "-g", "-t", "agents")
 	pb := e.playbook("p", "x-a")
 	if err := os.MkdirAll(filepath.Join(e.agentsSkills(), "x-a"), 0o755); err != nil {
 		t.Fatal(err)
@@ -977,4 +993,104 @@ func TestMessagesUseSetAndHome(t *testing.T) {
 	if strings.Contains(errOut, "--set") {
 		t.Fatalf("hint should not name the enabled set: %s", errOut)
 	}
+}
+
+func TestRoots(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init", "-g", "-t", "agents,claude")
+	project := filepath.Join(e.root, "project")
+	module := filepath.Join(project, "module")
+	if err := os.MkdirAll(module, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pb := e.playbook("p", "x-a", "y-a")
+	other := e.playbook("o", "z-a")
+
+	// Outside any configuration, commands use the home folder's.
+	e.app.Cwd = module
+	out, _ := e.mustRun(ExitOK, "list")
+	if !strings.Contains(out, "Root: ~\n") {
+		t.Fatalf("unexpected list: %s", out)
+	}
+
+	// A project configuration, found from its subfolders.
+	out, _ = e.mustRun(ExitOK, "init", project)
+	if strings.Contains(out, "git repository") || !strings.Contains(out, "higher-level configurations exist (~)") {
+		t.Fatalf("unexpected notes: %s", out) // not inside a repository; outside home, so home is a higher level
+	}
+	if !fsutil.IsDir(filepath.Join(project, ".agents")) || fsutil.IsDir(filepath.Join(project, ".claude")) {
+		t.Fatal("init should create the .agents folder only")
+	}
+	out, _ = e.mustRun(ExitOK, "add", "x", pb)
+	if !strings.HasPrefix(out, "Root: "+project+"\n") {
+		t.Fatalf("unexpected output: %s", out)
+	}
+	projectSkills := filepath.Join(project, ".agents", "skills")
+	e.assertLink(filepath.Join(projectSkills, "x-a"), filepath.Join(pb, "skills", "x-a"))
+	e.assertMissing(filepath.Join(e.agentsSkills(), "x-a"))
+	if f, err := config.LoadSet(project, "default"); err != nil || f.Playbooks[0].Folder != "../p" {
+		t.Fatalf("set = %+v (%v)", f, err)
+	}
+
+	// --global and --root choose the configuration explicitly.
+	e.mustRun(ExitOK, "add", "z", other, "-g")
+	e.assertLink(filepath.Join(e.agentsSkills(), "z-a"), filepath.Join(other, "skills", "z-a"))
+	e.app.Cwd = e.root
+	e.mustRun(ExitOK, "add", "y", pb, "--root", project)
+	e.assertLink(filepath.Join(projectSkills, "y-a"), filepath.Join(pb, "skills", "y-a"))
+	e.mustRun(ExitUsage, "list", "-r", project, "-g")
+	_, errOut := e.mustRun(ExitFailure, "list", "-r", module)
+	if !strings.Contains(errOut, "aiplam init") {
+		t.Fatalf("unexpected message: %s", errOut)
+	}
+
+	// The home folder is a higher level for a project outside it: a skill installed in either cannot be installed in
+	// the other.
+	e.app.Cwd = module
+	_, errOut = e.mustRun(ExitFailure, "add", "z", other)
+	if !strings.Contains(errOut, "higher-level configuration") {
+		t.Fatalf("unexpected message: %s", errOut)
+	}
+	e.assertMissing(filepath.Join(projectSkills, "z-a"))
+	e.mustRun(ExitOK, "add", "x", pb, "-g") // only checked upwards: the project's links are not seen from home
+	_, errOut = e.mustRun(ExitFailure, "check")
+	if !strings.Contains(errOut, "agents reading both would see it twice") {
+		t.Fatalf("check should report the duplicate: %s", errOut)
+	}
+	e.mustRun(ExitOK, "remove", "x", "-g")
+	e.mustRun(ExitOK, "check")
+
+	// list --levels shows every level, nearest first.
+	out, _ = e.mustRun(ExitOK, "list", "--levels", "--json")
+	var levels []listOutput
+	if err := json.Unmarshal([]byte(out), &levels); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, out)
+	}
+	if len(levels) != 2 || levels[0].Root != project || levels[1].Root != e.home ||
+		strings.Join(levels[1].Types, ",") != "agents,claude" {
+		t.Fatalf("unexpected levels: %+v", levels)
+	}
+	out, _ = e.mustRun(ExitOK, "list", "--levels")
+	if strings.Count(out, "Root: ") != 2 {
+		t.Fatalf("unexpected list: %s", out)
+	}
+	e.mustRun(ExitUsage, "list", "--levels", "-s", "default")
+
+	// A nested configuration inside a git repository.
+	if err := os.Mkdir(filepath.Join(project, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, _ = e.mustRun(ExitOK, "init", ".", "-t", "claude")
+	if !strings.Contains(out, "git repository") || !strings.Contains(out, "higher-level configurations exist") ||
+		!strings.Contains(out, "/.claude/skills/<name>-*") {
+		t.Fatalf("unexpected notes: %s", out)
+	}
+	// Only agent folders of the same type collide: z is in ~/.claude, x only in the project's .agents.
+	_, errOut = e.mustRun(ExitFailure, "add", "z", other)
+	if !strings.Contains(errOut, "same type of a higher-level configuration") {
+		t.Fatalf("unexpected message: %s", errOut)
+	}
+	e.mustRun(ExitOK, "add", "x", pb)
+	e.assertLink(filepath.Join(module, ".claude", "skills", "x-a"), filepath.Join(pb, "skills", "x-a"))
+	e.mustRun(ExitOK, "check")
 }

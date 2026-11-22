@@ -3,8 +3,9 @@
 An **AI playbook** is a git repository of agent artifacts (skills, and later other kinds) shared by a team or by a
 family of related projects. Each developer keeps a local clone of each playbook, checked out at the tag (or commit)
 they want to use. `aiplam` registers those clones and installs their artifacts into the folders that coding agents
-read (`~/.agents`, `~/.claude`), as links into the clones, so that switching a clone to another tag and running
-`aiplam update` is all an update takes.
+read (`.agents`, `.claude`), as links into the clones, so that switching a clone to another tag and running
+`aiplam update` is all an update takes. It can do so in the home folder (`~/.agents`) and in any other folder where
+agent sessions are started, such as the root of a large project with many modules.
 
 `aiplam` never clones, fetches, pulls or switches a playbook checkout: selecting versions is the developer's job.
 
@@ -40,21 +41,23 @@ the prefix of its artifacts:
 ## Usage
 
 ```bash
-aiplam init -t|--target agents|claude|DIR... [-s SET]  # set up: targets, and a first set, enabled
-aiplam add <name> <folder> [-sp|--skills-path P]       # register a playbook and link its skills
-aiplam update [<name|id|folder>] [<folder>]            # link new skills, remove links to deleted ones
+aiplam init <folder>|-g [-t|--type agents,claude] [-s SET]  # set up a root folder, and a first set, enabled
+aiplam add <name> <folder> [-sp|--skills-path P]            # register a playbook and link its skills
+aiplam update [<name|id|folder>] [<folder>]                 # link new skills, remove links to deleted ones
 aiplam update --all
-aiplam remove <name|id|folder> [<folder>]              # remove a playbook's links and unregister it
-aiplam list [--json]                                   # playbooks, versions and skills
-aiplam check                                           # what update would change; config and broken links
-aiplam set list|add|remove [<set>]                     # manage sets of playbooks
-aiplam set enable|disable|switch <set>[,<set>...]      # choose the sets installed in the targets
-aiplam target [agents|claude|DIR...]                   # show or change the target folders
+aiplam remove <name|id|folder> [<folder>]                   # remove a playbook's links and unregister it
+aiplam list [--levels] [--json]                             # playbooks, versions and skills
+aiplam check                                                # what update would change; config and broken links
+aiplam set list|add|remove [<set>]                          # manage sets of playbooks
+aiplam set enable|disable|switch <set>[,<set>...]           # choose the sets installed
+aiplam type [agents|claude...]                              # show or change the types of agent folders
 ```
 
-Playbooks are registered in [sets](#sets), and only the enabled sets are installed. `update`, `remove`, `list` and
-`check` act on the enabled sets, or on the one given with `--set SET` (or `-s SET`). `add` needs `--set` unless
-exactly one set is enabled.
+Every command acts on a [root folder](#root-folders)'s configuration: the nearest one from the current folder up, or
+the home folder's, unless given with `--root DIR` (`-r DIR`) or `--global` (`-g`, the home folder). Playbooks are
+registered in [sets](#sets), and only the enabled sets are installed. `update`, `remove`, `list` and `check` act on
+the enabled sets, or on the one given with `--set SET` (`-s SET`). `add` needs `--set` unless exactly one set is
+enabled.
 
 Without a selector, `update` acts on the playbook registered for the current folder. A selector is an id, a name
 (when only one playbook has it), a folder (when only one playbook is registered there), or a name and a folder.
@@ -62,17 +65,43 @@ Without a selector, `update` acts on the playbook registered for the current fol
 Example:
 
 ```bash
-aiplam init --target agents,claude
+aiplam init --global --type agents,claude
 cd ~/Workspace/arxila/arxila-ai-playbook
 git switch --detach v1.2.0
 aiplam add arxila .
 aiplam list
 ```
 
+### Root folders
+
+A **root folder** holds a configuration, in its `.aiplam` folder, and the **agent folders** where that configuration
+installs artifacts, next to it: `.agents` for type `agents` and `.claude` for type `claude` (skills go to their
+`skills/` subfolder). `aiplam init ~/Workspace/thymeleaf` (or `aiplam init .` from there) sets one up with `.agents`;
+`aiplam init --global` sets up the home folder. `--type agents,claude` chooses the agent folders, and `aiplam type`
+changes them later: the enabled sets' playbooks are unlinked from the folders of the types removed and linked into
+those of the types added, all-or-nothing.
+
+Commands use the nearest root folder from the current folder up (a folder whose `.aiplam` holds
+`aiplam-config.yaml`), or else the home folder, and show which one they use (`Root: ...`).
+
+Agents read the agent folders of the folder where a session starts and of the home folder, and some read those of
+every folder in between. So a skill cannot be installed in an agent folder of a configuration if it already exists in
+the agent folder of the same type (`.agents`, `.claude`) of a **higher-level** one: those of the parents of its root
+folder, and that of the home folder when the root folder is not inside it. Agent folders of different types do not
+collide: a skill can be in `~/.claude` and in a project's `.agents`. Only higher levels are checked when installing
+(a command at `~` cannot know about the projects below it); `aiplam check` in a project reports a skill installed
+both there and at a higher level, and `aiplam list --levels` shows every level, nearest first.
+
+Playbook folders are stored relative to the root folder, so a project's `.aiplam` folder can be committed and
+shared. On Windows, a playbook must be on the same drive as the root folder. The links themselves are specific to
+each machine (on Windows they are junctions, which git cannot store as links): when the root folder is inside a git
+repository, `init` suggests adding them to `.gitignore`.
+
 ### Sets
 
 A **set** is a group of registered playbooks. The **enabled** sets (any number of them) are the ones whose playbooks
-are linked into the targets. `init` creates a first set, `default` (or the one given with `--set`), and enables it.
+are linked into the agent folders. `init` creates a first set, `default` (or the one given with `--set`), and
+enables it.
 
 ```bash
 aiplam set add acme                                       # create an empty set
@@ -85,7 +114,7 @@ aiplam set remove old                                     # delete a set that is
 ```
 
 Sets enabled together cannot collide: `set enable` fails, changing nothing, if any link that a set needs already
-exists in a target, whether another enabled set made it or anything else did. `set switch` disables the sets that
+exists in an agent folder, whether another enabled set made it or anything else did. `set switch` disables the sets that
 are not listed first, so their links are not in the way, and leaves alone the links that stay the same. Within the
 enabled sets, `add` and `update` also refuse a skill that another enabled set provides.
 
@@ -93,18 +122,11 @@ In a set that is not enabled, `add` and `remove` only register and unregister pl
 do. Enabled sets cannot be removed (disable them first), but any other can, including `default`. Several sets can be
 given at once, separated by commas. Set names use letters, digits, `_` and `-`; `aiplam-config` is reserved.
 
-### Targets
-
-The **targets** are the folders where the enabled sets' artifacts are installed: skills are linked into each
-target's `skills/` subfolder. `init` needs at least one (`agents` for `~/.agents`, `claude` for `~/.claude`, or any
-folder). `aiplam target` shows them, and `aiplam target agents claude` replaces them: the enabled sets' playbooks
-are unlinked from the folders that are no longer targets and linked into the new ones, all-or-nothing.
-
 ### Safety
 
-- `aiplam` only creates and removes **links**: symbolic links on Linux and macOS, directory junctions on Windows
-  (which need no administrator rights or developer mode). It never deletes a real file or folder, and never touches
-  a playbook's content.
+- `aiplam` only creates and removes **links**: relative symbolic links on Linux and macOS, directory junctions on
+  Windows (which need no administrator rights or developer mode). It never deletes a real file or folder, and never
+  touches a playbook's content.
 - Commands that change links are all-or-nothing: if something other than the right link is already where a link
   must go (an old copy of a skill, a link elsewhere, a skill another playbook provides), nothing is changed and the
   problem is reported. If creating or removing a link fails midway, the changes already made are undone.
@@ -113,15 +135,16 @@ are unlinked from the folders that are no longer targets and linked into the new
 
 ### Configuration
 
-The configuration lives in `~/.aiplam`, in YAML files that aiplam writes and `aiplam check` validates:
+A configuration lives in the `.aiplam` folder of its root folder, in YAML files that aiplam writes and `aiplam check`
+validates:
 
-- `aiplam-config.yaml`, the installation: the targets and the enabled sets. Written by `init`, `target` and
-  `set enable`, `disable` and `switch`.
+- `aiplam-config.yaml`, the installation: the types of agent folders and the enabled sets. Written by `init`, `type`
+  and `set enable`, `disable` and `switch`.
 
   ```yaml
-  targets:
-    - ~/.agents
-    - ~/.claude
+  types:
+    - agents
+    - claude
   enabled:
     - default
   ```
@@ -131,14 +154,14 @@ The configuration lives in `~/.aiplam`, in YAML files that aiplam writes and `ai
   ```yaml
   playbooks:
     - name: arxila
-      folder: /Users/me/Workspace/arxila/arxila-ai-playbook
+      folder: Workspace/arxila/arxila-ai-playbook
       artifacts:
         skills:
           path: skills
   ```
 
-A leading `~` stands for the home folder in targets and playbook folders. Prefer the commands to editing the files by
-hand: a hand edit does not move any link.
+Playbook folders are relative to the root folder (`../playbooks/x` is fine). Prefer the commands to editing the files
+by hand: a hand edit does not move any link.
 
 ## Exit codes
 

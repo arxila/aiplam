@@ -32,11 +32,12 @@ import (
 
 const checkUsage = `Usage: aiplam check [-s|--set SET]
 
-Changes nothing. Checks the format and content of the installation's configuration (~/.aiplam/aiplam-config.yaml)
-and of the enabled sets' files (~/.aiplam/<set>.yaml), the target and playbook folders and, for each playbook of the
-enabled sets, whether 'aiplam update' would change anything (links to create or remove) or would be cancelled by a
-conflict. Also reports broken links in the targets' skills folders. With --set, it checks that set only (and, if it
-is not enabled, only that it could be). Exits with 1 when anything needs attention.
+Changes nothing. Checks the format and content of the installation's configuration (.aiplam/aiplam-config.yaml in
+the root folder) and of the enabled sets' files (.aiplam/<set>.yaml), the agent and playbook folders and, for each
+playbook of the enabled sets, whether 'aiplam update' would change anything (links to create or remove) or would be
+cancelled by a conflict. Also reports broken links in the agent folders' skills folders, and links whose skill is
+also in the agent folder of the same type of a higher-level configuration. With --set, it checks that set only
+(and, if it is not enabled, only that it could be). Exits with 1 when anything needs attention.
 
   -s, --set SET   the set to check (default: the enabled sets)
 `
@@ -55,14 +56,15 @@ func (a *App) cmdCheck(args []string) error {
 		a.warnf(format, args...)
 	}
 
-	instFile := a.pretty(config.InstallFile(a.Home))
-	inst, err := config.LoadInstall(a.Home)
+	instFile := a.pretty(config.InstallFile(a.Root))
+	inst, err := config.LoadInstall(a.Root)
 	if errors.Is(err, config.ErrNotInitialized) {
-		return errors.New("aiplam is not initialized: run 'aiplam init --target <folder>' first")
+		return a.notInitialized()
 	}
+	a.showRoot()
 	a.printf("Installation: %s\n", instFile)
 	if err == nil {
-		for _, e := range inst.Validate(a.Home) {
+		for _, e := range inst.Validate() {
 			problem("%s: %s", instFile, e)
 		}
 	} else {
@@ -75,20 +77,20 @@ func (a *App) cmdCheck(args []string) error {
 	a.printf("  format and content are valid\n")
 
 	// The enabled sets, and the one given with --set.
-	if a.Set != "" && !config.SetExists(a.Home, a.Set) {
+	if a.Set != "" && !config.SetExists(a.Root, a.Set) {
 		return fmt.Errorf("set '%s' does not exist ('aiplam set list' lists the sets)", a.Set)
 	}
-	st := &state{inst: inst, targets: inst.TargetDirs(a.Home)}
+	st := &state{inst: inst, targets: inst.TargetDirs(a.Root)}
 	loadSet := func(name string, enabled bool) *setState {
 		file := a.setFile(name)
-		if !config.SetExists(a.Home, name) {
+		if !config.SetExists(a.Root, name) {
 			problem("the enabled set '%s' does not exist (%s is missing): disable it with 'aiplam set disable %s', "+
 				"or create it again with 'aiplam set add %s'", name, file, name, name)
 			return nil
 		}
-		cfg, err := config.LoadSet(a.Home, name)
+		cfg, err := config.LoadSet(a.Root, name)
 		if err == nil {
-			for _, e := range cfg.Validate(a.Home) {
+			for _, e := range cfg.Validate(a.Root) {
 				problem("%s: %s", file, e)
 				err = errSilent
 			}
@@ -98,17 +100,17 @@ func (a *App) cmdCheck(args []string) error {
 		if err != nil {
 			return nil
 		}
-		return &setState{name: name, cfg: cfg, enabled: enabled, entries: playbook.Entries(name, cfg.Playbooks, a.Home)}
+		return &setState{name: name, cfg: cfg, enabled: enabled, entries: playbook.Entries(name, cfg.Playbooks, a.Root)}
 	}
 	for _, name := range inst.Enabled {
 		if s := loadSet(name, true); s != nil {
 			st.enabled = append(st.enabled, s)
-			if a.Set == "" || config.SameSet(a.Home, name, a.Set) {
+			if a.Set == "" || config.SameSet(a.Root, name, a.Set) {
 				st.sets = append(st.sets, s)
 			}
 		}
 	}
-	if a.Set != "" && len(st.sets) == 0 && !inst.IsEnabled(a.Home, a.Set) {
+	if a.Set != "" && len(st.sets) == 0 && !inst.IsEnabled(a.Root, a.Set) {
 		if s := loadSet(a.Set, false); s != nil {
 			st.sets = append(st.sets, s)
 		}
@@ -119,10 +121,10 @@ func (a *App) cmdCheck(args []string) error {
 	}
 
 	targets := st.targets
-	a.printf("Targets:\n")
+	a.printf("Agent folders:\n")
 	for _, t := range targets {
 		if !fsutil.IsDir(t) {
-			problem("target folder '%s' does not exist; it is created when a skill is next linked into it",
+			problem("agent folder '%s' does not exist; it is created when a skill is next linked into it",
 				a.pretty(t))
 			continue
 		}
@@ -149,7 +151,8 @@ func (a *App) cmdCheck(args []string) error {
 	}
 	a.hintSet = ""
 
-	// Broken links that no playbook plan covers (for example, links to an unregistered or moved playbook).
+	// Broken links that no playbook plan covers (for example, links to an unregistered or moved playbook), and links
+	// whose skill is also in the agent folder of the same type of a higher-level configuration.
 	for _, t := range targets {
 		dir := playbook.SkillsFolder(t)
 		items, err := os.ReadDir(dir)
@@ -158,13 +161,21 @@ func (a *App) cmdCheck(args []string) error {
 		}
 		for _, item := range items {
 			link := filepath.Join(dir, item.Name())
-			if reported[link] {
+			state, current, err := fsutil.Inspect(link)
+			if err != nil || state != fsutil.Link {
 				continue
 			}
-			state, current, err := fsutil.Inspect(link)
-			if err == nil && state == fsutil.Link && !fsutil.IsDir(current) {
+			if !reported[link] && !fsutil.IsDir(current) {
 				problem("broken link %s -> %s (not managed by any registered playbook; remove it by hand)",
 					a.pretty(link), a.pretty(current))
+			}
+			for _, higher := range a.ancestorTargets()[t] {
+				other := filepath.Join(playbook.SkillsFolder(higher), item.Name())
+				if _, err := os.Lstat(other); err == nil {
+					problem("%s is also in '%s', the agent folder of the same type of a higher-level configuration: agents reading "+
+						"both would see it twice; remove one of them", a.pretty(link), a.pretty(other))
+					break
+				}
 			}
 		}
 	}
@@ -206,6 +217,7 @@ func (a *App) checkPlaybook(st *state, set *setState, e playbook.Entry, reported
 		problem("playbook %s: %s", e.ID, err)
 		return
 	}
+	playbook.MarkAncestors(&plan, a.ancestorTargets())
 	var changes []playbook.Action
 	for _, act := range plan.Changes() {
 		// A link can match several playbooks of the same folder (prefixes x and x-y): report it once.

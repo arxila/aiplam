@@ -38,7 +38,8 @@ const (
 )
 
 // Inspect returns what exists at path and, for a link, its target as an absolute path (relative link targets are
-// resolved against the link's folder). The target may not exist (a broken link).
+// resolved against the link's folder, with links resolved, as the system does). The target may not exist (a broken
+// link).
 func Inspect(path string) (LinkState, string, error) {
 	fi, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -59,7 +60,7 @@ func Inspect(path string) (LinkState, string, error) {
 		return Link, "", err
 	}
 	if !filepath.IsAbs(target) {
-		target = filepath.Join(filepath.Dir(path), target)
+		target = filepath.Join(Canonical(filepath.Dir(path)), target)
 	}
 	return Link, filepath.Clean(target), nil
 }
@@ -73,8 +74,9 @@ func isLinkMode(mode os.FileMode) bool {
 	return runtime.GOOS == "windows" && mode&os.ModeIrregular != 0
 }
 
-// CreateLink creates a link at link pointing to the folder target: a symbolic link on Linux and macOS, a directory
-// junction on Windows (which needs no administrator rights or developer mode).
+// CreateLink creates a link at link pointing to the folder target: a symbolic link with a relative target on Linux and
+// macOS, a directory junction on Windows (which needs no administrator rights or developer mode, and always holds an
+// absolute target).
 func CreateLink(link, target string) error {
 	return createLink(link, target)
 }
