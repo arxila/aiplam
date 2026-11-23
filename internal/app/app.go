@@ -29,6 +29,7 @@ import (
 	"runtime/debug"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"syscall"
 
 	"arxila.io/aiplam/internal/config"
@@ -385,10 +386,11 @@ const (
 	ignoreName = ".gitignore"
 )
 
-// lock makes sure that no other aiplam command changes the base folder while this one runs, and defers interruptions
-// (Ctrl+C) until it ends, so that the links and the configuration stay consistent: changes take milliseconds. It does
-// nothing for a base folder without a .aiplam folder (the command then fails, as it is not set up). The returned
-// function releases the lock and reports an interruption received meanwhile.
+// lock makes sure that no other aiplam command changes the base folder while this one runs, and defers the first
+// interruption (Ctrl+C) until it ends, so that the links and the configuration stay consistent: changes take
+// milliseconds. A second interruption stops aiplam at once. It does nothing for a base folder without a .aiplam folder
+// (the command then fails, as it is not set up). The returned function releases the lock and reports an interruption
+// received meanwhile.
 func (a *App) lock() (func(), error) {
 	dir := config.Dir(a.Base)
 	if !fsutil.IsDir(dir) {
@@ -408,13 +410,22 @@ func (a *App) lock() (func(), error) {
 	}
 	interrupted := make(chan os.Signal, 1)
 	signal.Notify(interrupted, os.Interrupt, syscall.SIGTERM)
-	return func() {
-		signal.Stop(interrupted)
-		unlock()
+	done := make(chan struct{})
+	var got atomic.Bool
+	go func() {
 		select {
 		case <-interrupted:
+			got.Store(true)
+			signal.Stop(interrupted) // a second interruption is handled as usual: it stops aiplam
+		case <-done:
+		}
+	}()
+	return func() {
+		close(done)
+		signal.Stop(interrupted)
+		unlock()
+		if got.Load() {
 			a.warnf("interrupted: the command was completed first, so that links and configuration stay consistent.")
-		default:
 		}
 	}, nil
 }

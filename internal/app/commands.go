@@ -425,7 +425,7 @@ const updateUsage = `Usage: aiplam update [<name|id|playbookfolder>] [<playbookf
 
 Brings a playbook's links in line with its playbook folder, as currently checked out, for its profile's agent:
   - links its new artifacts;
-  - removes the links of artifacts that no longer exist, and the folders that leaves empty.
+  - removes the links of artifacts that no longer exist, and the folders this leaves empty.
 
 The playbook is chosen by:
   - nothing: the playbook registered for the current folder;
@@ -527,7 +527,7 @@ func (a *App) updateOne(group playbook.Group, e playbook.Entry, others []playboo
 const removeUsage = `Usage: aiplam remove <name|id|playbookfolder> [<playbookfolder>] [--profile PROFILE]
 
 Unregisters a playbook and, if its profile is enabled, removes its links from the folders of its profile's agent, and
-the folders that leaves empty:
+the folders this leaves empty:
   - the playbook is chosen by an id, a name or a playbook folder (when it designates a single playbook), or by a
     name and a playbook folder;
   - only links are removed: the playbook folder, and anything that is not a link into it, are left in place.

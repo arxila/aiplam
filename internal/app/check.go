@@ -204,8 +204,8 @@ func (a *App) cmdCheck(args []string) error {
 	return nil
 }
 
-// checkPlaybook checks a playbook's folders and, for an enabled profile, whether 'aiplam
-// update' would change anything.
+// checkPlaybook checks a playbook's folders and, for an enabled profile, whether 'aiplam update' would change
+// anything.
 func (a *App) checkPlaybook(st *state, profile *profileState, e playbook.Entry, reported map[string]bool,
 	problem func(string, ...any)) {
 	a.printf("Playbook %s (%s) at %s\n", e.ID, a.version(e.Dir), a.pretty(e.Dir))

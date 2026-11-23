@@ -342,8 +342,10 @@ func save(file string, v any, header string) error {
 	}
 	// The new content goes to a file next to it, which then replaces it: a crash leaves either the old file or the new
 	// one, complete. The temporary file is created with the usual permissions (0644 minus the umask), unlike
-	// os.CreateTemp's 0600, and its name includes the process id, so that concurrent runs do not share it.
+	// os.CreateTemp's 0600, and its name includes the process id, so that concurrent runs do not share it. A file with
+	// that name can only be left by a process that crashed (with a process id since reused): it is replaced.
 	tmpName := fmt.Sprintf("%s.%d.tmp", file, os.Getpid())
+	_ = os.Remove(tmpName)
 	tmp, err := os.OpenFile(tmpName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		return err

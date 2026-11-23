@@ -19,6 +19,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -265,6 +266,14 @@ func TestBaseConfigFiles(t *testing.T) {
 	conf, err := LoadBaseConfig(base)
 	if err != nil || conf.Enabled == nil || len(conf.Enabled) != 0 {
 		t.Fatalf("configuration %+v, err %v", conf, err)
+	}
+	// A temporary file left by a crashed process whose id this one reuses is replaced.
+	stale := fmt.Sprintf("%s.%d.tmp", BaseConfigFile(base), os.Getpid())
+	if err := os.WriteFile(stale, []byte("stale"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveBaseConfig(base, &BaseConfig{}); err != nil {
+		t.Fatalf("saving over a stale temporary file: %v", err)
 	}
 	// Saved files have the permissions of any new file (not os.CreateTemp's 0600), and no temporary file is left.
 	if entries, _ := os.ReadDir(filepath.Dir(BaseConfigFile(base))); len(entries) != 1 {
