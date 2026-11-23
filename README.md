@@ -234,6 +234,51 @@ files in other formats, are ignored for its profiles: a playbook's rules, for ex
 agent, and its `.agent.md` subagents are linked for Copilot but not for Claude Code. `aiplam profile --help` shows the
 same list, from the single source file that defines it (`internal/config/agents.go`).
 
+### Guidelines: `AGENTS.md`, `CLAUDE.md` and the like
+
+Agents also read a main instructions file: `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.github/copilot-instructions.md`,
+... aiplam does not link or edit those files. Each has a fixed name, so there can be only one per folder: several
+playbooks could not each provide one, and it would collide with the one the user (or the project) already has.
+
+Instead, a playbook provides its guidelines as **rules** or **instructions**: one file per playbook, named after it
+like any other artifact (`acme-guidelines.md`), which agents load besides the main instructions file. They never
+collide with each other or with the user's own files, and aiplam links and unlinks them like any other artifact:
+
+```text
+ .claude/
+ ├── CLAUDE.md                     the user's own: aiplam never touches it
+ └── rules/                        Claude Code loads every file here, besides CLAUDE.md
+     ├── acme-guidelines.md   ──►  ~/Workspace/acme-ai-playbook/rules/acme-guidelines.md
+     ├── tools-guidelines.md  ──►  ~/Workspace/tools-ai-playbook/rules/tools-guidelines.md
+     └── my-rules.md               the user's own: left alone
+```
+
+Where each agent reads such files, and what they need to be loaded always (rather than only for some files or when
+the agent finds them relevant), according to each agent's documentation:
+
+| Agent | Playbook file | Linked from | Loaded always when |
+|---|---|---|---|
+| Claude Code | `rules/<name>-*.md` | `.claude/rules`, `~/.claude/rules` | its frontmatter has no `paths:` |
+| Copilot | `instructions/<name>-*.instructions.md` | `.github/instructions` | its frontmatter has `applyTo: "**"` |
+| Cursor | `rules/<name>-*.mdc` | `.cursor/rules` | its frontmatter has `alwaysApply: true` |
+| Junie | `rules/<name>-*.md` | `.junie/rules` | the project has no `.junie/AGENTS.md` |
+| Devin | `rules/<name>-*.md` | `.devin/rules`, `~/.devin/rules` | its frontmatter has `trigger: always_on` |
+
+A playbook meant for several agents can provide the same guidelines in several formats, side by side:
+
+```text
+acme-ai-playbook/rules/
+├── acme-guidelines.md       Claude Code, Junie, Devin (one file for the three: with Devin's frontmatter)
+└── acme-guidelines.mdc      Cursor
+acme-ai-playbook/instructions/
+└── acme-guidelines.instructions.md   Copilot
+```
+
+Codex, Gemini CLI, OpenCode and the standard agent read guidelines only from their main instructions file
+(`AGENTS.md`, `GEMINI.md`, ...), so aiplam cannot link guidelines for them; nor, in the home folder, for Copilot,
+Cursor and Junie, which read such files in projects only. A later version may manage a marked block of its own inside
+those main instructions files, leaving the rest of them untouched.
+
 ### Profiles
 
 A **profile** is a working scope: a group of playbooks that are used together, such as those of a client, a team or a

@@ -216,6 +216,10 @@ so far. Defaults are not stored, so they follow the profile's agent if it change
 below is stored, and used whatever the agent. At least one artifact folder for a kind the agent reads must exist in
 <playbookfolder>.
 
+aiplam never links or edits an agent's main instructions file (AGENTS.md, CLAUDE.md, ...): there is only one per
+folder. A playbook's guidelines go in rules or instructions instead (rules/<name>-guidelines.md, ...), one file per
+playbook, which agents load besides their main instructions file (see the README for each agent's details).
+
 Nothing is changed if:
   - something other than the right link is already where a link must go;
   - another playbook of the profile, or of another enabled profile, needs a link at the same place (profiles for
