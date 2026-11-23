@@ -105,7 +105,7 @@ func init() {
 		{"remove", "unlink a playbook's artifacts and unregister it", removeUsage, (*App).cmdRemove},
 		{"list", "list registered playbooks, their versions and artifacts", listUsage, (*App).cmdList},
 		{"check", "check the configuration and whether any update is needed", checkUsage, (*App).cmdCheck},
-		{"profile", "manage profiles (groups of playbooks for an agent): create, remove, enable, disable, switch, " +
+		{"profile", "manage profiles (working scopes, each with an agent): create, remove, enable, disable, switch, " +
 			"change agent", profileUsage, (*App).cmdProfile},
 	}
 }
@@ -134,8 +134,9 @@ How it works:
   - aiplam links the playbooks' artifacts (skills, subagents, commands, prompts, rules, instructions) that an agent
     reads, in its format, from the agents configuration folders that agent reads, so updating a playbook only takes
     switching its checkout to another tag and running 'aiplam update';
-  - playbooks are registered in profiles, each for one agent, and only the playbooks of the enabled profiles are
-    linked; several profiles can be enabled, for the same agent or for different ones.
+  - playbooks are registered in profiles: working scopes (a client, a team, a kind of work...) that are enabled to
+    link their playbooks and disabled to unlink them; several can be enabled at once, and each has an agent
+    assigned, the one its playbooks are linked for.
 
 `)
 	b.WriteString("Agents: " + strings.Join(config.AgentNames(), ", ") + " (default: " + config.DefaultAgent +

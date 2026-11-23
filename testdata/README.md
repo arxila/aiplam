@@ -73,13 +73,14 @@ aiplam add aiplam-blueberry aiplam-blueberry-playbook -p extra
 aiplam profile enable extra
 aiplam list
 
-# a profile for Claude Code: skills, subagent, command and rule linked from ~/.claude, with no collision
-aiplam profile add claude --agent claude
-aiplam add aiplam-lettuce aiplam-lettuce-playbook -p claude
-aiplam profile enable claude
-# for Copilot instead: the .agent.md subagent, from ~/.copilot; warns that Copilot also reads ~/.agents
-aiplam profile agent claude copilot
-aiplam profile disable claude                             # ~/.copilot is removed once empty
+# another working scope, 'greens', assigned Claude Code: skills, subagent, command and rule linked from ~/.claude,
+# with no collision with the profiles for the standard agent
+aiplam profile add greens --agent claude
+aiplam add aiplam-lettuce aiplam-lettuce-playbook -p greens
+aiplam profile enable greens
+# greens assigned Copilot instead: the .agent.md subagent, from ~/.copilot; warns that Copilot also reads ~/.agents
+aiplam profile agent greens copilot
+aiplam profile disable greens                             # ~/.copilot is removed once empty
 
 # a project base folder, used by the commands run anywhere inside the base folder ~/projects/demo
 mkdir -p ~/projects/demo/module && cd ~/projects/demo

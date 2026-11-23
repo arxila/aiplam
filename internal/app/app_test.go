@@ -809,7 +809,7 @@ func TestProfileAgent(t *testing.T) {
 		t.Fatalf("agent = %s", prof.Agent)
 	}
 	out, _ = e.mustRun(ExitOK, "profile", "agent", "default", "claude")
-	if !strings.Contains(out, "already for agent claude") {
+	if !strings.Contains(out, "already has agent claude") {
 		t.Fatalf("unexpected output: %s", out)
 	}
 

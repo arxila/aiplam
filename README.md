@@ -40,7 +40,7 @@ make dist       # dist/aiplam-<version>-<os>-<arch>[.exe] for every supported pl
 ## Quick start
 
 ```bash
-aiplam init --global --agent claude                 # the home folder as base folder, with a profile for Claude Code
+aiplam init --global --agent claude                 # ~ as base folder, with a first profile, for Claude Code
 cd ~/Workspace/acme-ai-playbook
 git switch --detach v1.2.0                          # choose the playbook's version
 aiplam add acme .                                   # register it as 'acme', and link its acme-* artifacts
@@ -118,8 +118,8 @@ to link the artifacts a version adds and unlink those it removes.
 A **base folder** is a folder whose agents configuration folders aiplam manages: the home folder, or a folder where
 agent sessions may start, such as a project's top folder. It holds:
 
-- a **`.aiplam` folder**, with aiplam's configuration for that base folder: which profiles exist, which agent each one
-  is for, which playbooks each one has, and which profiles are enabled. Agents never read it;
+- a **`.aiplam` folder**, with aiplam's configuration for that base folder: which profiles (working scopes) exist,
+  which playbooks and which agent each one has, and which profiles are enabled. Agents never read it;
 - the **agents configuration folders** of the enabled profiles' agents (`.claude`, `.github`, `.agents`, ...), which
   agents read. aiplam only manages the links in them: anything else there (settings, artifacts added by hand) is left
   alone.
@@ -209,7 +209,7 @@ later for other agents need the same for their folders.
 
 ### Agents
 
-Each profile is for one agent. aiplam links the artifacts of its playbooks that the agent reads, in the agent's
+Each profile has an agent assigned. aiplam links the artifacts of its playbooks that the agent reads, in the agent's
 format, from the agent's own folders, which can differ between a project and the home folder. Agents are listed (here
 and by aiplam) from the most to the least used, according to the developer surveys of 2026, after the standard agent:
 
@@ -236,52 +236,73 @@ same list, from the single source file that defines it (`internal/config/agents.
 
 ### Profiles
 
-A **profile** is a group of registered playbooks for one agent, kept in its own file (`.aiplam/<profile>.yaml`). The
-**enabled** profiles (any number of them, for the same agent or for different ones) are the ones whose playbooks are
-linked. `init` creates a first profile, `default` (or the one given with `--profile`), for the standard agent (or the
-one given with `--agent`), and enables it.
-
-The same playbook can be registered in profiles for different agents, each linking what its agent reads:
+A **profile** is a working scope: a group of playbooks that are used together, such as those of a client, a team or a
+kind of work. Each profile is kept in its own file (`.aiplam/<profile>.yaml`), and only the playbooks of the
+**enabled** profiles are linked, so moving from one scope to another is a matter of enabling and disabling profiles.
+Any number of profiles can be enabled at once, combining their scopes.
 
 ```text
-                             ┌─► profile default (agent standard) ──► .agents/skills/acme-review
-                             │
- playbook acme ──────────────┤
- (~/Workspace/acme-...)      │                                  ┌──► .claude/skills/acme-review
-                             └─► profile claude (agent claude) ─┼──► .claude/agents/acme-reviewer.md
-                                                                ├──► .claude/commands/acme-ship.md
-                                                                └──► .claude/rules/acme-style.md
+ .aiplam/
+ ├── aiplam-config.yaml   enabled: [default, acme]
+ ├── default.yaml         agent: claude   playbooks: team-common, arxila     enabled: always needed
+ ├── acme.yaml            agent: claude   playbooks: acme                    enabled: working for client Acme now
+ └── initech.yaml         agent: claude   playbooks: initech, initech-data   disabled: back to it next month
+```
+
+```bash
+aiplam profile switch default,initech     # leave Acme for Initech: acme's links go, initech's come
+```
+
+Each profile also has an **agent** assigned: the agent its playbooks are linked for (see [Agents](#agents)). It is
+usually the agent you work with, the same for every profile, but each profile can have its own: for example, when a
+client's projects are worked on with another agent. `init` creates a first profile, `default` (or the one given with
+`--profile`), with the standard agent (or the one given with `--agent`), and enables it; `profile add` takes
+`--agent` too, and `profile agent` changes a profile's agent later.
+
+```bash
+aiplam profile add acme --agent claude                    # a profile for the work for client Acme
+aiplam add acme ~/Workspace/acme/acme-ai-playbook -p acme # register a playbook in it: nothing is linked yet
+aiplam profile enable acme                                # link its playbooks too
+aiplam profile switch acme                                # work only on Acme: disable the other profiles
+aiplam profile switch default,acme                        # enable exactly these profiles
+aiplam profile disable acme                               # unlink Acme's playbooks
+aiplam profile agent acme copilot                         # Acme's projects now use GitHub Copilot
+aiplam profile list                                       # the profiles and their agents; '*' marks the enabled ones
+aiplam profile remove old                                 # delete a profile that is not enabled
 ```
 
 How enabled profiles interact:
 
-- **Separate folders, no collision.** Profiles for different agents link artifacts from different folders, so they
-  can be enabled together, even with the same playbooks.
-- **Shared folders collide.** Profiles enabled together cannot need the same link: `profile enable` fails, changing
-  nothing, if any link that a profile needs already exists, whether another enabled profile made it or anything else
-  did, and `add` and `update` refuse an artifact that another enabled profile links at the same place. Codex reads
-  skills only from the standard agent's folders, so `codex` and `standard` share `.agents/skills`.
+- **The same link cannot come from two profiles.** `profile enable` fails, changing nothing, if any link that a
+  profile needs already exists, whether another enabled profile made it or anything else did, and `add` and `update`
+  refuse an artifact that another enabled profile links at the same place. So a playbook needed by several scopes
+  belongs in one profile that is enabled with them (such as `default` above), not in each of them.
+- **Profiles with different agents link from different folders**, so they don't collide, even with the same
+  playbooks, except where their agents share a folder: Codex reads skills only from the standard agent's folders, so
+  `codex` and `standard` share `.agents/skills`. For example, with a profile `team` assigned the standard agent and
+  `acme` assigned Claude Code:
+
+  ```text
+                               ┌─► profile team (agent standard) ─────► .agents/skills/acme-review
+                               │
+   playbook acme ──────────────┤
+   (~/Workspace/acme-...)      │                                    ┌──► .claude/skills/acme-review
+                               └─► profile acme (agent claude) ─────┼──► .claude/agents/acme-reviewer.md
+                                                                    ├──► .claude/commands/acme-ship.md
+                                                                    └──► .claude/rules/acme-style.md
+  ```
+
 - **Agents that also read `.agents/skills`.** Copilot, Cursor, Gemini CLI, Junie, OpenCode and Devin read the standard
   agent's `.agents/skills` besides their own folders. When an enabled profile links a skill for one of them and another
   enabled profile links the same skill from `.agents/skills`, aiplam warns that the agent may load it twice (`add`,
-  `profile enable`, `switch` and `agent`, and `check`), and leaves it to you to check how that agent handles it:
+  `profile enable`, `switch` and `agent`, and `check`), and leaves it to you to check how that agent handles it. For
+  example, with `acme` assigned Copilot instead:
 
   ```text
-  profile default (agent standard) ──► .agents/skills/acme-review ◄──┐
+  profile team (agent standard) ─────► .agents/skills/acme-review ◄──┐
                                                                      ├── Copilot reads both: may be loaded twice
-  profile work (agent copilot) ──────► .github/skills/acme-review ◄──┘
+  profile acme (agent copilot) ──────► .github/skills/acme-review ◄──┘
   ```
-
-```bash
-aiplam profile add claude --agent claude                  # create an empty profile for Claude Code
-aiplam add acme ~/Workspace/acme-ai-playbook -p claude    # register in it: nothing is linked yet
-aiplam profile enable claude                              # link its playbooks too, from ~/.claude
-aiplam profile agent claude cursor                        # link them for Cursor instead, from ~/.cursor
-aiplam profile disable default                            # unlink default's playbooks
-aiplam profile switch default,claude                      # enable exactly these profiles
-aiplam profile list                                       # the profiles and their agents; '*' marks the enabled ones
-aiplam profile remove old                                 # delete a profile that is not enabled
-```
 
 `profile switch` disables the profiles that are not listed first, so their links are not in the way, and leaves alone
 the links that stay the same. `profile agent` unlinks an enabled profile's playbooks for its old agent and links them
@@ -303,8 +324,8 @@ aiplam update --all
 aiplam remove <name|id|playbookfolder> [<playbookfolder>]        # remove a playbook's links and unregister it
 aiplam list [--all] [--json]                                     # profiles, playbooks, versions and artifacts
 aiplam check                                                     # what update would change; config and broken links
-aiplam profile list|remove [<profile>]                           # manage profiles (groups of playbooks for an agent)
-aiplam profile add <profile> [--agent A]                         # create a profile for an agent
+aiplam profile list|remove [<profile>]                           # manage profiles (working scopes, each with an agent)
+aiplam profile add <profile> [--agent A]                         # create a profile, with its agent
 aiplam profile enable|disable|switch <profile>[,<profile>...]    # choose the profiles linked
 aiplam profile agent <profile> <agent>                           # change a profile's agent
 ```

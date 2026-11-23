@@ -35,15 +35,17 @@ var profileUsage = `Usage: aiplam profile list
        aiplam profile switch <profile>[,<profile>...]
        aiplam profile agent <profile> <agent>
 
-Manages profiles: groups of registered playbooks for one agent, each kept in its own file
-(<basefolder>/.aiplam/<profile>.yaml):
-  - only the playbooks of the enabled profiles are linked, each profile's for its agent;
-  - several profiles can be enabled at once, for the same agent or for different ones;
+Manages profiles: working scopes, such as a client, a team or a kind of work, each a group of registered playbooks
+kept in its own file (<basefolder>/.aiplam/<profile>.yaml), with an agent assigned:
+  - only the playbooks of the enabled profiles are linked, so switching scopes is enabling and disabling profiles;
+  - several profiles can be enabled at once, combining their scopes;
+  - each profile's playbooks are linked for its agent: usually the agent you work with, the same for every profile,
+    though each profile can have its own;
   - 'add', 'update', 'remove', 'list' and 'check' act on the enabled profiles unless given --profile.
 
 Subcommands:
   list      list the profiles and their agents; '*' marks the enabled ones
-  add       create an empty profile for an agent (default: standard); names: letters, digits, '_' and '-'
+  add       create an empty profile, with its agent (default: standard); names: letters, digits, '_' and '-'
             ('` + config.BaseConfigName + `' is reserved)
   remove    delete a profile that is not enabled, with its playbook registrations (nothing is unlinked)
   enable    enable profiles besides those already enabled: link their playbooks
@@ -65,20 +67,22 @@ How a profile's agent is used:
     hand.
 
 Profiles enabled together cannot collide: enabling a profile fails, changing nothing, if any link it needs already
-exists, whoever made it (another enabled profile, or anything else). Profiles for different agents only collide
-where the agents share a folder: codex and the standard agent both link skills from .agents/skills. Many agents also
-read .agents/skills besides their own folders: when a profile links a skill for one of them and another enabled
-profile links the same skill from .agents/skills, aiplam warns that the agent may load it twice.
+exists, whoever made it (another enabled profile, or anything else). When enabled profiles have different agents,
+they only collide where the agents share a folder: codex and the standard agent both link skills from
+.agents/skills. Many agents also read .agents/skills besides their own folders: when a profile links a skill for one
+of them and another enabled profile links the same skill from .agents/skills, aiplam warns that the agent may load it
+twice.
 
 Agents, and where aiplam links each kind of artifact for them (in a project, in the home folder):
 ` + agentsHelp() + `
 Examples:
-  aiplam profile add claude --agent claude
-  aiplam add acme ~/Workspace/acme-ai-playbook --profile claude
-  aiplam profile enable claude            # link its playbooks for Claude Code too
-  aiplam profile switch default,claude    # enable exactly default and claude
-  aiplam profile agent claude cursor      # link its playbooks for Cursor instead
-  aiplam profile disable claude           # unlink its playbooks
+  aiplam profile add acme --agent claude                       # a profile for the work for client Acme
+  aiplam add acme ~/Workspace/acme-ai-playbook --profile acme
+  aiplam profile enable acme                                   # link Acme's playbooks too
+  aiplam profile switch acme                                   # work only on Acme: disable the other profiles
+  aiplam profile switch default,acme                           # enable exactly default and acme
+  aiplam profile agent acme copilot                            # Acme's projects now use GitHub Copilot
+  aiplam profile disable acme                                  # unlink Acme's playbooks
 `
 
 func (a *App) cmdProfile(args []string) error {
@@ -228,7 +232,7 @@ func (a *App) profileAdd(name string, agent config.Agent) error {
 	if err := config.SaveProfile(a.Base, name, prof); err != nil {
 		return err
 	}
-	a.printf("Created profile '%s' (%s) for agent %s (%s): when enabled, its playbooks' artifacts are linked from "+
+	a.printf("Created profile '%s' (%s), with agent %s (%s): when enabled, its playbooks' artifacts are linked from "+
 		"%s.\n", name, a.profileFile(name), agent.Name, agent.Product, a.folderList(a.newProfileState(name, prof, false)))
 	a.printf("Register playbooks in it with '%s', and enable it with '%s'.\n",
 		a.hint("add <name> <playbookfolder> --profile "+name), a.hint("profile enable "+name))
@@ -443,7 +447,7 @@ func (a *App) profileAgent(conf *config.BaseConfig, name string, agent config.Ag
 		return err
 	}
 	if old.agent.Name == agent.Name {
-		a.printf("Profile '%s' is already for agent %s.\n", name, agent.Name)
+		a.printf("Profile '%s' already has agent %s.\n", name, agent.Name)
 		return nil
 	}
 	updated := *old.prof
@@ -453,7 +457,7 @@ func (a *App) profileAgent(conf *config.BaseConfig, name string, agent config.Ag
 		if err := config.SaveProfile(a.Base, name, &updated); err != nil {
 			return err
 		}
-		a.printf("Profile '%s' is now for agent %s (%s); nothing was linked or unlinked, since it is not enabled.\n",
+		a.printf("Profile '%s' now has agent %s (%s); nothing was linked or unlinked, since it is not enabled.\n",
 			name, agent.Name, agent.Product)
 		return nil
 	}
@@ -486,7 +490,7 @@ func (a *App) profileAgent(conf *config.BaseConfig, name string, agent config.Ag
 		return a.undo(plan, err, "the agent was not changed")
 	}
 	a.cleanup(plan)
-	a.printf("Profile '%s' is now for agent %s (%s).\n", name, agent.Name, agent.Product)
+	a.printf("Profile '%s' now has agent %s (%s).\n", name, agent.Name, agent.Product)
 	a.warnDoubleLoads(append(stay, next))
 	return nil
 }

@@ -119,12 +119,12 @@ func TestTestdataPlaybooks(t *testing.T) {
 	expect(all...)
 	e.mustRun(ExitOK, "check")
 
-	// A profile for Claude Code links every kind of artifact Claude Code reads, from ~/.claude: it does not collide
-	// with the profiles for the standard agent.
+	// Another working scope, assigned Claude Code, links every kind of artifact Claude Code reads, from ~/.claude: it
+	// does not collide with the profiles for the standard agent.
 	claude := filepath.Join(e.home, ".claude")
-	e.mustRun(ExitOK, "profile", "add", "claude", "--agent", "claude")
-	e.mustRun(ExitOK, "add", "aiplam-lettuce", lettuce, "-p", "claude")
-	e.mustRun(ExitOK, "profile", "enable", "claude")
+	e.mustRun(ExitOK, "profile", "add", "greens", "--agent", "claude")
+	e.mustRun(ExitOK, "add", "aiplam-lettuce", lettuce, "-p", "greens")
+	e.mustRun(ExitOK, "profile", "enable", "greens")
 	e.assertLink(filepath.Join(claude, "skills", "aiplam-lettuce-review"),
 		filepath.Join(lettuce, "skills", "aiplam-lettuce-review"))
 	e.assertLink(filepath.Join(claude, "agents", "aiplam-lettuce-reviewer.md"),
@@ -135,15 +135,15 @@ func TestTestdataPlaybooks(t *testing.T) {
 		filepath.Join(lettuce, "rules", "aiplam-lettuce-style.md"))
 	expect(all...)
 
-	// For Copilot instead: its own format, from ~/.copilot; Copilot also reads ~/.agents, hence the warning.
-	_, errOut = e.mustRun(ExitOK, "profile", "agent", "claude", "copilot")
+	// Assigned Copilot instead: its own format, from ~/.copilot; Copilot also reads ~/.agents, hence the warning.
+	_, errOut = e.mustRun(ExitOK, "profile", "agent", "greens", "copilot")
 	if !strings.Contains(errOut, "may be loaded twice") {
 		t.Fatalf("want a warning: %s", errOut)
 	}
 	e.assertMissing(claude)
 	e.assertLink(filepath.Join(e.home, ".copilot", "agents", "aiplam-lettuce-reviewer.agent.md"),
 		filepath.Join(lettuce, "agents", "aiplam-lettuce-reviewer.agent.md"))
-	e.mustRun(ExitOK, "profile", "disable", "claude")
+	e.mustRun(ExitOK, "profile", "disable", "greens")
 	e.assertMissing(filepath.Join(e.home, ".copilot"))
 	e.mustRun(ExitOK, "check")
 	_, errOut = e.mustRun(ExitFailure, "remove", tomato) // two playbooks are registered there

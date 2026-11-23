@@ -38,12 +38,13 @@ const initUsage = `Usage: aiplam init <basefolder> [--agent AGENT] [--profile PR
 
 Sets up <basefolder> as a base folder:
   - creates <basefolder>/.aiplam, holding its configuration (aiplam-config.yaml, and one <profile>.yaml per profile);
-  - creates a first profile for the chosen agent, and enables it.
+  - creates a first profile, with the chosen agent, and enables it.
 
 A profile's agent decides which kinds of its playbooks' artifacts are linked, in which format, and from which agents
 configuration folders of <basefolder> (.agents/skills for the standard agent, .claude/skills, .claude/agents, ... for
 Claude Code): 'aiplam profile --help' lists the agents. Those folders are created when an artifact is first linked
-there. More profiles, for the same agent or for others, can be added later with 'aiplam profile add'.
+there. More profiles, for other working scopes (a client, a team, a kind of work...), can be added later with
+'aiplam profile add', usually with the same agent, though each profile can have its own.
 
 From then on, commands run anywhere inside <basefolder> use its configuration: each command uses the nearest base
 folder from the current folder up, or else the home folder (unless given --base or --global).
@@ -54,12 +55,12 @@ for the same agent in <basefolder>.
 
 Options:
   -g, --global            use the user's home folder (e.g. /home/username) as base folder, instead of <basefolder>
-  -a, --agent AGENT       the agent of the first profile (default: standard)
+  -a, --agent AGENT       the agent assigned to the first profile (default: standard)
   -p, --profile PROFILE   the name of the first profile (default: 'default')
 
 Examples:
-  aiplam init --global                      # ~/.aiplam, with a profile for the standard agent (~/.agents)
-  aiplam init --global --agent claude       # ~/.aiplam, with a profile for Claude Code (~/.claude)
+  aiplam init --global                      # ~/.aiplam, with a first profile for the standard agent (~/.agents)
+  aiplam init --global --agent claude       # ~/.aiplam, with a first profile for Claude Code (~/.claude)
   aiplam init . --profile backend           # the current folder, with a first profile named 'backend'
   aiplam init ~/Workspace/thymeleaf         # a project: commands run inside it use its configuration
 `
@@ -119,7 +120,7 @@ func (a *App) cmdInit(args []string) error {
 	useBase()
 	s := a.newProfileState(profile, prof, true)
 	a.printf("Created %s\n", a.pretty(file))
-	a.printf("Created profile '%s' (%s) for agent %s (%s), enabled: its playbooks' artifacts are linked from %s.\n",
+	a.printf("Created profile '%s' (%s), with agent %s (%s), enabled: its playbooks' artifacts are linked from %s.\n",
 		profile, a.profileFile(profile), agent.Name, agent.Product, a.folderList(s))
 	a.printHigherLevels()
 	if repo := gitRepository(a.Base); repo != "" && len(s.folders) > 0 {
@@ -203,8 +204,8 @@ playbook's artifacts that the profile's agent reads, at whatever tag or commit i
     SKILL.md), and subagents (custom agent definitions, which some agents, such as Copilot and OpenCode, also offer
     as primary agents), commands, prompts, rules and instructions (files);
   - only the kinds the agent reads are linked, and only the files in its format ('.md', '.agent.md', '.toml', ...),
-    each from the agent's folder for the kind in the base folder ('aiplam profile --help' lists them): the same
-    playbook can be registered in profiles for different agents, each linking what its agent reads;
+    each from the agent's folder for the kind in the base folder ('aiplam profile --help' lists them); a playbook
+    registered in several profiles with different agents is linked by each for its agent;
   - <playbookfolder> is stored relative to the base folder;
   - several playbooks can share a name if the last segments of their playbook folders differ: their ids are then
     '<name>@<last folder segment>'.
@@ -233,7 +234,7 @@ Options:
 Examples:
   aiplam add arxila .                                     # the current folder: skills/, agents/, ... in it
   aiplam add arxila ~/Workspace/arxila-ai-playbook --skills-path ai/skills --subagents-path ai/subagents
-  aiplam add acme ../acme-ai-playbook --profile claude    # in profile 'claude', linked only if it is enabled
+  aiplam add acme ../acme-ai-playbook --profile acme      # in profile 'acme', linked only if it is enabled
 `
 
 // pathOption returns the name of the option that sets the folder of a kind of artifact: "skills-path".
