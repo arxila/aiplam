@@ -17,9 +17,10 @@
 #
 # =========================================================================
 #
-# Opens a shell to try aiplam by hand, with HOME set to a new temporary folder (so the real ~/.aiplam, ~/.agents and
-# ~/.claude are never touched), the aiplam built from this repository first in the PATH, and copies of the test
-# playbooks in testdata/playbooks under $HOME/playbooks. Two of them are made git repositories:
+# Opens a shell to try aiplam by hand, with HOME set to a new temporary folder (so the real ~/.aiplam and agents
+# configuration folders, such as ~/.agents or ~/.claude, are never touched), the aiplam built from this repository
+# first in the PATH, and copies of the test playbooks in testdata/playbooks under $HOME/playbooks. Two of them are
+# made git repositories:
 #
 #   aiplam-lettuce-playbook  tags v1.0.0 (without aiplam-lettuce-data-report) and v1.1.0 (everything),
 #                            checked out at v1.1.0 on main

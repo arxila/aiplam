@@ -4,7 +4,7 @@ Small playbooks with different layouts, for trying aiplam by hand and for the te
 `internal/app/testdata_test.go` runs the scenarios below). Go ignores folders named `testdata`, so nothing here is
 built. Their prefixes follow the `aiplam-<fruit or vegetable>` convention.
 
-| Playbook                    | Skills folder          | Skills                                                    |
+| Playbook                    | Skills artifact folder | Skills                                                    |
 |-----------------------------|------------------------|-----------------------------------------------------------|
 | `aiplam-lettuce-playbook`   | `skills/` (default)    | `aiplam-lettuce-review`, `aiplam-lettuce-deploy`,         |
 |                             |                        | `aiplam-lettuce-data-clean`, `aiplam-lettuce-data-report` |

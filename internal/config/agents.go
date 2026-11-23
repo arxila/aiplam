@@ -75,7 +75,7 @@ type Place struct {
 // IsZero reports whether p is the zero Place.
 func (p Place) IsZero() bool { return p.Dir == "" }
 
-// Format says which items of a kind's folder, in a playbook, are artifacts for an agent.
+// Format says which items of a playbook's artifact folder for a kind are artifacts for an agent.
 type Format struct {
 	// File, when set, makes artifacts folders that hold a file with that name (for skills, "SKILL.md").
 	File string
@@ -124,8 +124,11 @@ func projectOnly(dir, sub string, format Format) Support {
 // files is the Format of artifacts that are files with an extension.
 func files(ext string) Format { return Format{Ext: ext} }
 
-// AgentTable lists the agents. For agents that read several folders for a kind, the one listed is the agent's own
-// folder with the highest precedence (and, on equal precedence, the most standard spelling: "skills", not "skill").
+// AgentTable lists the agents: the standard agent first, then the others from the most to the least used (by the
+// developer surveys of 2026: JetBrains' Developer Ecosystem, Stack Overflow's pulse survey and The Pragmatic Engineer's
+// AI tooling survey). The order is the one aiplam shows them in. For agents that read several folders for a kind, the
+// one listed is the agent's own folder with the highest precedence (and, on equal precedence, the most standard
+// spelling: "skills", not "skill").
 var AgentTable = []Agent{
 	{
 		Name:    "standard",
@@ -145,15 +148,6 @@ var AgentTable = []Agent{
 		},
 	},
 	{
-		// Codex reads skills from the standard folders only; its other artifacts live in .codex.
-		Name:    "codex",
-		Product: "OpenAI Codex",
-		Kinds: map[Kind]Support{
-			Skills:    both(".agents", ".agents", "skills", skillFormat),
-			Subagents: both(".codex", ".codex", "agents", files(".toml")),
-		},
-	},
-	{
 		// Copilot reads .github in projects but ~/.copilot in the home folder. Its home folder for agents is only
 		// documented by community guides.
 		Name:    "copilot",
@@ -167,6 +161,27 @@ var AgentTable = []Agent{
 		ReadsStandard: []Kind{Skills},
 	},
 	{
+		// Cursor keeps user rules in its settings, not in files.
+		Name:    "cursor",
+		Product: "Cursor",
+		Kinds: map[Kind]Support{
+			Skills:    both(".cursor", ".cursor", "skills", skillFormat),
+			Subagents: both(".cursor", ".cursor", "agents", files(".md")),
+			Commands:  both(".cursor", ".cursor", "commands", files(".md")),
+			Rules:     projectOnly(".cursor", "rules", files(".mdc")),
+		},
+		ReadsStandard: []Kind{Skills},
+	},
+	{
+		// Codex reads skills from the standard agent's folders only; its other artifacts live in .codex.
+		Name:    "codex",
+		Product: "OpenAI Codex",
+		Kinds: map[Kind]Support{
+			Skills:    both(".agents", ".agents", "skills", skillFormat),
+			Subagents: both(".codex", ".codex", "agents", files(".toml")),
+		},
+	},
+	{
 		Name:    "gemini",
 		Product: "Gemini CLI",
 		Kinds: map[Kind]Support{
@@ -177,14 +192,14 @@ var AgentTable = []Agent{
 		ReadsStandard: []Kind{Skills},
 	},
 	{
-		// Cursor keeps user rules in its settings, not in files.
-		Name:    "cursor",
-		Product: "Cursor",
+		// Junie keeps user-level guidelines in a single file (~/.junie/AGENTS.md), so rules are project-only.
+		Name:    "junie",
+		Product: "JetBrains Junie",
 		Kinds: map[Kind]Support{
-			Skills:    both(".cursor", ".cursor", "skills", skillFormat),
-			Subagents: both(".cursor", ".cursor", "agents", files(".md")),
-			Commands:  both(".cursor", ".cursor", "commands", files(".md")),
-			Rules:     projectOnly(".cursor", "rules", files(".mdc")),
+			Skills:    both(".junie", ".junie", "skills", skillFormat),
+			Subagents: both(".junie", ".junie", "agents", files(".md")),
+			Commands:  both(".junie", ".junie", "commands", files(".md")),
+			Rules:     projectOnly(".junie", "rules", files(".md")),
 		},
 		ReadsStandard: []Kind{Skills},
 	},
@@ -207,18 +222,6 @@ var AgentTable = []Agent{
 			Skills:    both(".devin", ".config/devin", "skills", skillFormat),
 			Subagents: both(".devin", ".config/devin", "agents", files(".md")),
 			Rules:     both(".devin", ".devin", "rules", files(".md")),
-		},
-		ReadsStandard: []Kind{Skills},
-	},
-	{
-		// Junie keeps user-level guidelines in a single file (~/.junie/AGENTS.md), so rules are project-only.
-		Name:    "junie",
-		Product: "JetBrains Junie",
-		Kinds: map[Kind]Support{
-			Skills:    both(".junie", ".junie", "skills", skillFormat),
-			Subagents: both(".junie", ".junie", "agents", files(".md")),
-			Commands:  both(".junie", ".junie", "commands", files(".md")),
-			Rules:     projectOnly(".junie", "rules", files(".md")),
 		},
 		ReadsStandard: []Kind{Skills},
 	},

@@ -1,6 +1,6 @@
 # aiplam: AI Playbook Manager
 
-`aiplam` makes coding agents (Claude Code, GitHub Copilot, Codex, Cursor, Gemini CLI, ...) use the skills, subagents,
+`aiplam` makes coding agents (Claude Code, GitHub Copilot, Cursor, Codex, Gemini CLI, ...) use the skills, subagents,
 commands and other artifacts of **AI playbooks**: git repositories of such artifacts shared by a team or by a family
 of related projects.
 
@@ -76,16 +76,16 @@ acme-ai-playbook/                    registered with: aiplam add acme ~/Workspac
 │   ├── acme-notes/                  no SKILL.md: not a skill
 │   └── other-tool/                  not named acme-*: not an artifact of this playbook
 ├── agents/                          subagents: files named acme-*, in each agent's format
-│   ├── acme-reviewer.md             Claude Code, Cursor, Gemini CLI, OpenCode, Devin, Junie
+│   ├── acme-reviewer.md             Claude Code, Cursor, Gemini CLI, Junie, OpenCode, Devin
 │   ├── acme-reviewer.agent.md       GitHub Copilot
 │   └── acme-reviewer.toml           OpenAI Codex
 ├── commands/
-│   ├── acme-ship.md                 Claude Code, Cursor, OpenCode, Junie
+│   ├── acme-ship.md                 Claude Code, Cursor, Junie, OpenCode
 │   └── acme-ship.toml               Gemini CLI
 ├── prompts/
 │   └── acme-ask.prompt.md           GitHub Copilot (in projects)
 ├── rules/
-│   ├── acme-style.md                Claude Code, Devin; Junie (in projects)
+│   ├── acme-style.md                Claude Code, Junie (in projects), Devin
 │   └── acme-style.mdc               Cursor (in projects)
 └── instructions/
     └── acme-java.instructions.md    GitHub Copilot (in projects)
@@ -210,22 +210,23 @@ later for other agents need the same for their folders.
 ### Agents
 
 Each profile is for one agent. aiplam links the artifacts of its playbooks that the agent reads, in the agent's
-format, from the agent's own folders, which can differ between a project and the home folder:
+format, from the agent's own folders, which can differ between a project and the home folder. Agents are listed (here
+and by aiplam) from the most to the least used, according to the developer surveys of 2026, after the standard agent:
 
 - `standard`, the cross-agent `.agents` convention: `.agents` (`~/.agents` at home); skills.
 - `claude`, Claude Code: `.claude` (`~/.claude`); skills, subagents (`.md`), commands (`.md`) and rules (`.md`).
-- `codex`, OpenAI Codex: `.agents` for skills and `.codex` for subagents (`~/.agents`, `~/.codex`); skills and subagents
-  (`.toml`).
 - `copilot`, GitHub Copilot: `.github` (`~/.copilot`); skills, subagents (`.agent.md`), and in projects only prompts
   (`.prompt.md`) and instructions (`.instructions.md`).
-- `gemini`, Gemini CLI: `.gemini` (`~/.gemini`); skills, subagents (`.md`) and commands (`.toml`).
 - `cursor`, Cursor: `.cursor` (`~/.cursor`); skills, subagents (`.md`), commands (`.md`), and in projects only rules
   (`.mdc`).
+- `codex`, OpenAI Codex: `.agents` for skills and `.codex` for subagents (`~/.agents`, `~/.codex`); skills and subagents
+  (`.toml`).
+- `gemini`, Gemini CLI: `.gemini` (`~/.gemini`); skills, subagents (`.md`) and commands (`.toml`).
+- `junie`, JetBrains Junie: `.junie` (`~/.junie`); skills, subagents (`.md`), commands (`.md`), and in projects only
+  rules (`.md`).
 - `opencode`, OpenCode: `.opencode` (`~/.config/opencode`); skills, subagents (`.md`) and commands (`.md`).
 - `devin`, Devin (formerly Windsurf): `.devin` (`~/.config/devin`, and `~/.devin` for rules); skills, subagents (`.md`)
   and rules (`.md`).
-- `junie`, JetBrains Junie: `.junie` (`~/.junie`); skills, subagents (`.md`), commands (`.md`), and in projects only
-  rules (`.md`).
 
 Each kind is linked from the subfolder of the same name (`.claude/skills`, `.github/prompts`, ...), except subagents,
 linked from `agents` (`.claude/agents`, `.github/agents`, ...). Kinds of artifacts that an agent does not read, and
@@ -254,14 +255,14 @@ The same playbook can be registered in profiles for different agents, each linki
 
 How enabled profiles interact:
 
-- **Separate folders, no collision.** Profiles for different agents link into different folders, so they can be
-  enabled together, even with the same playbooks.
+- **Separate folders, no collision.** Profiles for different agents link artifacts from different folders, so they
+  can be enabled together, even with the same playbooks.
 - **Shared folders collide.** Profiles enabled together cannot need the same link: `profile enable` fails, changing
   nothing, if any link that a profile needs already exists, whether another enabled profile made it or anything else
   did, and `add` and `update` refuse an artifact that another enabled profile links at the same place. Codex reads
-  skills only from the standard folders, so `codex` and `standard` share `.agents/skills`.
-- **Agents that also read `.agents/skills`.** Copilot, Gemini CLI, Cursor, OpenCode, Devin and Junie read the standard
-  `.agents/skills` besides their own folders. When an enabled profile links a skill for one of them and another
+  skills only from the standard agent's folders, so `codex` and `standard` share `.agents/skills`.
+- **Agents that also read `.agents/skills`.** Copilot, Cursor, Gemini CLI, Junie, OpenCode and Devin read the standard
+  agent's `.agents/skills` besides their own folders. When an enabled profile links a skill for one of them and another
   enabled profile links the same skill from `.agents/skills`, aiplam warns that the agent may load it twice (`add`,
   `profile enable`, `switch` and `agent`, and `check`), and leaves it to you to check how that agent handles it:
 
