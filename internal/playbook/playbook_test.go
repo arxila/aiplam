@@ -19,6 +19,7 @@
 package playbook
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -458,5 +459,34 @@ func TestRevert(t *testing.T) {
 	}
 	if state, _, _ := fsutil.Inspect(link); state != fsutil.Link {
 		t.Fatal("the removal was not reverted")
+	}
+}
+
+func TestMetadataVersion(t *testing.T) {
+	dir := t.TempDir()
+	for i, c := range []struct{ content, want string }{
+		{"---\nname: x\nmetadata:\n  version: \"1.0\"\n---\nBody\n", "1.0"},
+		{"---\nname: x\nmetadata:\n  version: 1.0\n  author: me\n---\n", "1.0"}, // as written, not as a number
+		{"\xef\xbb\xbf---\r\nmetadata:\r\n  version: 2.1.3\r\n---\r\n", "2.1.3"},
+		{"---\nmetadata:\n  version: v3\n---", "v3"},
+		{"---\nname: x\nversion: 1.0\n---\n", ""}, // not the Agent Skills field
+		{"---\nmetadata:\n  version:\n---\n", ""},
+		{"---\nmetadata:\n  version: [1, 2]\n---\n", ""},
+		{"---\nmetadata: [\n---\n", ""}, // invalid YAML
+		{"---\n---\n", ""},
+		{"---\nmetadata:\n  version: 1.0\n", ""}, // unterminated
+		{"metadata:\n  version: 1.0\n", ""},      // no frontmatter
+		{"# Title\n\n---\nmetadata:\n  version: 1.0\n---\n", ""},
+	} {
+		file := filepath.Join(dir, fmt.Sprintf("SKILL%d.md", i))
+		if err := os.WriteFile(file, []byte(c.content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := MetadataVersion(file); got != c.want {
+			t.Errorf("%q: %q, want %q", c.content, got, c.want)
+		}
+	}
+	if got := MetadataVersion(filepath.Join(dir, "missing.md")); got != "" {
+		t.Errorf("missing file: %q", got)
 	}
 }

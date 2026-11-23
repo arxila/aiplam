@@ -33,8 +33,8 @@ func TestVersionString(t *testing.T) {
 	}{
 		{Version{}, "unknown"},
 		{Version{Known: true}, "unknown"},
-		{Version{Known: true, Tags: []string{"v1.0.0"}, Branch: "main", Commit: "abc1234"}, "tag: v1.0.0"},
-		{Version{Known: true, Tags: []string{"v1.0.0", "stable"}, Commit: "abc1234"}, "tags: v1.0.0, stable"},
+		{Version{Known: true, Tags: []string{"v1.0.0"}, Branch: "main", Commit: "abc1234"}, "v1.0.0"},
+		{Version{Known: true, Tags: []string{"v1.0.0", "stable"}, Commit: "abc1234"}, "v1.0.0, stable"},
 		{Version{Known: true, Tags: []string{}, Branch: "main", Commit: "abc1234"}, "branch: main"},
 		{Version{Known: true, Commit: "abc1234"}, "commit: abc1234 (detached)"},
 		{Version{Known: false, Tags: []string{"v1"}}, "unknown"},
@@ -102,7 +102,7 @@ func TestRead(t *testing.T) {
 	git("tag", "v1.0.0")
 	git("tag", "-a", "-m", "annotated", "stable")
 	v = r.Read(dir)
-	if strings.Join(v.Tags, ",") != "stable,v1.0.0" || v.Branch != "main" || v.String() != "tags: stable, v1.0.0" {
+	if strings.Join(v.Tags, ",") != "stable,v1.0.0" || v.Branch != "main" || v.String() != "stable, v1.0.0" {
 		t.Fatalf("tagged: %+v", v)
 	}
 
@@ -117,7 +117,7 @@ func TestRead(t *testing.T) {
 
 	// Detached at a tag, and at a commit without tags.
 	git("switch", "-q", "--detach", "v1.0.0")
-	if v = r.Read(dir); v.Branch != "" || v.Commit != commit || v.String() != "tags: stable, v1.0.0" {
+	if v = r.Read(dir); v.Branch != "" || v.Commit != commit || v.String() != "stable, v1.0.0" {
 		t.Fatalf("detached at a tag: %+v", v)
 	}
 	git("switch", "-q", "main")

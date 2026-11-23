@@ -38,15 +38,14 @@ type Version struct {
 	Commit string `json:"commit,omitempty"`
 }
 
-// String formats the version for humans: "tag: x", "tags: x, y", "branch: b", "commit: c (detached)" or "unknown".
+// String formats the version for humans: the tags ("v1.2.0", or "v1.2.0, stable"), "branch: b", "commit: c
+// (detached)" or "unknown".
 func (v Version) String() string {
 	switch {
 	case !v.Known:
 		return "unknown"
-	case len(v.Tags) == 1:
-		return "tag: " + v.Tags[0]
-	case len(v.Tags) > 1:
-		return "tags: " + strings.Join(v.Tags, ", ")
+	case len(v.Tags) > 0:
+		return strings.Join(v.Tags, ", ")
 	case v.Branch != "":
 		return "branch: " + v.Branch
 	case v.Commit != "":

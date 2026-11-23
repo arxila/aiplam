@@ -550,7 +550,12 @@ func TestListJSONAndVersions(t *testing.T) {
 	}
 	e := newEnv(t)
 	e.mustRun(ExitOK, "init", "-g", "-a", "standard")
-	pb := e.playbook("p", "x-a")
+	pb := e.playbook("p", "x-a", "x-b")
+	// x-b declares its own version, which wins over the playbook's tags.
+	if err := os.WriteFile(filepath.Join(pb, "skills", "x-b", "SKILL.md"),
+		[]byte("---\nname: x-b\nmetadata:\n  version: \"1.0\"\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	git := func(args ...string) {
 		t.Helper()
 		cmd := exec.Command("git", append([]string{"-C", pb, "-c", "user.name=t", "-c", "user.email=t@example.com",
@@ -578,18 +583,34 @@ func TestListJSONAndVersions(t *testing.T) {
 	}
 	p := list.Profiles[0].Playbooks[0]
 	if p.ID != "x" || p.Name != "x" || p.Folder != pb || p.Label != "branch: main" || !p.Version.Known ||
-		len(skillItems(p)) != 1 || !skillItems(p)[0].Linked {
+		len(skillItems(p)) != 2 || !skillItems(p)[0].Linked {
 		t.Fatalf("unexpected playbook: %+v", p)
+	}
+	skillVersions := func(p listPlaybook) string {
+		var vs []string
+		for _, it := range skillItems(p) {
+			vs = append(vs, it.Name+"="+it.Version)
+		}
+		return strings.Join(vs, " ")
+	}
+	// Only the skill declaring a version of its own has one, with or without tags.
+	if got := skillVersions(p); got != "x-a= x-b=1.0" {
+		t.Fatalf("skill versions = %q", got)
 	}
 
 	git("tag", "v1.0.0")
 	git("tag", "x-1.0.0")
 	git("checkout", "-q", "--detach", "v1.0.0")
-	if got := readList().Profiles[0].Playbooks[0].Label; got != "tags: v1.0.0, x-1.0.0" {
-		t.Fatalf("label = %q", got)
+	p = readList().Profiles[0].Playbooks[0]
+	if p.Label != "v1.0.0, x-1.0.0" {
+		t.Fatalf("label = %q", p.Label)
+	}
+	if got := skillVersions(p); got != "x-a= x-b=1.0" {
+		t.Fatalf("skill versions = %q", got)
 	}
 	out, _ := e.mustRun(ExitOK, "list")
-	if !strings.Contains(out, "version: tags: v1.0.0, x-1.0.0") {
+	if !strings.Contains(out, "version: v1.0.0, x-1.0.0\n") || !strings.Contains(out, "    x-a\n") ||
+		!strings.Contains(out, "    x-b  1.0\n") {
 		t.Fatalf("unexpected list: %s", out)
 	}
 

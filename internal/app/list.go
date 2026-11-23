@@ -21,6 +21,7 @@ package app
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 
 	"arxila.io/aiplam/internal/config"
@@ -35,7 +36,9 @@ Lists the enabled profiles, with their agents, and the playbooks of each, with:
   - its id, name and playbook folder;
   - its version: the tags of the checked-out commit, or else its branch;
   - its artifacts that the profile's agent reads, by kind (such as skills), marking those not linked ('aiplam
-    update' links them).
+    update' links them). Skills that declare a version of their own (metadata.version in their SKILL.md) show
+    it; the others have their playbook's. Versions are shown for information only: aiplam links whatever is
+    checked out.
 
 Options:
   --all                   also list the higher-level base folders, nearest first:
@@ -91,6 +94,9 @@ type listItem struct {
 	Name   string `json:"name"`
 	Source string `json:"source"`
 	Linked bool   `json:"linked"`
+	// Version is a skill's own version, the metadata.version of its SKILL.md, if it declares one (otherwise, its
+	// version is its playbook's).
+	Version string `json:"version,omitempty"`
 }
 
 func (a *App) cmdList(args []string) error {
@@ -228,13 +234,22 @@ func (a *App) listPlaybooks(lprof listProfile) bool {
 				continue
 			}
 			a.printf("\n")
+			width := 0
 			for _, it := range lk.Items {
-				if it.Linked || !lprof.Enabled {
-					a.printf("    %s\n", it.Name)
-					continue
+				if it.Version != "" {
+					width = max(width, len(it.Name))
 				}
-				notLinked = true
-				a.printf("    %s  (not linked from %s)\n", it.Name, a.pretty(lk.LinkFolder))
+			}
+			for _, it := range lk.Items {
+				line := it.Name
+				if it.Version != "" {
+					line = fmt.Sprintf("%-*s  %s", width, it.Name, it.Version)
+				}
+				if !it.Linked && lprof.Enabled {
+					notLinked = true
+					line += fmt.Sprintf("  (not linked from %s)", a.pretty(lk.LinkFolder))
+				}
+				a.printf("    %s\n", line)
 			}
 		}
 		if !shown {
@@ -274,7 +289,11 @@ func (a *App) listProfile(profile *profileState) listProfile {
 					linked = err == nil && state == fsutil.Link &&
 						fsutil.SamePath(fsutil.Canonical(current), fsutil.Canonical(it.Source))
 				}
-				lk.Items = append(lk.Items, listItem{Name: it.Name, Source: it.Source, Linked: linked})
+				li := listItem{Name: it.Name, Source: it.Source, Linked: linked}
+				if f.Kind == config.Skills && f.Format.File != "" {
+					li.Version = playbook.MetadataVersion(filepath.Join(it.Source, f.Format.File))
+				}
+				lk.Items = append(lk.Items, li)
 			}
 			lp.Artifacts = append(lp.Artifacts, lk)
 		}

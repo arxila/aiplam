@@ -113,6 +113,22 @@ folder, not even through links.
 Since the links point into the clone, changes to existing artifacts are seen at once; `aiplam update` is only needed
 to link the artifacts a version adds and unlink those it removes.
 
+Skills can declare their own version in their `SKILL.md` frontmatter, as the Agent Skills specification suggests:
+
+```yaml
+---
+name: acme-deploy
+description: ...
+metadata:
+  version: "2.1"
+---
+```
+
+`aiplam list` shows a playbook's version as its tags (`v1.2.0`, or `v1.2.0, stable`), or `branch: main` when no tag
+points at the checked-out commit, and next to each skill the version it declares, if any (the others have their
+playbook's). Versions are only shown, for information: aiplam always links whatever is checked out, and agents ignore
+`metadata.version`.
+
 ### Base folders and the `.aiplam` folder
 
 A **base folder** is a folder whose agents configuration folders aiplam manages: the home folder, or a folder where
