@@ -20,8 +20,8 @@
 
 BINARY  := aiplam
 PKG     := arxila.io/aiplam
-# The version is defined in internal/app/app.go; override it with 'make VERSION=x.y.z ...'.
-VERSION ?= $(shell sed -n 's/^var Version = "\(.*\)"$$/\1/p' internal/app/app.go)
+# The version is defined in internal/app/app.go (sourceVersion); override it with 'make VERSION=x.y.z ...'.
+VERSION ?= $(shell sed -n 's/^const sourceVersion = "\(.*\)"$$/\1/p' internal/app/app.go)
 # Without a version (it could not be read), builds keep the one in the code; dist refuses to run.
 LDFLAGS := -s -w $(if $(VERSION),-X $(PKG)/internal/app.Version=$(VERSION))
 DIST    := dist
@@ -41,15 +41,33 @@ vet:
 	go vet ./...
 	GOOS=windows go vet ./...
 
+# Release archives: a .tar.gz (a .zip for Windows) per platform, holding the executable with the README and the license
+# files (which the Apache License requires to go with every copy), and a SHA256SUMS file. When HEAD is tagged, the tag
+# must match the version.
 dist: clean
 	@[ -n "$(VERSION)" ] || { echo "cannot read the version from internal/app/app.go: run 'make VERSION=x.y.z dist'" >&2; exit 1; }
+	@for tag in $$(git tag --points-at HEAD 'v*' 2>/dev/null); do \
+		[ "$$tag" = "v$(VERSION)" ] || { echo "HEAD is tagged $$tag, but the version is $(VERSION)" >&2; exit 1; }; \
+	done
+	@command -v sha256sum >/dev/null || command -v shasum >/dev/null || \
+		{ echo "sha256sum or shasum is needed" >&2; exit 1; }
 	@mkdir -p $(DIST)
 	@for p in $(PLATFORMS); do \
 		os=$${p%/*}; arch=$${p#*/}; ext=; [ $$os = windows ] && ext=.exe; \
-		out=$(DIST)/$(BINARY)-$(VERSION)-$$os-$$arch$$ext; \
-		echo "building $$out"; \
-		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags "$(LDFLAGS)" -o $$out ./cmd/aiplam || exit 1; \
+		name=$(BINARY)-$(VERSION)-$$os-$$arch; dir=$(DIST)/$$name; \
+		echo "building $$name"; \
+		mkdir -p $$dir && cp LICENSE.txt NOTICE.txt README.md $$dir/ || exit 1; \
+		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags "$(LDFLAGS)" -o $$dir/$(BINARY)$$ext \
+			./cmd/aiplam || exit 1; \
+		if [ $$os = windows ]; then \
+			(cd $(DIST) && zip -q -r -X $$name.zip $$name) || exit 1; \
+		else \
+			tar -C $(DIST) -czf $(DIST)/$$name.tar.gz $$name || exit 1; \
+		fi; \
+		rm $$dir/* && rmdir $$dir || exit 1; \
 	done
+	@cd $(DIST) && { command -v sha256sum >/dev/null && sha256sum $(BINARY)-* || shasum -a 256 $(BINARY)-*; } > SHA256SUMS
+	@echo "written $(DIST)/SHA256SUMS"
 
 clean:
 	rm -rf $(DIST) $(BINARY)

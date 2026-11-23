@@ -25,6 +25,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"testing"
 
@@ -160,6 +161,32 @@ func TestCommandsNeedInit(t *testing.T) {
 			t.Errorf("%v: want a hint to run aiplam init, got %q", args, errOut)
 		}
 	}
+}
+
+func TestOneCommandAtATime(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init", "-g")
+	dir := config.Dir(e.home)
+	if ignore, err := os.ReadFile(filepath.Join(dir, ".gitignore")); err != nil ||
+		!strings.Contains(string(ignore), "/.lock\n") {
+		t.Fatalf(".aiplam/.gitignore: %q, %v", ignore, err)
+	}
+
+	// While another command holds the lock, commands that change the base folder fail; list and check still run.
+	unlock, err := fsutil.Lock(filepath.Join(dir, ".lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pb := e.playbook("p", "x-a")
+	for _, args := range [][]string{{"add", "x", pb}, {"update", "--all"}, {"profile", "add", "other"}} {
+		if _, errOut := e.mustRun(ExitFailure, args...); !strings.Contains(errOut, "another aiplam command") {
+			t.Errorf("%v: %q", args, errOut)
+		}
+	}
+	e.mustRun(ExitOK, "list")
+	e.mustRun(ExitOK, "check")
+	unlock()
+	e.mustRun(ExitOK, "add", "x", pb)
 }
 
 func TestInit(t *testing.T) {
@@ -1020,6 +1047,32 @@ func TestVersion(t *testing.T) {
 	_, errOut := e.mustRun(ExitUsage)
 	if !strings.Contains(errOut, "aiplam "+Version+" - AI Playbook Manager\n"+Copyright) {
 		t.Fatalf("unexpected help: %s", errOut)
+	}
+}
+
+func TestResolveVersion(t *testing.T) {
+	info := func(version string, ok bool) func() (*debug.BuildInfo, bool) {
+		return func() (*debug.BuildInfo, bool) {
+			if !ok {
+				return nil, false
+			}
+			return &debug.BuildInfo{Main: debug.Module{Version: version}}, true
+		}
+	}
+	for _, c := range []struct {
+		set  string
+		info func() (*debug.BuildInfo, bool)
+		want string
+	}{
+		{"9.9.9", info("v1.2.3", true), "9.9.9"},   // set with -ldflags -X
+		{"", info("v1.2.3", true), "1.2.3"},        // go install ...@v1.2.3
+		{"", info("(devel)", true), sourceVersion}, // go build without version control information
+		{"", info("", true), sourceVersion},        // go test
+		{"", info("", false), sourceVersion},       // no build information
+	} {
+		if got := resolveVersion(c.set, c.info); got != c.want {
+			t.Errorf("resolveVersion(%q, ...) = %q, want %q", c.set, got, c.want)
+		}
 	}
 }
 

@@ -266,6 +266,19 @@ func TestBaseConfigFiles(t *testing.T) {
 	if err != nil || conf.Enabled == nil || len(conf.Enabled) != 0 {
 		t.Fatalf("configuration %+v, err %v", conf, err)
 	}
+	// Saved files have the permissions of any new file (not os.CreateTemp's 0600), and no temporary file is left.
+	if entries, _ := os.ReadDir(filepath.Dir(BaseConfigFile(base))); len(entries) != 1 {
+		t.Fatalf("files left in the configuration folder: %v", entries)
+	}
+	reference := filepath.Join(base, "reference")
+	if err := os.WriteFile(reference, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	saved, err1 := os.Stat(BaseConfigFile(base))
+	ref, err2 := os.Stat(reference)
+	if err1 != nil || err2 != nil || saved.Mode().Perm() != ref.Mode().Perm() {
+		t.Fatalf("saved file: %v (a new file: %v), %v %v", saved.Mode(), ref.Mode(), err1, err2)
+	}
 	for content, want := range map[string]string{
 		"types: [agents]\nenabled: [x]\n": "invalid file format",
 		"":                                "empty",

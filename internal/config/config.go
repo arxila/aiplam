@@ -340,21 +340,25 @@ func save(file string, v any, header string) error {
 	if err := enc.Close(); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(dir, filepath.Base(file)+".*.tmp")
+	// The new content goes to a file next to it, which then replaces it: a crash leaves either the old file or the new
+	// one, complete. The temporary file is created with the usual permissions (0644 minus the umask), unlike
+	// os.CreateTemp's 0600, and its name includes the process id, so that concurrent runs do not share it.
+	tmpName := fmt.Sprintf("%s.%d.tmp", file, os.Getpid())
+	tmp, err := os.OpenFile(tmpName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		return err
 	}
-	tmpName := tmp.Name()
-	if _, err := tmp.Write(buf.Bytes()); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
-		return err
+	_, err = tmp.Write(buf.Bytes())
+	if err == nil {
+		err = tmp.Sync()
 	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
-		return err
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
 	}
-	if err := os.Rename(tmpName, file); err != nil {
+	if err == nil {
+		err = os.Rename(tmpName, file)
+	}
+	if err != nil {
 		os.Remove(tmpName)
 		return err
 	}

@@ -24,9 +24,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
+	"syscall"
 
 	"arxila.io/aiplam/internal/config"
 	"arxila.io/aiplam/internal/fsutil"
@@ -34,9 +37,28 @@ import (
 	"arxila.io/aiplam/internal/playbook"
 )
 
-// Version is aiplam's version. The Makefile reads it from here; it can be overridden at build time with
-// -ldflags "-X arxila.io/aiplam/internal/app.Version=...".
-var Version = "0.1.0"
+// sourceVersion is the version of this source code. The Makefile reads it from here.
+const sourceVersion = "0.1.0"
+
+// Version is aiplam's version: the one set at build time with -ldflags "-X arxila.io/aiplam/internal/app.Version=..."
+// (as the Makefile does), or else the module version recorded by the go command (for example, by 'go install
+// arxila.io/aiplam/cmd/aiplam@v1.2.3'), or else sourceVersion.
+var Version string
+
+func init() {
+	Version = resolveVersion(Version, debug.ReadBuildInfo)
+}
+
+// resolveVersion returns the version to report, given the one set at build time (or "") and the build information.
+func resolveVersion(set string, buildInfo func() (*debug.BuildInfo, bool)) string {
+	if set != "" {
+		return set
+	}
+	if info, ok := buildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return strings.TrimPrefix(info.Main.Version, "v")
+	}
+	return sourceVersion
+}
 
 // Copyright is the copyright line shown in the help.
 const Copyright = "(c) 2026 Arxila OSS - https://aiplam.arxila.io"
@@ -229,6 +251,15 @@ func (a *App) Run(args []string) int {
 			if err := a.resolveBase(); err != nil {
 				return a.exitCode(err, c.usage)
 			}
+			// Commands that change the configuration or the links run one at a time per base folder (init takes the
+			// lock itself, once it knows the base folder).
+			if c.name != "list" && c.name != "check" {
+				unlock, err := a.lock()
+				if err != nil {
+					return a.exitCode(err, c.usage)
+				}
+				defer unlock()
+			}
 		}
 		return a.exitCode(c.run(a, args[1:]), c.usage)
 	}
@@ -345,6 +376,47 @@ func (a *App) isHome() bool {
 // base folder's.
 func (a *App) markAncestors(plan *playbook.Plan) {
 	playbook.MarkAncestors(plan, config.Ancestors(a.Base, a.Home), fsutil.Canonical(a.Home))
+}
+
+// lockName is the name of the lock file in the .aiplam folder; ignoreName, of the file that keeps it (and the
+// temporary files of interrupted saves) out of git, for when the .aiplam folder is committed.
+const (
+	lockName   = ".lock"
+	ignoreName = ".gitignore"
+)
+
+// lock makes sure that no other aiplam command changes the base folder while this one runs, and defers interruptions
+// (Ctrl+C) until it ends, so that the links and the configuration stay consistent: changes take milliseconds. It does
+// nothing for a base folder without a .aiplam folder (the command then fails, as it is not set up). The returned
+// function releases the lock and reports an interruption received meanwhile.
+func (a *App) lock() (func(), error) {
+	dir := config.Dir(a.Base)
+	if !fsutil.IsDir(dir) {
+		return func() {}, nil
+	}
+	unlock, err := fsutil.Lock(filepath.Join(dir, lockName))
+	if errors.Is(err, fsutil.ErrLocked) {
+		return nil, fmt.Errorf("another aiplam command is changing base folder '%s': try again when it ends",
+			a.pretty(a.Base))
+	}
+	if err != nil {
+		return nil, fmt.Errorf("cannot lock base folder '%s': %w", a.pretty(a.Base), err)
+	}
+	if ignore := filepath.Join(dir, ignoreName); !fsutil.IsFile(ignore) {
+		_ = os.WriteFile(ignore, []byte("# aiplam's lock file, and temporary files of interrupted saves.\n/"+lockName+
+			"\n/*.tmp\n"), 0o644)
+	}
+	interrupted := make(chan os.Signal, 1)
+	signal.Notify(interrupted, os.Interrupt, syscall.SIGTERM)
+	return func() {
+		signal.Stop(interrupted)
+		unlock()
+		select {
+		case <-interrupted:
+			a.warnf("interrupted: the command was completed first, so that links and configuration stay consistent.")
+		default:
+		}
+	}, nil
 }
 
 // errSilent signals a failure whose messages have already been printed.

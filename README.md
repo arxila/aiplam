@@ -34,7 +34,7 @@ To build it from a clone:
 
 ```bash
 make build      # ./aiplam for this machine
-make dist       # dist/aiplam-<version>-<os>-<arch>[.exe] for every supported platform
+make dist       # dist/aiplam-<version>-<os>-<arch>.tar.gz (.zip for Windows) per platform, and SHA256SUMS
 ```
 
 ## Quick start
@@ -403,6 +403,9 @@ Run `aiplam <command> --help` for the details of each command.
 - Only links that point into a playbook's artifact folders (such as its skills folder) and are named after it are
   ever removed.
 - Every command can be run again safely. `check` changes nothing, and exits with 1 when anything needs attention.
+- Commands that change a base folder run one at a time: while one runs, others on the same base folder fail (`list`
+  and `check` still work). Interrupting one (Ctrl+C) takes effect once it has finished its changes, which takes
+  milliseconds, so that links and configuration never disagree.
 
 ## Configuration files
 
@@ -433,6 +436,9 @@ validates:
 Playbook folders are relative to the base folder (`../playbooks/x` is fine), and each kind's path is relative to the
 playbook folder (only paths given are stored: otherwise the default of the profile's agent applies). Prefer the
 commands to editing the files by hand: a hand edit does not move any link.
+
+The `.aiplam` folder also holds `.lock`, which keeps two commands from changing the base folder at once, and a
+`.gitignore` that keeps it out of git when the folder is committed.
 
 ## Exit codes
 

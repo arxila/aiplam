@@ -101,6 +101,14 @@ func (a *App) cmdInit(args []string) error {
 			a.baseArg = a.Base
 		}
 	}
+	if err := os.MkdirAll(config.Dir(a.Base), 0o755); err != nil {
+		return err
+	}
+	unlock, err := a.lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	file := config.BaseConfigFile(a.Base)
 	if _, err := os.Stat(file); err == nil {
 		useBase()

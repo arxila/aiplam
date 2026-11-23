@@ -108,6 +108,30 @@ func TestLinks(t *testing.T) {
 	}
 }
 
+func TestLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".lock")
+	unlock, err := Lock(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// File locks belong to each opening of the file, so a second Lock conflicts even in the same process.
+	if _, err := Lock(path); err != ErrLocked {
+		t.Fatalf("second lock: %v, want ErrLocked", err)
+	}
+	unlock()
+	unlock2, err := Lock(path)
+	if err != nil {
+		t.Fatalf("lock after unlock: %v", err)
+	}
+	unlock2()
+	if !IsFile(path) {
+		t.Fatal("the lock file was removed")
+	}
+	if _, err := Lock(filepath.Join(path, "missing", ".lock")); err == nil {
+		t.Fatal("locked a file in a missing folder")
+	}
+}
+
 func TestExpandHome(t *testing.T) {
 	home := filepath.Join(string(filepath.Separator)+"h", "u")
 	cases := map[string]string{

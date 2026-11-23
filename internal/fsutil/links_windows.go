@@ -94,11 +94,11 @@ func createJunction(link, target string) (err error) {
 // name ("\??\C:\target") followed by the NUL-terminated print name ("C:\target").
 func mountPointReparseBuffer(target string) []byte {
 	substitute := utf16.Encode([]rune(`\??\` + target))
-	print := utf16.Encode([]rune(target))
-	path := make([]uint16, 0, len(substitute)+len(print)+2)
+	printName := utf16.Encode([]rune(target))
+	path := make([]uint16, 0, len(substitute)+len(printName)+2)
 	path = append(path, substitute...)
 	path = append(path, 0)
-	path = append(path, print...)
+	path = append(path, printName...)
 	path = append(path, 0)
 
 	dataLength := 8 + 2*len(path)
@@ -110,7 +110,7 @@ func mountPointReparseBuffer(target string) []byte {
 	le.PutUint16(buf[8:], 0)                            // SubstituteNameOffset
 	le.PutUint16(buf[10:], uint16(2*len(substitute)))   // SubstituteNameLength
 	le.PutUint16(buf[12:], uint16(2*len(substitute)+2)) // PrintNameOffset
-	le.PutUint16(buf[14:], uint16(2*len(print)))        // PrintNameLength
+	le.PutUint16(buf[14:], uint16(2*len(printName)))    // PrintNameLength
 	for i, c := range path {
 		le.PutUint16(buf[16+2*i:], c)
 	}
