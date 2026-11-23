@@ -34,12 +34,13 @@ const checkUsage = `Usage: aiplam check [--profile PROFILE]
 
 Changes nothing. Reports everything that needs attention, and then exits with 1:
   - problems in the configuration files (aiplam-config.yaml and the profiles' files, in the base folder's .aiplam);
-  - missing agents configuration folders and playbook folders;
+  - missing playbook folders;
   - for each playbook of the enabled profiles, the links that 'aiplam update' would create or remove, or the
     conflicts that would cancel it;
-  - broken links in the agents configuration folders;
-  - links whose artifact is also linked from an agents configuration folder of the same type of a higher-level
-    base folder.
+  - broken links in the folders where the enabled profiles' agents read artifacts;
+  - links whose artifact is also where the same agent reads it in a higher-level base folder.
+It also warns, without counting them, about artifacts that an agent may load twice: those linked for an agent that
+also reads the standard agent's folders (.agents/skills), when another enabled profile links them from there too.
 
 Options:
   -p, --profile PROFILE   check profile PROFILE only (default: the enabled profiles); for a profile that is not
@@ -88,7 +89,7 @@ func (a *App) cmdCheck(args []string) error {
 	if a.Profile != "" && !config.ProfileExists(a.Base, a.Profile) {
 		return fmt.Errorf("profile '%s' does not exist ('%s' lists the profiles)", a.Profile, a.hint("profile list"))
 	}
-	st := &state{conf: conf, agentsConfigDirs: conf.AgentsConfigDirs(a.Base)}
+	st := &state{conf: conf}
 	loadProfile := func(name string, enabled bool) *profileState {
 		file := a.profileFile(name)
 		if !config.ProfileExists(a.Base, name) {
@@ -108,8 +109,7 @@ func (a *App) cmdCheck(args []string) error {
 		if err != nil {
 			return nil
 		}
-		return &profileState{name: name, prof: prof, enabled: enabled,
-			entries: playbook.Entries(name, prof.Playbooks, a.Base)}
+		return a.newProfileState(name, prof, enabled)
 	}
 	for _, name := range conf.Enabled {
 		if s := loadProfile(name, true); s != nil {
@@ -129,17 +129,6 @@ func (a *App) cmdCheck(args []string) error {
 		return errSilent
 	}
 
-	agentsConfigDirs := st.agentsConfigDirs
-	a.printf("Agents configuration folders:\n")
-	for _, t := range agentsConfigDirs {
-		if !fsutil.IsDir(t) {
-			problem("agents configuration folder '%s' does not exist; it is created when an artifact is next linked from it",
-				a.pretty(t))
-			continue
-		}
-		a.printf("  %s\n", a.pretty(t))
-	}
-
 	if len(st.profiles) == 0 {
 		a.printf("No profile is enabled.\n")
 	}
@@ -150,7 +139,8 @@ func (a *App) cmdCheck(args []string) error {
 		if !profile.enabled {
 			status = "not enabled"
 		}
-		a.printf("Profile %s (%s): %s\n", profile.name, status, a.profileFile(profile.name))
+		a.printf("Profile %s (%s, agent %s): %s\n", profile.name, status, profile.agent.Name,
+			a.profileFile(profile.name))
 		if len(profile.entries) == 0 {
 			a.printf("  no playbooks are registered\n")
 		}
@@ -161,33 +151,50 @@ func (a *App) cmdCheck(args []string) error {
 	a.hintProfile = ""
 
 	// Broken links that no playbook plan covers (for example, links to an unregistered or moved playbook), and links
-	// whose artifact is also in the agents configuration folder of the same type of a higher-level base folder.
-	for _, t := range agentsConfigDirs {
-		dir := playbook.SkillsFolder(t)
-		items, err := os.ReadDir(dir)
-		if err != nil {
+	// whose artifact is also where the same agent reads it in a higher-level base folder.
+	home := fsutil.Canonical(a.Home)
+	seen := map[string]bool{}
+	for _, profile := range st.profiles {
+		if !profile.enabled {
 			continue
 		}
-		for _, item := range items {
-			link := filepath.Join(dir, item.Name())
-			state, current, err := fsutil.Inspect(link)
-			if err != nil || state != fsutil.Link {
+		for _, f := range profile.folders {
+			if seen[f.Dir] {
 				continue
 			}
-			if !reported[link] && !fsutil.IsDir(current) {
-				problem("broken link %s -> %s (not managed by any registered playbook; remove it by hand)",
-					a.pretty(link), a.pretty(current))
+			seen[f.Dir] = true
+			items, err := os.ReadDir(f.Dir)
+			if err != nil {
+				continue
 			}
-			for _, higher := range a.ancestorAgentsConfigDirs()[t] {
-				other := filepath.Join(playbook.SkillsFolder(higher), item.Name())
-				if _, err := os.Lstat(other); err == nil {
-					problem("%s is also in '%s', an agents configuration folder of the same type of a higher-level base "+
-						"folder: agents reading both would see it twice; remove one of them", a.pretty(link), a.pretty(other))
-					break
+			for _, item := range items {
+				link := filepath.Join(f.Dir, item.Name())
+				state, current, err := fsutil.Inspect(link)
+				if err != nil || state != fsutil.Link {
+					continue
+				}
+				if _, err := os.Stat(current); !reported[link] && err != nil {
+					problem("broken link %s -> %s (not managed by any registered playbook; remove it by hand)",
+						a.pretty(link), a.pretty(current))
+				}
+				for _, higher := range config.Ancestors(a.Base, a.Home) {
+					place, ok := profile.agent.Place(f.Kind, fsutil.SamePath(higher, home))
+					if !ok {
+						continue
+					}
+					other := filepath.Join(higher, filepath.FromSlash(place.Dir), filepath.FromSlash(place.Sub),
+						item.Name())
+					if _, err := os.Lstat(other); err == nil {
+						problem("%s is also in '%s', where agent %s reads it in a higher-level base folder: agents "+
+							"reading both would see it twice; remove one of them", a.pretty(link), a.pretty(other),
+							profile.agent.Name)
+						break
+					}
 				}
 			}
 		}
 	}
+	a.warnDoubleLoads(st.enabled)
 
 	if attention > 0 {
 		a.printf("\n%d item(s) need attention; see the warnings above.\n", attention)
@@ -197,37 +204,37 @@ func (a *App) cmdCheck(args []string) error {
 	return nil
 }
 
-// checkPlaybook checks a playbook's playbook folder and skills folder and, for an enabled profile, whether 'aiplam
+// checkPlaybook checks a playbook's folders and, for an enabled profile, whether 'aiplam
 // update' would change anything.
 func (a *App) checkPlaybook(st *state, profile *profileState, e playbook.Entry, reported map[string]bool,
 	problem func(string, ...any)) {
 	a.printf("Playbook %s (%s) at %s\n", e.ID, a.version(e.Dir), a.pretty(e.Dir))
-	if err := a.checkPlaybookFolders(e); err != nil {
+	if err := a.checkPlaybookFolders(e, profile.folders); err != nil {
 		problem("%s", err)
 		return
 	}
 	if !profile.enabled {
 		// Nothing is linked; the profile must only stay linkable.
-		overlaps, err := playbook.Overlaps(profile.entries, e)
+		overlaps, err := playbook.Overlaps(profile.group(), e)
 		if err != nil {
 			problem("playbook %s: %s", e.ID, err)
 			return
 		}
-		for name, others := range overlaps {
-			problem("playbook %s: skill %s: also provided by playbook %s; '%s' would be cancelled", e.ID, name,
-				strings.Join(others, ", "), a.hint("profile enable "+profile.name))
+		for _, c := range overlaps {
+			problem("playbook %s: %s %s: also provided by playbook %s; '%s' would be cancelled", e.ID,
+				c.Artifact.Singular(), c.Name, strings.Join(c.Others, ", "), a.hint("profile enable "+profile.name))
 		}
 		if len(overlaps) == 0 {
-			a.printf("  playbook folder and skills folder are valid (not linked: the profile is not enabled)\n")
+			a.printf("  playbook folders are valid (not linked: the profile is not enabled)\n")
 		}
 		return
 	}
-	plan, err := playbook.Build(profile.entries, e, st.agentsConfigDirs, st.others(profile.name))
+	plan, err := playbook.Build(profile.group(), e, st.others(profile.name))
 	if err != nil {
 		problem("playbook %s: %s", e.ID, err)
 		return
 	}
-	playbook.MarkAncestors(&plan, a.ancestorAgentsConfigDirs())
+	a.markAncestors(&plan)
 	var changes []playbook.Action
 	for _, act := range plan.Changes() {
 		// A link can match several playbooks of the same folder (prefixes x and x-y): report it once.

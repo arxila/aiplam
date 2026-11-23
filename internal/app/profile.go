@@ -27,49 +27,75 @@ import (
 	"arxila.io/aiplam/internal/playbook"
 )
 
-const profileUsage = `Usage: aiplam profile list
-       aiplam profile add <profile>
+var profileUsage = `Usage: aiplam profile list
+       aiplam profile add <profile> [--agent AGENT]
        aiplam profile remove <profile>
        aiplam profile enable <profile>[,<profile>...]
        aiplam profile disable <profile>[,<profile>...]
        aiplam profile switch <profile>[,<profile>...]
+       aiplam profile agent <profile> <agent>
 
-Manages profiles: groups of registered playbooks, each kept in its own file (<basefolder>/.aiplam/<profile>.yaml):
-  - only the playbooks of the enabled profiles are linked from the agents configuration folders;
+Manages profiles: groups of registered playbooks for one agent, each kept in its own file
+(<basefolder>/.aiplam/<profile>.yaml):
+  - only the playbooks of the enabled profiles are linked, each profile's for its agent;
+  - several profiles can be enabled at once, for the same agent or for different ones;
   - 'add', 'update', 'remove', 'list' and 'check' act on the enabled profiles unless given --profile.
 
 Subcommands:
-  list      list the profiles; '*' marks the enabled ones
-  add       create an empty profile (names: letters, digits, '_' and '-'; '` + config.BaseConfigName + `' is reserved)
+  list      list the profiles and their agents; '*' marks the enabled ones
+  add       create an empty profile for an agent (default: standard); names: letters, digits, '_' and '-'
+            ('` + config.BaseConfigName + `' is reserved)
   remove    delete a profile that is not enabled, with its playbook registrations (nothing is unlinked)
   enable    enable profiles besides those already enabled: link their playbooks
   disable   disable profiles: unlink their playbooks
   switch    enable exactly the given profiles: disable the others, then enable these (links that stay the same are left
             alone)
+  agent     change a profile's agent; if it is enabled, its playbooks are unlinked for the old agent and linked for
+            the new one, all-or-nothing (playbook folders left to their defaults follow the new agent's)
+
+How a profile's agent is used:
+  - its playbooks' artifacts are linked from the agent's folder for each kind, in the base folder (which can differ
+    between a project and the home folder: .github for Copilot in a project, ~/.copilot in the home folder);
+  - only the kinds the agent reads, and the files in its format, are linked; the others are ignored;
+  - by default, a playbook's folder for each kind is named like the agent's subfolder for it ('aiplam add --help');
+  - subagents are custom agent definitions, which some agents (such as Copilot and OpenCode) also offer as primary
+    agents;
+  - folders are created when an artifact is first linked there, and removed when unlinking leaves them empty (such
+    as .claude/agents, and then .claude itself), but never when they hold anything else, such as artifacts added by
+    hand.
 
 Profiles enabled together cannot collide: enabling a profile fails, changing nothing, if any link it needs already
-exists in an agents configuration folder, whoever made it (another enabled profile, or anything else).
+exists, whoever made it (another enabled profile, or anything else). Profiles for different agents only collide
+where the agents share a folder: codex and the standard agent both link skills from .agents/skills. Many agents also
+read .agents/skills besides their own folders: when a profile links a skill for one of them and another enabled
+profile links the same skill from .agents/skills, aiplam warns that the agent may load it twice.
 
+Agents, and where aiplam links each kind of artifact for them (in a project, in the home folder):
+` + agentsHelp() + `
 Examples:
-  aiplam profile add acme
-  aiplam add acme ~/Workspace/acme-ai-playbook --profile acme
-  aiplam profile enable acme            # link acme's playbooks too
-  aiplam profile switch default,acme    # enable exactly default and acme
-  aiplam profile disable acme           # unlink acme's playbooks
+  aiplam profile add claude --agent claude
+  aiplam add acme ~/Workspace/acme-ai-playbook --profile claude
+  aiplam profile enable claude            # link its playbooks for Claude Code too
+  aiplam profile switch default,claude    # enable exactly default and claude
+  aiplam profile agent claude cursor      # link its playbooks for Cursor instead
+  aiplam profile disable claude           # unlink its playbooks
 `
 
 func (a *App) cmdProfile(args []string) error {
 	if err := a.noProfileOption("profile"); err != nil {
 		return err
 	}
-	p, err := parseArgs(args, nil, nil)
+	p, err := parseArgs(args, []string{"agent"}, nil)
 	if err != nil {
 		return err
 	}
 	if len(p.positional) == 0 {
-		return usagef("profile needs a subcommand: list, add, remove, enable, disable or switch")
+		return usagef("profile needs a subcommand: list, add, remove, enable, disable, switch or agent")
 	}
 	sub, rest := p.positional[0], p.positional[1:]
+	if _, ok := p.values["agent"]; ok && sub != "add" {
+		return usagef("only 'profile add' takes --agent; use 'profile agent <profile> <agent>' to change a profile's agent")
+	}
 	switch sub {
 	case "list":
 		if len(rest) > 0 {
@@ -88,9 +114,29 @@ func (a *App) cmdProfile(args []string) error {
 			return err
 		}
 		if sub == "add" {
-			return a.profileAdd(rest[0])
+			agent, err := parseAgent(p, config.DefaultAgent)
+			if err != nil {
+				return err
+			}
+			return a.profileAdd(rest[0], agent)
 		}
 		return a.profileRemove(conf, rest[0])
+	case "agent":
+		if len(rest) != 2 {
+			return usagef("profile agent needs a profile name and an agent")
+		}
+		if !config.ValidProfileName(rest[0]) {
+			return invalidProfileName(rest[0])
+		}
+		agent, ok := config.LookupAgent(rest[1])
+		if !ok {
+			return usagef("unknown agent '%s': use %s", rest[1], strings.Join(config.AgentNames(), ", "))
+		}
+		conf, err := a.loadBaseConfig()
+		if err != nil {
+			return err
+		}
+		return a.profileAgent(conf, rest[0], agent)
 	case "enable", "disable", "switch":
 		names, err := profileNameList(rest)
 		if err != nil {
@@ -161,7 +207,7 @@ func (a *App) profileList() error {
 			a.printf("%s %-20s cannot be read (%s); see '%s'\n", mark, profile, err, a.hint("check --profile "+profile))
 			continue
 		}
-		a.printf("%s %-20s %d playbook(s)\n", mark, profile, len(prof.Playbooks))
+		a.printf("%s %-20s %-10s %d playbook(s)\n", mark, profile, prof.Agent, len(prof.Playbooks))
 	}
 	for _, name := range conf.Enabled {
 		if !config.ProfileExists(a.Base, name) {
@@ -174,14 +220,16 @@ func (a *App) profileList() error {
 	return nil
 }
 
-func (a *App) profileAdd(name string) error {
+func (a *App) profileAdd(name string, agent config.Agent) error {
 	if config.ProfileExists(a.Base, name) {
 		return fmt.Errorf("profile '%s' already exists (%s)", name, a.profileFile(name))
 	}
-	if err := config.SaveProfile(a.Base, name, &config.Profile{}); err != nil {
+	prof := &config.Profile{Agent: agent.Name}
+	if err := config.SaveProfile(a.Base, name, prof); err != nil {
 		return err
 	}
-	a.printf("Created profile '%s' (%s).\n", name, a.profileFile(name))
+	a.printf("Created profile '%s' (%s) for agent %s (%s): when enabled, its playbooks' artifacts are linked from "+
+		"%s.\n", name, a.profileFile(name), agent.Name, agent.Product, a.folderList(a.newProfileState(name, prof, false)))
 	a.printf("Register playbooks in it with '%s', and enable it with '%s'.\n",
 		a.hint("add <name> <playbookfolder> --profile "+name), a.hint("profile enable "+name))
 	return nil
@@ -240,14 +288,6 @@ func (a *App) split(profiles []*profileState, names []string) (in, out []*profil
 		}
 	}
 	return in, out
-}
-
-func groups(profiles []*profileState) [][]playbook.Entry {
-	var g [][]playbook.Entry
-	for _, s := range profiles {
-		g = append(g, s.entries)
-	}
-	return g
 }
 
 func (a *App) profileEnable(conf *config.BaseConfig, names []string) error {
@@ -345,18 +385,17 @@ func namesOf(profiles []*profileState) []string {
 func (a *App) changeProfiles(conf, updated *config.BaseConfig, removed, added, stay []*profileState) error {
 	for _, s := range added {
 		for _, e := range s.entries {
-			if err := a.checkPlaybookFolders(e); err != nil {
+			if err := a.checkPlaybookFolders(e, s.folders); err != nil {
 				return fmt.Errorf("%w; profile '%s' cannot be enabled, so nothing was changed", err, s.name)
 			}
 		}
 	}
-	agentsConfigDirs := conf.AgentsConfigDirs(a.Base)
-	plan, err := playbook.Switch(groups(removed), groups(added), groups(stay), agentsConfigDirs, agentsConfigDirs,
-		"profile disabled", "profile disabled", true)
+	plan, err := playbook.Switch(groups(removed), groups(added), groups(stay), "profile disabled", "profile disabled",
+		true)
 	if err != nil {
 		return err
 	}
-	playbook.MarkAncestors(&plan, a.ancestorAgentsConfigDirs())
+	a.markAncestors(&plan)
 	if len(plan.Conflicts()) > 0 {
 		a.printConflicts(plan)
 		advice := a.conflictAdvice(plan)
@@ -382,10 +421,72 @@ func (a *App) changeProfiles(conf, updated *config.BaseConfig, removed, added, s
 	if err := config.SaveBaseConfig(a.Base, updated); err != nil {
 		return a.undo(plan, err, "the enabled profiles were not changed")
 	}
+	a.cleanup(plan)
 	if len(updated.Enabled) == 0 {
 		a.printf("No profile is enabled now.\n")
 	} else {
 		a.printf("Enabled profiles: %s.\n", strings.Join(updated.Enabled, ", "))
 	}
+	a.warnDoubleLoads(append(append([]*profileState{}, stay...), added...))
+	return nil
+}
+
+// profileAgent changes a profile's agent. When the profile is enabled, its playbooks are unlinked for the old agent
+// and linked for the new one, all-or-nothing.
+func (a *App) profileAgent(conf *config.BaseConfig, name string, agent config.Agent) error {
+	if !config.ProfileExists(a.Base, name) {
+		return fmt.Errorf("profile '%s' does not exist ('%s' lists the profiles)", name, a.hint("profile list"))
+	}
+	enabled := conf.IsEnabled(a.Base, name)
+	old, err := a.loadProfileState(name, enabled)
+	if err != nil {
+		return err
+	}
+	if old.agent.Name == agent.Name {
+		a.printf("Profile '%s' is already for agent %s.\n", name, agent.Name)
+		return nil
+	}
+	updated := *old.prof
+	updated.Agent = agent.Name
+	next := a.newProfileState(name, &updated, enabled)
+	if !enabled {
+		if err := config.SaveProfile(a.Base, name, &updated); err != nil {
+			return err
+		}
+		a.printf("Profile '%s' is now for agent %s (%s); nothing was linked or unlinked, since it is not enabled.\n",
+			name, agent.Name, agent.Product)
+		return nil
+	}
+	current, err := a.enabledProfiles(conf)
+	if err != nil {
+		return err
+	}
+	_, stay := a.split(current, []string{name})
+	for _, e := range next.entries {
+		if err := a.checkPlaybookFolders(e, next.folders); err != nil {
+			return fmt.Errorf("%w; the agent was not changed", err)
+		}
+	}
+	plan, err := playbook.Switch([]playbook.Group{old.group()}, []playbook.Group{next.group()}, groups(stay),
+		"agent changed", "agent changed", false)
+	if err != nil {
+		return err
+	}
+	a.markAncestors(&plan)
+	if len(plan.Conflicts()) > 0 {
+		a.printConflicts(plan)
+		a.errorf("the agent was not changed: %s.", a.conflictAdvice(plan))
+		return errSilent
+	}
+	a.printf("Changing the agent of profile '%s' from %s to %s\n", name, old.agent.Name, agent.Name)
+	if err := playbook.Apply(plan, a.printAction); err != nil {
+		return fmt.Errorf("%w; the agent was not changed", err)
+	}
+	if err := config.SaveProfile(a.Base, name, &updated); err != nil {
+		return a.undo(plan, err, "the agent was not changed")
+	}
+	a.cleanup(plan)
+	a.printf("Profile '%s' is now for agent %s (%s).\n", name, agent.Name, agent.Product)
+	a.warnDoubleLoads(append(stay, next))
 	return nil
 }

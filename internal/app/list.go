@@ -21,9 +21,7 @@ package app
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"path/filepath"
-	"strings"
 
 	"arxila.io/aiplam/internal/config"
 	"arxila.io/aiplam/internal/fsutil"
@@ -33,11 +31,11 @@ import (
 
 const listUsage = `Usage: aiplam list [--all] [--json] [--profile PROFILE]
 
-Lists the playbooks of the enabled profiles, and for each:
+Lists the enabled profiles, with their agents, and the playbooks of each, with:
   - its id, name and playbook folder;
   - its version: the tags of the checked-out commit, or else its branch;
-  - its artifacts, by kind (such as skills), marking those not linked from every agents configuration folder
-    ('aiplam update' links them).
+  - its artifacts that the profile's agent reads, by kind (such as skills), marking those not linked ('aiplam
+    update' links them).
 
 Options:
   --all                   also list the higher-level base folders, nearest first:
@@ -45,7 +43,9 @@ Options:
                               their agents configuration folders too;
                             - the home folder, if it is also being used as a base folder for playbook
                               management: agents always read its agents configuration folders.
-  --json                  print JSON, for other tools (with --all, an array with one item per base folder)
+  --json                  print JSON, for other tools: each profile with its agent, and each playbook's artifacts by
+                          kind, with the folder they are linked from (with --all, an array with one item per base
+                          folder)
   -p, --profile PROFILE   list profile PROFILE instead (default: the enabled profiles)
 
 Examples:
@@ -55,15 +55,14 @@ Examples:
 `
 
 type listOutput struct {
-	Base             string        `json:"base"`
-	Types            []string      `json:"types"`
-	AgentsConfigDirs []string      `json:"agentsConfigurationFolders"`
-	Profiles         []listProfile `json:"profiles"`
+	Base     string        `json:"base"`
+	Profiles []listProfile `json:"profiles"`
 }
 
 type listProfile struct {
 	Name      string         `json:"name"`
 	Enabled   bool           `json:"enabled"`
+	Agent     string         `json:"agent"`
 	Playbooks []listPlaybook `json:"playbooks"`
 }
 
@@ -73,25 +72,25 @@ type listPlaybook struct {
 	Folder    string          `json:"folder"`
 	Version   gitinfo.Version `json:"version"`
 	Label     string          `json:"versionLabel"`
-	Artifacts listArtifacts   `json:"artifacts"`
+	Artifacts []listKind      `json:"artifacts"`
 	Problems  []string        `json:"problems"`
 }
 
-type listArtifacts struct {
-	Skills listSkills `json:"skills"`
+// listKind is a kind of artifact that the profile's agent reads.
+type listKind struct {
+	Kind string `json:"kind"`
+	// Path is the playbook's folder for the kind, relative to its playbook folder, and Folder the same, resolved.
+	Path   string `json:"path"`
+	Folder string `json:"folder"`
+	// LinkFolder is the folder where the agent reads the kind, where the artifacts are linked.
+	LinkFolder string     `json:"linkFolder"`
+	Items      []listItem `json:"items"`
 }
 
-type listSkills struct {
-	Path   string      `json:"path"`
-	Folder string      `json:"folder"`
-	Items  []listSkill `json:"items"`
-}
-
-type listSkill struct {
-	Name      string   `json:"name"`
-	Source    string   `json:"source"`
-	Linked    bool     `json:"linked"`
-	MissingIn []string `json:"missingIn"`
+type listItem struct {
+	Name   string `json:"name"`
+	Source string `json:"source"`
+	Linked bool   `json:"linked"`
 }
 
 func (a *App) cmdList(args []string) error {
@@ -131,9 +130,9 @@ func (a *App) cmdList(args []string) error {
 			failed = true
 			continue
 		}
-		out := listOutput{Base: base, Types: st.conf.Types, AgentsConfigDirs: st.agentsConfigDirs, Profiles: []listProfile{}}
+		out := listOutput{Base: base, Profiles: []listProfile{}}
 		for _, profile := range st.profiles {
-			out.Profiles = append(out.Profiles, a.listProfile(profile, st.agentsConfigDirs))
+			out.Profiles = append(out.Profiles, a.listProfile(profile))
 		}
 		outs = append(outs, out)
 		if !asJSON {
@@ -173,13 +172,9 @@ func (a *App) cmdList(args []string) error {
 }
 
 // printListing prints the listing of a configuration and reports whether any artifact of an enabled profile is not
-// linked from every agents configuration folder.
+// linked.
 func (a *App) printListing(st *state, out listOutput) bool {
-	var folders []string
-	for _, t := range out.AgentsConfigDirs {
-		folders = append(folders, a.pretty(t))
-	}
-	a.printf("Base folder: %s\nAgents configuration folders: %s\n", a.pretty(out.Base), strings.Join(folders, ", "))
+	a.printf("Base folder: %s\n", a.pretty(out.Base))
 	if len(out.Profiles) == 0 {
 		a.printf("\nNo profile is enabled: enable one with '%s' ('%s' lists them).\n", a.hint("profile enable <profile>"),
 			a.hint("profile list"))
@@ -193,7 +188,8 @@ func (a *App) printListing(st *state, out listOutput) bool {
 		if !lprof.Enabled {
 			status = "not enabled"
 		}
-		a.printf("\nProfile %s (%s), %s\n", lprof.Name, a.profileFile(lprof.Name), status)
+		a.printf("\nProfile %s (%s), %s, agent %s (%s): linked from %s\n", lprof.Name, a.profileFile(lprof.Name),
+			status, profile.agent.Name, profile.agent.Product, a.folderList(profile))
 		if !lprof.Enabled {
 			a.printf("Nothing of this profile is linked: %s.\n", a.notEnabledNote(lprof.Name))
 		}
@@ -209,8 +205,7 @@ func (a *App) printListing(st *state, out listOutput) bool {
 	return notLinked
 }
 
-// listPlaybooks prints a profile's playbooks and reports whether any of their artifacts is not linked from every agents
-// configuration folder.
+// listPlaybooks prints a profile's playbooks and reports whether any of their artifacts is not linked.
 func (a *App) listPlaybooks(lprof listProfile) bool {
 	notLinked := false
 	for _, lp := range lprof.Playbooks {
@@ -221,43 +216,42 @@ func (a *App) listPlaybooks(lprof listProfile) bool {
 		for _, problem := range lp.Problems {
 			a.printf("  problem: %s\n", problem)
 		}
-		a.printf("  skills (%s):", lp.Artifacts.Skills.Path)
-		if len(lp.Artifacts.Skills.Items) == 0 {
-			a.printf(" none\n")
-			continue
-		}
-		a.printf("\n")
-		for _, s := range lp.Artifacts.Skills.Items {
-			if s.Linked || !lprof.Enabled {
-				a.printf("    %s\n", s.Name)
+		shown := false
+		for _, lk := range lp.Artifacts {
+			if len(lk.Items) == 0 && lk.Kind != string(config.Skills) {
 				continue
 			}
-			notLinked = true
-			var where []string
-			for _, t := range s.MissingIn {
-				where = append(where, a.pretty(t))
+			shown = true
+			a.printf("  %s (%s):", lk.Kind, lk.Path)
+			if len(lk.Items) == 0 {
+				a.printf(" none\n")
+				continue
 			}
-			a.printf("    %s  (not linked from %s)\n", s.Name, strings.Join(where, ", "))
+			a.printf("\n")
+			for _, it := range lk.Items {
+				if it.Linked || !lprof.Enabled {
+					a.printf("    %s\n", it.Name)
+					continue
+				}
+				notLinked = true
+				a.printf("    %s  (not linked from %s)\n", it.Name, a.pretty(lk.LinkFolder))
+			}
+		}
+		if !shown {
+			a.printf("  artifacts: none for agent %s\n", lprof.Agent)
 		}
 	}
 	return notLinked
 }
 
 // listProfile gathers the information of a profile's playbooks.
-func (a *App) listProfile(profile *profileState, agentsConfigDirs []string) listProfile {
-	lprof := listProfile{Name: profile.name, Enabled: profile.enabled, Playbooks: []listPlaybook{}}
+func (a *App) listProfile(profile *profileState) listProfile {
+	lprof := listProfile{Name: profile.name, Enabled: profile.enabled, Agent: profile.agent.Name,
+		Playbooks: []listPlaybook{}}
 	for _, e := range profile.entries {
-		lp := listPlaybook{ID: e.ID, Name: e.Name, Folder: e.Dir, Problems: []string{},
-			Artifacts: listArtifacts{Skills: listSkills{Path: e.SkillsPath(), Folder: e.SkillsDir,
-				Items: []listSkill{}}}}
-		switch {
-		case !fsutil.IsDir(e.Dir):
-			lp.Problems = append(lp.Problems, fmt.Sprintf("playbook folder '%s' does not exist", e.Dir))
-		case !fsutil.IsDir(e.SkillsDir):
-			lp.Problems = append(lp.Problems, fmt.Sprintf("skills folder '%s' does not exist", e.SkillsDir))
-		case !fsutil.Within(e.SkillsDir, e.Dir):
-			lp.Problems = append(lp.Problems, fmt.Sprintf("skills folder '%s' is outside the playbook folder",
-				e.SkillsDir))
+		lp := listPlaybook{ID: e.ID, Name: e.Name, Folder: e.Dir, Problems: []string{}, Artifacts: []listKind{}}
+		if err := a.checkPlaybookFolders(e, profile.folders); err != nil {
+			lp.Problems = append(lp.Problems, err.Error())
 		}
 		if fsutil.IsDir(e.Dir) {
 			lp.Version = a.version(e.Dir)
@@ -266,26 +260,23 @@ func (a *App) listProfile(profile *profileState, agentsConfigDirs []string) list
 			lp.Version.Tags = []string{}
 		}
 		lp.Label = lp.Version.String()
-		if fsutil.IsDir(e.SkillsDir) {
-			skills, err := playbook.Skills(profile.entries, e)
+		for _, f := range profile.folders {
+			lk := listKind{Kind: string(f.Kind), Path: e.Path(f.Kind, f.DefaultPath), Folder: e.KindDir(f), LinkFolder: f.Dir,
+				Items: []listItem{}}
+			items, err := playbook.Items(profile.entries, e, f)
 			if err != nil {
 				lp.Problems = append(lp.Problems, err.Error())
 			}
-			for _, s := range skills {
-				item := listSkill{Name: s.Name, Source: s.Source, MissingIn: []string{}}
-				for _, t := range agentsConfigDirs {
-					if !profile.enabled {
-						break // a profile that is not enabled has nothing linked
-					}
-					state, current, err := fsutil.Inspect(filepath.Join(playbook.SkillsFolder(t), s.Name))
-					if err != nil || state != fsutil.Link ||
-						!fsutil.SamePath(fsutil.Canonical(current), fsutil.Canonical(s.Source)) {
-						item.MissingIn = append(item.MissingIn, t)
-					}
+			for _, it := range items {
+				linked := false
+				if profile.enabled {
+					state, current, err := fsutil.Inspect(filepath.Join(f.Dir, it.Name))
+					linked = err == nil && state == fsutil.Link &&
+						fsutil.SamePath(fsutil.Canonical(current), fsutil.Canonical(it.Source))
 				}
-				item.Linked = profile.enabled && len(item.MissingIn) == 0
-				lp.Artifacts.Skills.Items = append(lp.Artifacts.Skills.Items, item)
+				lk.Items = append(lk.Items, listItem{Name: it.Name, Source: it.Source, Linked: linked})
 			}
+			lp.Artifacts = append(lp.Artifacts, lk)
 		}
 		lprof.Playbooks = append(lprof.Playbooks, lp)
 	}

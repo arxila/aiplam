@@ -74,9 +74,10 @@ func isLinkMode(mode os.FileMode) bool {
 	return runtime.GOOS == "windows" && mode&os.ModeIrregular != 0
 }
 
-// CreateLink creates a link at link pointing to the folder target: a symbolic link with a relative target on Linux and
-// macOS, a directory junction on Windows (which needs no administrator rights or developer mode, and always holds an
-// absolute target).
+// CreateLink creates a link at link pointing to target, a folder (such as a skill) or a file (such as a subagent): a
+// symbolic link with a relative target on Linux and macOS; on Windows, a directory junction for a folder (which needs
+// no administrator rights or developer mode, and always holds an absolute target) and a symbolic link for a file
+// (which needs developer mode or administrator rights).
 func CreateLink(link, target string) error {
 	return createLink(link, target)
 }
@@ -90,7 +91,7 @@ func RemoveLink(path string) error {
 	if state != Link {
 		return &os.PathError{Op: "remove link", Path: path, Err: errors.New("not a symbolic link or junction")}
 	}
-	// os.Remove deletes a symbolic link itself, and on Windows removes a junction with RemoveDirectory, which does not
-	// touch the target's content. Never use os.RemoveAll here.
+	// os.Remove deletes a symbolic link itself (to a folder or a file), and on Windows removes a junction with
+	// RemoveDirectory, which does not touch the target's content. Never use os.RemoveAll here.
 	return os.Remove(path)
 }

@@ -41,7 +41,7 @@ func TestTestdataPlaybooks(t *testing.T) {
 	linked := func() []string {
 		t.Helper()
 		items, err := os.ReadDir(e.agentsSkills())
-		if err != nil {
+		if err != nil && !os.IsNotExist(err) {
 			t.Fatal(err)
 		}
 		var names []string
@@ -59,13 +59,12 @@ func TestTestdataPlaybooks(t *testing.T) {
 		}
 	}
 
-	e.mustRun(ExitOK, "init", "-g", "--type", "agents,claude")
+	e.mustRun(ExitOK, "init", "-g")
 
-	// Standard layout: only aiplam-lettuce-* folders with a SKILL.md are linked.
+	// Standard layout: only aiplam-lettuce-* folders with a SKILL.md are linked; the standard agent reads only skills.
 	e.mustRun(ExitOK, "add", "aiplam-lettuce", lettuce)
 	expect("aiplam-lettuce-data-clean", "aiplam-lettuce-data-report", "aiplam-lettuce-deploy", "aiplam-lettuce-review")
-	e.assertLink(filepath.Join(e.home, ".claude", "skills", "aiplam-lettuce-review"),
-		filepath.Join(lettuce, "skills", "aiplam-lettuce-review"))
+	e.assertMissing(filepath.Join(e.home, ".agents", "agents"))
 
 	// A longer prefix in the same repository takes over aiplam-lettuce-data-*.
 	e.mustRun(ExitOK, "add", "aiplam-lettuce-data", lettuce)
@@ -118,8 +117,34 @@ func TestTestdataPlaybooks(t *testing.T) {
 	e.mustRun(ExitOK, "add", "aiplam-blueberry", blueberry, "-p", "extra")
 	e.mustRun(ExitOK, "profile", "enable", "extra")
 	expect(all...)
-	e.mustRun(ExitOK, "type", "agents")
-	e.assertMissing(filepath.Join(e.home, ".claude", "skills", "aiplam-lettuce-review"))
+	e.mustRun(ExitOK, "check")
+
+	// A profile for Claude Code links every kind of artifact Claude Code reads, from ~/.claude: it does not collide
+	// with the profiles for the standard agent.
+	claude := filepath.Join(e.home, ".claude")
+	e.mustRun(ExitOK, "profile", "add", "claude", "--agent", "claude")
+	e.mustRun(ExitOK, "add", "aiplam-lettuce", lettuce, "-p", "claude")
+	e.mustRun(ExitOK, "profile", "enable", "claude")
+	e.assertLink(filepath.Join(claude, "skills", "aiplam-lettuce-review"),
+		filepath.Join(lettuce, "skills", "aiplam-lettuce-review"))
+	e.assertLink(filepath.Join(claude, "agents", "aiplam-lettuce-reviewer.md"),
+		filepath.Join(lettuce, "agents", "aiplam-lettuce-reviewer.md"))
+	e.assertLink(filepath.Join(claude, "commands", "aiplam-lettuce-ship.md"),
+		filepath.Join(lettuce, "commands", "aiplam-lettuce-ship.md"))
+	e.assertLink(filepath.Join(claude, "rules", "aiplam-lettuce-style.md"),
+		filepath.Join(lettuce, "rules", "aiplam-lettuce-style.md"))
+	expect(all...)
+
+	// For Copilot instead: its own format, from ~/.copilot; Copilot also reads ~/.agents, hence the warning.
+	_, errOut = e.mustRun(ExitOK, "profile", "agent", "claude", "copilot")
+	if !strings.Contains(errOut, "may be loaded twice") {
+		t.Fatalf("want a warning: %s", errOut)
+	}
+	e.assertMissing(claude)
+	e.assertLink(filepath.Join(e.home, ".copilot", "agents", "aiplam-lettuce-reviewer.agent.md"),
+		filepath.Join(lettuce, "agents", "aiplam-lettuce-reviewer.agent.md"))
+	e.mustRun(ExitOK, "profile", "disable", "claude")
+	e.assertMissing(filepath.Join(e.home, ".copilot"))
 	e.mustRun(ExitOK, "check")
 	_, errOut = e.mustRun(ExitFailure, "remove", tomato) // two playbooks are registered there
 	if !strings.Contains(errOut, "aiplam-tomato of profile default, aiplam-garlic") {
@@ -153,4 +178,5 @@ func TestTestdataPlaybooks(t *testing.T) {
 	e.mustRun(ExitOK, "profile", "disable", "extra")
 	e.mustRun(ExitOK, "remove", "aiplam-tomato")
 	expect()
+	e.assertMissing(filepath.Join(e.home, ".agents")) // removed once empty
 }

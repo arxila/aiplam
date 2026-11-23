@@ -32,9 +32,30 @@ import (
 
 const fsctlSetReparsePoint = 0x000900A4
 
-// createLink creates a directory junction (an NTFS mount point reparse point), which, unlike a symbolic link, needs
-// neither administrator rights nor developer mode. It does what "mklink /J" does, without going through cmd.exe.
-func createLink(link, target string) (err error) {
+// createLink creates a link to a folder as a directory junction, and a link to a file as a symbolic link: junctions
+// cannot point to files, and symbolic links need developer mode (or administrator rights).
+func createLink(link, target string) error {
+	if info, err := os.Stat(target); err == nil && !info.IsDir() {
+		return createFileLink(link, target)
+	}
+	return createJunction(link, target)
+}
+
+// createFileLink creates a symbolic link to a file, with a target relative to the link's folder when possible.
+func createFileLink(link, target string) error {
+	if rel, err := filepath.Rel(Canonical(filepath.Dir(link)), Canonical(target)); err == nil {
+		target = rel
+	}
+	if err := os.Symlink(target, link); err != nil {
+		return fmt.Errorf("%w (links to files, such as subagents or commands, are symbolic links, which on Windows "+
+			"need developer mode or administrator rights)", err)
+	}
+	return nil
+}
+
+// createJunction creates a directory junction (an NTFS mount point reparse point), which, unlike a symbolic link,
+// needs neither administrator rights nor developer mode. It does what "mklink /J" does, without going through cmd.exe.
+func createJunction(link, target string) (err error) {
 	target, err = filepath.Abs(target)
 	if err != nil {
 		return err

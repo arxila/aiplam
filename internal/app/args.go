@@ -46,15 +46,20 @@ func (p parsedArgs) value(name string) string {
 	return ""
 }
 
-// shortOptions maps the short forms of options ("-t", "-sp") to their long names. "-h" (help) is handled apart, and
+// shortOptions maps the short forms of options ("-a", "-sp") to their long names. "-h" (help) is handled apart, and
 // "-p" (profile) is removed by Run before commands parse their arguments.
 var shortOptions = map[string]string{
-	"t":  "type",
-	"sp": "skills-path",
+	"a":   "agent",
+	"sp":  "skills-path",
+	"sap": "subagents-path",
+	"cp":  "commands-path",
+	"pp":  "prompts-path",
+	"rp":  "rules-path",
+	"ip":  "instructions-path",
 }
 
 // parseArgs parses GNU-style options ("--name value", "--name=value", boolean "--name", and the short forms in
-// shortOptions, as "-t value" or "-t=value") mixed with positional arguments; "--" ends the options. valueFlags and
+// shortOptions, as "-a value" or "-a=value") mixed with positional arguments; "--" ends the options. valueFlags and
 // boolFlags list the accepted option names, without dashes.
 func parseArgs(args []string, valueFlags, boolFlags []string) (parsedArgs, error) {
 	isValue := map[string]bool{}

@@ -18,7 +18,9 @@ What each one covers:
 
 - `aiplam-lettuce-playbook`: two overlapping prefixes in one repository, `aiplam-lettuce` and the longer
   `aiplam-lettuce-data`. `skills/aiplam-lettuce-notes` (no `SKILL.md`) and `skills/other-tool` (no registered
-  prefix) are not skills.
+  prefix) are not skills. It also has artifacts of other kinds, which the standard agent ignores: a subagent in two
+  formats (`agents/aiplam-lettuce-reviewer.md`, and `.agent.md` for Copilot), a command
+  (`commands/aiplam-lettuce-ship.md`) and a rule (`rules/aiplam-lettuce-style.md`).
 - `aiplam-tomato-playbook`: skills at the root of the repository, with two unrelated prefixes (`aiplam-tomato` and
   `aiplam-garlic`); `docs/` is not a skill.
 - `aiplam-lettuce-fork`: the name `aiplam-lettuce` from a second playbook folder, with a custom skills path.
@@ -28,13 +30,13 @@ What each one covers:
 ## Trying them
 
 `make sandbox` builds aiplam and opens a shell where `HOME` is a new temporary folder (the real `~/.aiplam`,
-`~/.agents` and `~/.claude` are not touched), with copies of these playbooks in `~/playbooks`. In the copies,
+`~/.agents`, `~/.claude` and so on are not touched), with copies of these playbooks in `~/playbooks`. In the copies,
 `aiplam-lettuce-playbook` is a git repository with tags `v1.0.0` (without `aiplam-lettuce-data-report`) and `v1.1.0`,
 and `aiplam-tomato-playbook` is a git repository on branch `main`; the others are plain folders (version `unknown`).
 
 ```bash
 cd ~/playbooks
-aiplam init --global --type agents,claude
+aiplam init --global                                      # a profile for the standard agent: ~/.agents
 
 # 4 skills
 aiplam add aiplam-lettuce aiplam-lettuce-playbook
@@ -71,13 +73,18 @@ aiplam add aiplam-blueberry aiplam-blueberry-playbook -p extra
 aiplam profile enable extra
 aiplam list
 
-# a single type: the enabled profiles' playbooks are unlinked from ~/.claude
-aiplam type agents
+# a profile for Claude Code: skills, subagent, command and rule linked from ~/.claude, with no collision
+aiplam profile add claude --agent claude
+aiplam add aiplam-lettuce aiplam-lettuce-playbook -p claude
+aiplam profile enable claude
+# for Copilot instead: the .agent.md subagent, from ~/.copilot; warns that Copilot also reads ~/.agents
+aiplam profile agent claude copilot
+aiplam profile disable claude                             # ~/.copilot is removed once empty
 
 # a project base folder, used by the commands run anywhere inside the base folder ~/projects/demo
 mkdir -p ~/projects/demo/module && cd ~/projects/demo
 git init -q                                               # init then suggests what to add to .gitignore
-aiplam init .                                             # .aiplam and .agents in ~/projects/demo
+aiplam init .                                             # .aiplam in ~/projects/demo
 aiplam add aiplam-garlic ~/playbooks/aiplam-tomato-playbook -sp .   # fails: already linked from ~/.agents
 aiplam remove aiplam-garlic --global
 aiplam add aiplam-garlic ~/playbooks/aiplam-tomato-playbook -sp .   # linked from ~/projects/demo/.agents

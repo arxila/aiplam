@@ -25,6 +25,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"arxila.io/aiplam/internal/config"
@@ -67,7 +68,6 @@ type App struct {
 	baseArg     string // the folder given with --base, or ""
 	global      bool   // whether --global was given
 	baseShown   bool   // whether the "Base folder: ..." line has been printed
-	ancestors   map[string][]string
 	gitWarned   bool
 	hintProfile string // the profile to name with --profile in suggested commands, when it is not the enabled one
 }
@@ -99,16 +99,14 @@ var commands []command
 
 func init() {
 	commands = []command{
-		{"init", "set up a base folder: its .aiplam folder, agents configuration folders and first profile", initUsage,
-			(*App).cmdInit},
+		{"init", "set up a base folder: its .aiplam folder and first profile", initUsage, (*App).cmdInit},
 		{"add", "register a playbook and link its artifacts", addUsage, (*App).cmdAdd},
 		{"update", "link new artifacts of a playbook and unlink deleted ones", updateUsage, (*App).cmdUpdate},
 		{"remove", "unlink a playbook's artifacts and unregister it", removeUsage, (*App).cmdRemove},
 		{"list", "list registered playbooks, their versions and artifacts", listUsage, (*App).cmdList},
 		{"check", "check the configuration and whether any update is needed", checkUsage, (*App).cmdCheck},
-		{"profile", "manage profiles (groups of playbooks): create, remove, enable, disable, switch", profileUsage,
-			(*App).cmdProfile},
-		{"type", "show or change the types of agents configuration folders", typeUsage, (*App).cmdType},
+		{"profile", "manage profiles (groups of playbooks for an agent): create, remove, enable, disable, switch, " +
+			"change agent", profileUsage, (*App).cmdProfile},
 	}
 }
 
@@ -116,7 +114,8 @@ func (a *App) mainUsage() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "aiplam %s - AI Playbook Manager\n%s\n\n", Version, Copyright)
 	b.WriteString(`Links the artifacts of AI playbooks (git checkouts shared by a team), such as skills, from the agents
-configuration folders that coding agents read (.agents, .claude): symbolic links, or directory junctions on Windows.
+configuration folders that coding agents read (.agents, .claude, .github, ...): symbolic links (on Windows,
+directory junctions for folders, and symbolic links for files, which need developer mode).
 
 Usage: aiplam <command> [arguments]
 
@@ -130,12 +129,18 @@ How it works:
   - a base folder is the home folder, or a folder where agent sessions may start (such as a project's top folder),
     that holds:
       - a .aiplam folder, with aiplam's configuration for that base folder;
-      - agents configuration folders, the ones agents read: .agents, .claude;
+      - agents configuration folders, the ones agents read: .agents, .claude, .github, ...;
   - commands use the nearest base folder from the current folder up, or else the home folder;
-  - aiplam links the playbooks' artifacts from the agents configuration folders of the chosen types, so updating
-    a playbook only takes switching its checkout to another tag and running 'aiplam update';
-  - playbooks are registered in profiles, and only the playbooks of the enabled profiles are linked.
+  - aiplam links the playbooks' artifacts (skills, subagents, commands, prompts, rules, instructions) that an agent
+    reads, in its format, from the agents configuration folders that agent reads, so updating a playbook only takes
+    switching its checkout to another tag and running 'aiplam update';
+  - playbooks are registered in profiles, each for one agent, and only the playbooks of the enabled profiles are
+    linked; several profiles can be enabled, for the same agent or for different ones.
 
+`)
+	b.WriteString("Agents: " + strings.Join(config.AgentNames(), ", ") + " (default: " + config.DefaultAgent +
+		").\n'aiplam profile --help' shows the kinds of artifacts each one reads, and from where.\n")
+	b.WriteString(`
 Options for every command:
   -b, --base <basefolder>   use <basefolder> as base folder
   -g, --global              use the user's home folder (e.g. /home/username) as base folder
@@ -143,12 +148,35 @@ Option for add, update, remove, list and check:
   -p, --profile PROFILE     act on profile PROFILE instead of the enabled ones
 
 Getting started:
-  aiplam init --global                                # ~ as base folder: ~/.aiplam and ~/.agents
+  aiplam init --global                                # ~ as base folder, with a profile for the standard agent
   aiplam add arxila ~/Workspace/arxila-ai-playbook    # register a playbook and link its artifacts
   aiplam list
 
 Run 'aiplam <command> --help' for a command's help, and 'aiplam --version' for the version.
 `)
+	return b.String()
+}
+
+// agentsHelp describes the agents and the kinds of artifacts each one reads, from the agents table.
+func agentsHelp() string {
+	var b strings.Builder
+	where := func(p config.Place, prefix string) string {
+		if p.IsZero() {
+			return "not in the home folder"
+		}
+		return prefix + p.Dir + "/" + p.Sub
+	}
+	for _, ag := range config.AgentTable {
+		fmt.Fprintf(&b, "  %-9s %s\n", ag.Name, ag.Product)
+		for _, k := range ag.SupportedKinds() {
+			s := ag.Kinds[k]
+			format := s.Format.Ext + " files"
+			if s.Format.File != "" {
+				format = "folders with a " + s.Format.File
+			}
+			fmt.Fprintf(&b, "    %-13s %s, %s (%s)\n", k, where(s.Project, ""), where(s.Home, "~/"), format)
+		}
+	}
 	return b.String()
 }
 
@@ -159,7 +187,7 @@ func (a *App) Run(args []string) int {
 		return a.exitCode(err, a.mainUsage())
 	}
 	a.Profile, a.baseArg, a.global = opts.profile, opts.base, opts.global
-	a.Base, a.baseShown, a.ancestors, a.hintProfile = "", false, nil, ""
+	a.Base, a.baseShown, a.hintProfile = "", false, ""
 	if len(args) == 0 {
 		fmt.Fprint(a.Stderr, a.mainUsage())
 		return ExitUsage
@@ -305,31 +333,17 @@ func (a *App) baseOption() string {
 	return ""
 }
 
-// ancestorAgentsConfigDirs maps each agents configuration folder the base folder can have (one per type) to the agents
-// configuration folders of the same type of the higher-level base folders (see config.Ancestors), which agents may
-// read besides the base folder's: artifacts in them cannot be linked from its folder of that type. A configuration
-// that cannot be read is skipped with a warning.
-func (a *App) ancestorAgentsConfigDirs() map[string][]string {
-	if a.ancestors != nil {
-		return a.ancestors
-	}
-	a.ancestors = map[string][]string{}
-	for _, r := range config.Ancestors(a.Base, a.Home) {
-		conf, err := config.LoadBaseConfig(r)
-		if err == nil && len(conf.Validate()) > 0 {
-			err = errors.New("its content is not valid")
-		}
-		if err != nil {
-			a.warnf("the configuration of base folder '%s' cannot be read (%s): its agents configuration folders are not "+
-				"checked for artifacts already linked from them.", a.pretty(r), err)
-			continue
-		}
-		for _, t := range conf.Types {
-			own := config.AgentsConfigDirs([]string{t}, a.Base)[0]
-			a.ancestors[own] = append(a.ancestors[own], config.AgentsConfigDirs([]string{t}, r)[0])
-		}
-	}
-	return a.ancestors
+// isHome reports whether the base folder is the home folder, whose agents configuration folders can differ from those
+// of other base folders.
+func (a *App) isHome() bool {
+	return fsutil.SamePath(a.Base, fsutil.Canonical(a.Home))
+}
+
+// markAncestors turns into conflicts the creations of a plan whose artifact already exists where the same agent reads
+// the same kind of artifact in a higher-level base folder (see config.Ancestors), which agents may read besides the
+// base folder's.
+func (a *App) markAncestors(plan *playbook.Plan) {
+	playbook.MarkAncestors(plan, config.Ancestors(a.Base, a.Home), fsutil.Canonical(a.Home))
 }
 
 // errSilent signals a failure whose messages have already been printed.
@@ -473,27 +487,49 @@ func (a *App) notInitialized() error {
 type profileState struct {
 	name    string
 	prof    *config.Profile
-	enabled bool             // whether it is enabled (linked from the agents configuration folders)
-	entries []playbook.Entry // its playbooks
+	agent   config.Agent
+	folders []config.KindFolder // where its agent reads artifacts in the base folder
+	enabled bool                // whether it is enabled (linked from the agents configuration folders)
+	entries []playbook.Entry    // its playbooks
+}
+
+// group returns the profile's playbooks and the folders where their artifacts are linked.
+func (s *profileState) group() playbook.Group {
+	return playbook.Group{Profile: s.name, Entries: s.entries, Folders: s.folders}
+}
+
+// newProfileState builds the state of a loaded (valid) profile.
+func (a *App) newProfileState(name string, prof *config.Profile, enabled bool) *profileState {
+	agent, _ := config.LookupAgent(prof.Agent)
+	return &profileState{name: name, prof: prof, agent: agent, folders: agent.KindFolders(a.Base, a.isHome()),
+		enabled: enabled, entries: playbook.Entries(name, prof.Playbooks, a.Base)}
+}
+
+// groups returns the groups of profiles.
+func groups(profiles []*profileState) []playbook.Group {
+	var g []playbook.Group
+	for _, s := range profiles {
+		g = append(g, s.group())
+	}
+	return g
 }
 
 // state is what commands that act on profiles work with.
 type state struct {
-	conf             *config.BaseConfig
-	agentsConfigDirs []string
-	profiles         []*profileState // the profiles acted on: the one given with --profile, or the enabled ones
-	enabled          []*profileState // every enabled profile
+	conf     *config.BaseConfig
+	profiles []*profileState // the profiles acted on: the one given with --profile, or the enabled ones
+	enabled  []*profileState // every enabled profile
 }
 
-// others returns the entries of the enabled profiles other than profile, one slice per profile.
-func (st *state) others(profile string) [][]playbook.Entry {
-	var others [][]playbook.Entry
+// others returns the enabled profiles other than profile.
+func (st *state) others(profile string) []playbook.Group {
+	var others []*profileState
 	for _, s := range st.enabled {
 		if s.name != profile {
-			others = append(others, s.entries)
+			others = append(others, s)
 		}
 	}
-	return others
+	return groups(others)
 }
 
 // entries returns the playbooks of the profiles acted on.
@@ -527,7 +563,7 @@ func (a *App) load() (*state, error) {
 	if err != nil {
 		return nil, err
 	}
-	st := &state{conf: conf, agentsConfigDirs: conf.AgentsConfigDirs(a.Base)}
+	st := &state{conf: conf}
 	for _, name := range conf.Enabled {
 		if !config.ProfileExists(a.Base, name) {
 			return nil, fmt.Errorf("the enabled profile '%s' does not exist (%s is missing): disable it with '%s', or "+
@@ -567,8 +603,7 @@ func (a *App) loadProfileState(name string, enabled bool) (*profileState, error)
 	if err != nil {
 		return nil, err
 	}
-	return &profileState{name: name, prof: prof, enabled: enabled,
-		entries: playbook.Entries(name, prof.Playbooks, a.Base)}, nil
+	return a.newProfileState(name, prof, enabled), nil
 }
 
 // useProfile makes the commands suggested from now on name profile with --profile, unless it is the only enabled
@@ -601,8 +636,8 @@ func (a *App) loadProfile(profile string) (*config.Profile, error) {
 
 // notEnabledNote explains that a profile's playbooks are not linked.
 func (a *App) notEnabledNote(profile string) string {
-	return fmt.Sprintf("profile '%s' is not enabled (its playbooks are linked from the agents configuration folders "+
-		"when it is enabled with '%s')", profile, a.hint("profile enable "+profile))
+	return fmt.Sprintf("profile '%s' is not enabled (its playbooks are linked for its agent when it is enabled with "+
+		"'%s')", profile, a.hint("profile enable "+profile))
 }
 
 // profileNames returns the names of profiles, separated by commas.
@@ -727,6 +762,78 @@ func (a *App) printAction(act playbook.Action) {
 	}
 }
 
+// cleanup removes the folders that the removals of an applied plan left empty, printing each one.
+func (a *App) cleanup(plan playbook.Plan) {
+	playbook.Cleanup(plan, func(dir string) { a.printf("  - %s (empty folder removed)\n", a.pretty(dir)) })
+}
+
+// folderList describes where the profile's agent reads artifacts in the base folder: "~/.claude/skills,
+// ~/.claude/agents, ...".
+func (a *App) folderList(s *profileState) string {
+	var dirs []string
+	for _, f := range s.folders {
+		dirs = append(dirs, a.pretty(f.Dir))
+	}
+	if len(dirs) == 0 {
+		return "none"
+	}
+	return strings.Join(dirs, ", ")
+}
+
+// warnDoubleLoads warns about artifacts that agents may load twice: those linked by an enabled profile for an agent
+// that also reads the standard agent's folders, and by another enabled profile from those folders.
+func (a *App) warnDoubleLoads(profiles []*profileState) {
+	standard, _ := config.LookupAgent(config.DefaultAgent)
+	names := func(s *profileState, kind config.Kind) map[string]bool {
+		found := map[string]bool{}
+		for _, f := range s.folders {
+			if f.Kind != kind {
+				continue
+			}
+			for _, e := range s.entries {
+				items, _ := playbook.Items(s.entries, e, f)
+				for _, it := range items {
+					found[it.Name] = true
+				}
+			}
+		}
+		return found
+	}
+	for _, p := range profiles {
+		for _, kind := range p.agent.ReadsStandard {
+			std, ok := standard.Place(kind, a.isHome())
+			own, ownOK := p.agent.Place(kind, a.isHome())
+			if !ok || !ownOK || own == std {
+				continue
+			}
+			mine := names(p, kind)
+			for _, q := range profiles {
+				if place, ok := q.agent.Place(kind, a.isHome()); q == p || !ok || place != std {
+					continue
+				}
+				var both []string
+				for name := range names(q, kind) {
+					if mine[name] {
+						both = append(both, name)
+					}
+				}
+				if len(both) == 0 {
+					continue
+				}
+				sort.Strings(both)
+				what, verb, pronoun := kind.Singular()+" "+both[0], "is", "it"
+				if len(both) > 1 {
+					what, verb, pronoun = string(kind)+" "+strings.Join(both, ", "), "are", "they"
+				}
+				a.warnf("%s %s linked for agent %s (profile %s) and, by profile %s, from %s, which %s also reads: %s may "+
+					"be loaded twice; check how %s handles that.", what, verb, p.agent.Name, p.name, q.name,
+					a.pretty(filepath.Join(a.Base, filepath.FromSlash(std.Dir), filepath.FromSlash(std.Sub))),
+					p.agent.Name, pronoun, p.agent.Product)
+			}
+		}
+	}
+}
+
 // conflictAdvice says how to resolve the conflicts of a plan: "remove or rename what is in the way, then try again",
 // and, for artifacts linked by a higher-level base folder, that they must be removed there first.
 func (a *App) conflictAdvice(plan playbook.Plan) string {
@@ -785,26 +892,43 @@ func (a *App) conflictText(c playbook.Action) string {
 	case playbook.Exists:
 		why = fmt.Sprintf("'%s' already exists", a.pretty(c.Link))
 	case playbook.Ancestor:
-		why = fmt.Sprintf("'%s' already exists in an agents configuration folder of the same type of a "+
-			"higher-level base folder, and agents reading both would see it twice", a.pretty(c.Current))
+		why = fmt.Sprintf("'%s' already exists where agent %s reads it in a higher-level base folder, and agents "+
+			"reading both would see it twice", a.pretty(c.Current), c.Agent)
 	default:
 		why = fmt.Sprintf("'%s' already exists and is not a link", a.pretty(c.Link))
 	}
-	return fmt.Sprintf("%s %s: %s", c.Artifact, c.Name, why)
+	return fmt.Sprintf("%s %s: %s", c.Artifact.Singular(), c.Name, why)
 }
 
-// checkPlaybookFolders returns an error when a playbook folder or skills folder is missing, or its skills folder
-// lies outside its folder (through a link).
-func (a *App) checkPlaybookFolders(e playbook.Entry) error {
-	switch {
-	case !fsutil.IsDir(e.Dir):
+// checkPlaybookFolders returns an error when a playbook folder is missing, when an artifact folder set for a kind is
+// missing, or when one of the playbook's artifact folders (those set, and those for the kind folders of its profile's
+// agent, given in folders) lies outside the playbook folder (through a link).
+func (a *App) checkPlaybookFolders(e playbook.Entry, folders []config.KindFolder) error {
+	if !fsutil.IsDir(e.Dir) {
 		return fmt.Errorf("playbook %s: playbook folder '%s' does not exist; restore it, or unregister the playbook "+
 			"with '%s'", e.ID, a.pretty(e.Dir), a.cmd("remove "+e.ID))
-	case !fsutil.IsDir(e.SkillsDir):
-		return fmt.Errorf("playbook %s: skills folder '%s' does not exist", e.ID, a.pretty(e.SkillsDir))
-	case !fsutil.Within(e.SkillsDir, e.Dir):
-		return fmt.Errorf("playbook %s: skills folder '%s' is outside the playbook folder '%s' (through a link)", e.ID,
-			a.pretty(e.SkillsDir), a.pretty(e.Dir))
+	}
+	check := func(kind config.Kind, dir string, set bool) error {
+		switch {
+		case !fsutil.IsDir(dir) && set:
+			return fmt.Errorf("playbook %s: %s folder '%s' does not exist", e.ID, kind, a.pretty(dir))
+		case fsutil.IsDir(dir) && !fsutil.Within(dir, e.Dir):
+			return fmt.Errorf("playbook %s: %s folder '%s' is outside the playbook folder '%s' (through a link)", e.ID,
+				kind, a.pretty(dir), a.pretty(e.Dir))
+		}
+		return nil
+	}
+	for _, k := range config.Kinds {
+		if e.PathSet(k) {
+			if err := check(k, e.PathDir(e.Artifacts.Kind(k).Path), true); err != nil {
+				return err
+			}
+		}
+	}
+	for _, f := range folders {
+		if err := check(f.Kind, e.KindDir(f), false); err != nil {
+			return err
+		}
 	}
 	return nil
 }

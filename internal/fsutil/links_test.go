@@ -21,6 +21,7 @@ package fsutil
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -83,6 +84,27 @@ func TestLinks(t *testing.T) {
 	}
 	if err := RemoveLink(link); err != nil {
 		t.Fatal(err)
+	}
+
+	// Links to files (on Windows, symbolic links, which need developer mode or administrator rights).
+	fileLink := filepath.Join(root, "file-link.md")
+	if err := CreateLink(fileLink, content); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symbolic links to files are not allowed here: %v", err)
+		}
+		t.Fatal(err)
+	}
+	if state, current, err := Inspect(fileLink); err != nil || state != Link || !SamePath(current, content) {
+		t.Fatalf("file link: state %v -> %q, err %v", state, current, err)
+	}
+	if !IsFile(fileLink) {
+		t.Fatal("the link does not give access to the file")
+	}
+	if err := RemoveLink(fileLink); err != nil {
+		t.Fatal(err)
+	}
+	if !IsFile(content) {
+		t.Fatal("removing the link removed the file")
 	}
 }
 
