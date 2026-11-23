@@ -1273,8 +1273,8 @@ func TestBaseFolders(t *testing.T) {
 	// A project configuration, found from its subfolders.
 	out, _ = e.mustRun(ExitOK, "init", project)
 	if strings.Contains(out, "git repository") ||
-		!strings.Contains(out, "the home folder is also being used as a base folder for playbook management, and "+
-			"agents always read") {
+		!strings.Contains(out, "the home folder at "+e.home+string(filepath.Separator)+
+			" is also being used as a base folder for playbook management, and agents always read") {
 		t.Fatalf("unexpected notes: %s", out) // not inside a repository; outside home, so home is a higher-level base folder
 	}
 	if fsutil.IsDir(filepath.Join(project, ".agents")) || fsutil.IsDir(filepath.Join(project, ".claude")) {

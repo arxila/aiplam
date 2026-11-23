@@ -172,14 +172,15 @@ func (a *App) printHigherLevels() {
 		}
 	}
 	const rule = "artifacts already linked there for an agent cannot be linked here for the same agent"
+	homeDir := strings.TrimSuffix(a.Home, string(filepath.Separator)) + string(filepath.Separator)
 	switch {
 	case home && len(between) == 0:
-		a.printf("Note: the home folder is also being used as a base folder for playbook management, and agents "+
-			"always read its agents configuration folders: %s.\n", rule)
+		a.printf("Note: the home folder at %s is also being used as a base folder for playbook management, and "+
+			"agents always read its agents configuration folders: %s.\n", homeDir, rule)
 	case home:
-		a.printf("Note: higher-level base folders exist: the home folder, whose agents configuration folders agents "+
-			"always read, and %s, whose agents configuration folders some agents read too: %s.\n",
-			strings.Join(between, ", "), rule)
+		a.printf("Note: higher-level base folders exist: the home folder at %s, whose agents configuration folders "+
+			"agents always read, and %s, whose agents configuration folders some agents read too: %s.\n",
+			homeDir, strings.Join(between, ", "), rule)
 	case len(between) > 0:
 		a.printf("Note: higher-level base folders exist (%s), and some agents read their agents configuration "+
 			"folders too: %s.\n", strings.Join(between, ", "), rule)
