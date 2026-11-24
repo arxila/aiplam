@@ -27,6 +27,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -241,6 +242,9 @@ func (a *App) Run(args []string) int {
 					return ExitOK
 				}
 			}
+			a.errorf("unknown command: %s", args[1])
+			fmt.Fprint(a.Stderr, "\n"+a.mainUsage())
+			return ExitUsage
 		}
 		fmt.Fprint(a.Stdout, a.mainUsage())
 		return ExitOK
@@ -622,6 +626,7 @@ type state struct {
 	conf     *config.BaseConfig
 	profiles []*profileState // the profiles acted on: the one given with --profile, or the enabled ones
 	enabled  []*profileState // every enabled profile
+	missing  []string        // the enabled profiles whose file is missing (only with loadSkippingMissing)
 }
 
 // others returns the enabled profiles other than profile.
@@ -662,6 +667,16 @@ func (a *App) profileFile(profile string) string {
 // load loads the base folder's configuration, every enabled profile, and the profile given with --profile (which must
 // exist). It fails when any of them is missing or not valid.
 func (a *App) load() (*state, error) {
+	return a.loadProfiles(false)
+}
+
+// loadSkippingMissing is load for commands that only read: an enabled profile whose file is missing is left out, with
+// a warning, and recorded in the state's missing profiles.
+func (a *App) loadSkippingMissing() (*state, error) {
+	return a.loadProfiles(true)
+}
+
+func (a *App) loadProfiles(skipMissing bool) (*state, error) {
 	conf, err := a.loadBaseConfig()
 	if err != nil {
 		return nil, err
@@ -669,9 +684,15 @@ func (a *App) load() (*state, error) {
 	st := &state{conf: conf}
 	for _, name := range conf.Enabled {
 		if !config.ProfileExists(a.Base, name) {
-			return nil, fmt.Errorf("the enabled profile '%s' does not exist (%s is missing): disable it with '%s', or "+
+			missing := fmt.Sprintf("the enabled profile '%s' does not exist (%s is missing): disable it with '%s', or "+
 				"create it again with '%s'", name, a.profileFile(name), a.hint("profile disable "+name),
 				a.hint("profile add "+name+" <agent>"))
+			if !skipMissing {
+				return nil, errors.New(missing)
+			}
+			a.warnf("%s.", missing)
+			st.missing = append(st.missing, name)
+			continue
 		}
 		s, err := a.loadProfileState(name, true)
 		if err != nil {
@@ -937,27 +958,34 @@ func (a *App) warnDoubleLoads(profiles []*profileState) {
 	}
 }
 
-// conflictAdvice says how to resolve the conflicts of a plan: "remove or rename what is in the way, then try again",
-// and, for artifacts linked by a higher-level base folder, that they must be removed there first.
+// Advice for each kind of conflict (see conflictAdvice).
+const (
+	adviceInTheWay  = "remove or rename what is in the way"
+	adviceProviders = "unregister one of the playbooks that provide the same artifact, or rename it in one of them"
+	adviceAncestor  = "remove from the higher-level base folder the artifacts it already links (with 'aiplam remove " +
+		"... --base <basefolder>'; 'aiplam list --all' lists them)"
+)
+
+// conflictAdvice says how to resolve the conflicts of a plan, for each kind of conflict it has: what is in the way of
+// a link, other playbooks providing the same artifact, and artifacts linked by a higher-level base folder.
 func (a *App) conflictAdvice(plan playbook.Plan) string {
 	var advice []string
-	if hasConflictsOtherThan(plan, playbook.Ancestor) {
-		advice = append(advice, "remove or rename what is in the way")
+	if hasConflicts(plan, playbook.NotLink, playbook.OtherLink, playbook.Exists) {
+		advice = append(advice, adviceInTheWay)
 	}
-	for _, c := range plan.Conflicts() {
-		if c.Cause == playbook.Ancestor {
-			advice = append(advice, "remove from the higher-level base folder the artifacts it already links "+
-				"(with 'aiplam remove ... --base <basefolder>'; 'aiplam list --all' lists them)")
-			break
-		}
+	if hasConflicts(plan, playbook.OtherProvider) {
+		advice = append(advice, adviceProviders)
+	}
+	if hasConflicts(plan, playbook.Ancestor) {
+		advice = append(advice, adviceAncestor)
 	}
 	return strings.Join(advice, ", and ") + ", then try again"
 }
 
-// hasConflictsOtherThan reports whether plan has conflicts with a cause other than cause.
-func hasConflictsOtherThan(plan playbook.Plan, cause playbook.ConflictCause) bool {
+// hasConflicts reports whether plan has conflicts with any of causes.
+func hasConflicts(plan playbook.Plan, causes ...playbook.ConflictCause) bool {
 	for _, c := range plan.Conflicts() {
-		if c.Cause != cause {
+		if slices.Contains(causes, c.Cause) {
 			return true
 		}
 	}

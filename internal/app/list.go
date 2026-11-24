@@ -51,6 +51,8 @@ Options:
                           folder)
   -p, --profile PROFILE   list profile PROFILE instead (default: the enabled profiles)
 
+An enabled profile whose file is missing is left out, with a warning ('aiplam check' reports it too).
+
 Examples:
   aiplam list
   aiplam list --all
@@ -60,6 +62,8 @@ Examples:
 type listOutput struct {
 	Base     string        `json:"base"`
 	Profiles []listProfile `json:"profiles"`
+	// MissingProfiles are the enabled profiles whose file is missing: they are left out, with a warning.
+	MissingProfiles []string `json:"missingProfiles,omitempty"`
 }
 
 type listProfile struct {
@@ -124,7 +128,7 @@ func (a *App) cmdList(args []string) error {
 			// Commands suggested for a higher-level base folder must name it.
 			a.Base, a.baseArg, a.global = base, base, false
 		}
-		st, err := a.load()
+		st, err := a.loadSkippingMissing()
 		if err != nil && i == 0 {
 			return err
 		}
@@ -136,7 +140,7 @@ func (a *App) cmdList(args []string) error {
 			failed = true
 			continue
 		}
-		out := listOutput{Base: base, Profiles: []listProfile{}}
+		out := listOutput{Base: base, Profiles: []listProfile{}, MissingProfiles: st.missing}
 		for _, profile := range st.profiles {
 			out.Profiles = append(out.Profiles, a.listProfile(profile))
 		}
@@ -181,6 +185,10 @@ func (a *App) cmdList(args []string) error {
 // linked.
 func (a *App) printListing(st *state, out listOutput) bool {
 	a.printf("Base folder: %s\n", a.pretty(out.Base))
+	if len(out.Profiles) == 0 && len(st.missing) > 0 {
+		a.printf("\nNone of the enabled profiles exists (see the warnings above).\n")
+		return false
+	}
 	if len(out.Profiles) == 0 {
 		a.printf("\nNo profile is enabled: enable one with '%s' ('%s' lists them).\n", a.hint("profile enable <profile>"),
 			a.hint("profile list"))

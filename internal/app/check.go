@@ -211,6 +211,18 @@ func (a *App) checkPlaybook(st *state, profile *profileState, e playbook.Entry, 
 	a.printf("Playbook %s (%s) at %s\n", e.ID, a.version(e.Dir), a.pretty(e.Dir))
 	if err := a.checkPlaybookFolders(e, profile.folders); err != nil {
 		problem("%s", err)
+		// Its links are covered by this problem (removing the playbook removes them): they are not reported again as
+		// broken links that no playbook manages.
+		for _, f := range profile.folders {
+			items, _ := os.ReadDir(f.Dir)
+			for _, item := range items {
+				link := filepath.Join(f.Dir, item.Name())
+				if state, current, err := fsutil.Inspect(link); err == nil && state == fsutil.Link &&
+					strings.HasPrefix(item.Name(), e.Name+"-") && fsutil.Within(current, e.Dir) {
+					reported[link] = true
+				}
+			}
+		}
 		return
 	}
 	if !profile.enabled {

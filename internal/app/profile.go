@@ -428,9 +428,11 @@ func (a *App) changeProfiles(conf, updated *config.BaseConfig, removed, added, s
 	if len(plan.Conflicts()) > 0 {
 		a.printConflicts(plan)
 		advice := a.conflictAdvice(plan)
-		if hasConflictsOtherThan(plan, playbook.Ancestor) {
+		if hasConflicts(plan, playbook.NotLink, playbook.OtherLink, playbook.Exists, playbook.OtherProvider) {
 			advice = "profiles enabled together cannot collide, so every link of a profile being enabled must be new; " +
-				strings.Replace(advice, "what is in the way", "what is in the way (or disable the profile that provides it)", 1)
+				strings.Replace(strings.Replace(advice, adviceInTheWay, adviceInTheWay+" (or disable the profile "+
+					"that provides it)", 1), adviceProviders, "disable the other profile that provides the same "+
+					"artifact, or unregister its playbook or rename the artifact in one of the profiles", 1)
 		}
 		a.errorf("nothing was changed: %s.", advice)
 		return errSilent

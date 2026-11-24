@@ -347,7 +347,9 @@ func TestSameNameInSeveralFolders(t *testing.T) {
 	e.skill(filepath.Join(a, "skills"), "x-dup")
 	e.skill(filepath.Join(b, "skills"), "x-dup")
 	_, errOut = e.mustRun(ExitFailure, "update", "x@pb-a")
-	if !strings.Contains(errOut, "also provided by playbook x@pb-b") {
+	if !strings.Contains(errOut, "also provided by playbook x@pb-b") ||
+		!strings.Contains(errOut, "unregister one of the playbooks that provide the same artifact") ||
+		strings.Contains(errOut, "what is in the way") {
 		t.Fatalf("unexpected message: %s", errOut)
 	}
 
@@ -1728,4 +1730,94 @@ func TestSandbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.mustRun(ExitOK, "init", project, "standard")
+}
+
+func TestCheckMissingPlaybookFolder(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init", "-g", "standard")
+	pb := e.playbook("pb", "x-a")
+	e.mustRun(ExitOK, "add", "x", pb)
+	if err := os.Rename(pb, pb+"-moved"); err != nil {
+		t.Fatal(err)
+	}
+	_, errOut := e.mustRun(ExitFailure, "check")
+	if !strings.Contains(errOut, "playbook folder '"+pb+"' does not exist") ||
+		strings.Contains(errOut, "not managed by any registered playbook") {
+		t.Fatalf("unexpected message: %s", errOut)
+	}
+	// Removing the playbook removes its broken links.
+	e.mustRun(ExitOK, "remove", "x")
+	e.assertMissing(filepath.Join(e.agentsSkills(), "x-a"))
+	e.mustRun(ExitOK, "check")
+}
+
+func TestListMissingEnabledProfile(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init", "-g", "standard")
+	e.mustRun(ExitOK, "add", "x", e.playbook("pb", "x-a"))
+	if err := config.SaveBaseConfig(e.home, &config.BaseConfig{Enabled: []string{"default", "ghost"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	// list warns, and lists the other enabled profiles.
+	out, errOut := e.mustRun(ExitOK, "list")
+	if !strings.Contains(errOut, "WARNING: the enabled profile 'ghost' does not exist") ||
+		!strings.Contains(errOut, "'aiplam profile disable ghost'") || !strings.Contains(out, "Profile default") ||
+		!strings.Contains(out, "x-a") {
+		t.Fatalf("unexpected list: %s\n%s", out, errOut)
+	}
+	out, _ = e.mustRun(ExitOK, "list", "--json")
+	var listed listOutput
+	if err := json.Unmarshal([]byte(out), &listed); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(listed.MissingProfiles, ",") != "ghost" || len(listed.Profiles) != 1 {
+		t.Fatalf("unexpected JSON: %s", out)
+	}
+
+	// Commands that change links still fail: the missing profile's links cannot be accounted for.
+	e.mustRun(ExitFailure, "update", "--all")
+
+	if err := config.SaveBaseConfig(e.home, &config.BaseConfig{Enabled: []string{"ghost"}}); err != nil {
+		t.Fatal(err)
+	}
+	out, _ = e.mustRun(ExitOK, "list")
+	if !strings.Contains(out, "None of the enabled profiles exists") || strings.Contains(out, "No profile is enabled") {
+		t.Fatalf("unexpected list: %s", out)
+	}
+}
+
+func TestInitEdgeCases(t *testing.T) {
+	e := newEnv(t)
+	file := filepath.Join(e.root, "afile")
+	if err := os.WriteFile(file, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, errOut := e.mustRun(ExitFailure, "init", file, "claude")
+	if !strings.Contains(errOut, "is not a folder") {
+		t.Fatalf("unexpected message: %s", errOut)
+	}
+
+	// A base folder whose configuration file was lost: init keeps the existing profile, and says how to recover it.
+	e.mustRun(ExitOK, "init", "-g", "standard")
+	e.mustRun(ExitOK, "add", "x", e.playbook("pb", "x-a"))
+	if err := os.Remove(config.BaseConfigFile(e.home)); err != nil {
+		t.Fatal(err)
+	}
+	_, errOut = e.mustRun(ExitFailure, "init", "-g", "standard")
+	if !strings.Contains(errOut, "from an earlier setup of this base folder") ||
+		!strings.Contains(errOut, "'enabled: [default]'") || strings.Contains(errOut, "remove it") {
+		t.Fatalf("unexpected message: %s", errOut)
+	}
+	if prof, err := config.LoadProfile(e.home, "default"); err != nil || len(prof.Playbooks) != 1 {
+		t.Fatalf("the existing profile should be kept: %+v (%v)", prof, err)
+	}
+
+	_, errOut = e.mustRun(ExitUsage, "help", "nosuchcommand")
+	if !strings.Contains(errOut, "unknown command: nosuchcommand") {
+		t.Fatalf("unexpected message: %s", errOut)
+	}
+	if out, _ := e.mustRun(ExitOK, "help", "init"); !strings.HasPrefix(out, "Usage: aiplam init") {
+		t.Fatalf("unexpected help: %s", out)
+	}
 }

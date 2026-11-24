@@ -106,6 +106,9 @@ func (a *App) cmdInit(args []string) error {
 	a.Base = a.Home
 	if !a.global {
 		a.Base = a.absPath(pos[0])
+		if info, err := os.Stat(a.Base); err == nil && !info.IsDir() {
+			return fmt.Errorf("'%s' is not a folder: give the folder to set up as a base folder", pos[0])
+		}
 		if !fsutil.IsDir(a.Base) {
 			return fmt.Errorf("base folder '%s' does not exist", pos[0])
 		}
@@ -138,7 +141,11 @@ func (a *App) cmdInit(args []string) error {
 			"agents, with '%s'", a.pretty(a.Base), a.pretty(file), a.hint("profile"))
 	}
 	if config.ProfileExists(a.Base, profile) {
-		return fmt.Errorf("%s already exists: remove it, or choose another profile with --profile", a.profileFile(profile))
+		// Left by an earlier setup whose configuration file was lost: removing the profile would lose its playbooks.
+		return fmt.Errorf("%s already exists, from an earlier setup of this base folder whose %s is missing: to keep "+
+			"its profiles, recreate %s by hand, listing the profiles to enable (for example 'enabled: [%s]'); or "+
+			"choose another name for the first profile with --profile", a.profileFile(profile),
+			a.pretty(config.BaseConfigFile(a.Base)), config.BaseConfigName+config.FileExt, profile)
 	}
 	prof := &config.Profile{Agent: agent.Name}
 	if err := config.SaveProfile(a.Base, profile, prof); err != nil {
@@ -372,7 +379,7 @@ func (a *App) cmdAdd(args []string) error {
 
 	a.printf("Adding playbook %s (%s) from %s to profile '%s'\n", e.ID, a.version(folder), a.pretty(folder), profile.name)
 	if err := playbook.Apply(plan, a.printAction); err != nil {
-		return fmt.Errorf("%w; the playbook was not registered: fix the problem and run '%s' again", err, a.cmd("add"))
+		return fmt.Errorf("%w; the playbook was not registered: fix the problem and add it again", err)
 	}
 	if err := config.SaveProfile(a.Base, profile.name, updated); err != nil {
 		return a.undo(plan, err, "the playbook was not registered")
@@ -586,8 +593,7 @@ func (a *App) cmdRemove(args []string) error {
 	}
 	a.printf("Removing playbook %s (%s) from profile '%s'\n", e.ID, a.pretty(e.Dir), profile.name)
 	if err := playbook.Apply(plan, a.printAction); err != nil {
-		return fmt.Errorf("%w; the playbook is still registered: fix the problem and run '%s' again", err,
-			a.cmd("remove"))
+		return fmt.Errorf("%w; the playbook is still registered: fix the problem and remove it again", err)
 	}
 	if err := config.SaveProfile(a.Base, profile.name, updated); err != nil {
 		return a.undo(plan, err, "the playbook is still registered")
