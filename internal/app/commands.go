@@ -110,6 +110,9 @@ func (a *App) cmdInit(args []string) error {
 			return fmt.Errorf("base folder '%s' does not exist", pos[0])
 		}
 	}
+	if err := a.checkSandbox(); err != nil {
+		return err
+	}
 	profile := a.Profile
 	if profile == "" {
 		profile = config.DefaultProfile

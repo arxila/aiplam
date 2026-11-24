@@ -87,6 +87,10 @@ type App struct {
 	// Base is the base folder of the configuration commands act on (it holds the .aiplam folder and the agents
 	// configuration folders). Run sets it.
 	Base string
+	// Sandbox, when set, is the only folder base folders can be in: commands refuse any other. scripts/sandbox.sh
+	// sets it, with the AIPLAM_SANDBOX environment variable, so that trying aiplam there cannot change the real
+	// configuration, such as ~/.aiplam, even when run from a folder outside the sandbox or given one.
+	Sandbox string
 
 	baseArg     string // the folder given with --base, or ""
 	global      bool   // whether --global was given
@@ -107,8 +111,20 @@ func New() (*App, error) {
 	}
 	// Resolve links (for example /var -> /private/var on macOS) so that home matches the canonical paths of the
 	// folders under it.
-	return &App{Home: fsutil.Canonical(home), Cwd: cwd, Stdout: os.Stdout, Stderr: os.Stderr,
-		Git: gitinfo.NewReader()}, nil
+	a := &App{Home: fsutil.Canonical(home), Cwd: cwd, Stdout: os.Stdout, Stderr: os.Stderr, Git: gitinfo.NewReader()}
+	if sandbox := os.Getenv("AIPLAM_SANDBOX"); sandbox != "" {
+		a.Sandbox = fsutil.Canonical(sandbox)
+	}
+	return a, nil
+}
+
+// checkSandbox fails when a sandbox is set and the base folder is outside it.
+func (a *App) checkSandbox() error {
+	if a.Sandbox == "" || fsutil.Within(fsutil.Canonical(a.Base), a.Sandbox) {
+		return nil
+	}
+	return fmt.Errorf("base folder '%s' is outside the aiplam sandbox ('%s'), so it is not used: run aiplam from a "+
+		"folder inside the sandbox, or unset AIPLAM_SANDBOX", a.Base, a.Sandbox)
 }
 
 type command struct {
@@ -250,6 +266,9 @@ func (a *App) Run(args []string) int {
 		}
 		if c.name != "init" {
 			if err := a.resolveBase(); err != nil {
+				return a.exitCode(err, c.usage)
+			}
+			if err := a.checkSandbox(); err != nil {
 				return a.exitCode(err, c.usage)
 			}
 			// Commands that change the configuration or the links run one at a time per base folder (init takes the

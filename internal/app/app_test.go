@@ -1697,3 +1697,35 @@ func TestAgentsHelp(t *testing.T) {
 		}
 	}
 }
+
+func TestSandbox(t *testing.T) {
+	e := newEnv(t)
+	outside := filepath.Join(e.root, "outside")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e.mustRun(ExitOK, "init", outside, "claude") // the real configuration, set up before the sandbox
+	e.app.Sandbox = e.home
+	for _, args := range [][]string{
+		{"init", e.root, "claude"},         // init outside the sandbox
+		{"list"},                           // the base folder found from a current folder outside the sandbox
+		{"profile", "list", "-b", outside}, // a base folder given outside the sandbox
+	} {
+		e.app.Cwd = outside
+		_, errOut := e.mustRun(ExitFailure, args...)
+		if !strings.Contains(errOut, "is outside the aiplam sandbox ('"+e.home+"')") {
+			t.Fatalf("%v: unexpected message: %s", args, errOut)
+		}
+	}
+	if fsutil.IsDir(filepath.Join(e.root, ".aiplam")) {
+		t.Fatal("init outside the sandbox should create nothing")
+	}
+	e.app.Cwd = e.home
+	e.mustRun(ExitOK, "init", "-g", "claude")
+	e.mustRun(ExitOK, "list")
+	project := filepath.Join(e.home, "project")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e.mustRun(ExitOK, "init", project, "standard")
+}

@@ -29,8 +29,10 @@ What each one covers:
 
 ## Trying them
 
-`make sandbox` builds aiplam and opens a shell where `HOME` is a new temporary folder (the real `~/.aiplam`,
-`~/.agents`, `~/.claude` and so on are not touched), with copies of these playbooks in `~/playbooks`. In the copies,
+`make sandbox` builds aiplam and opens a shell where `HOME` is a new temporary folder, with copies of these playbooks
+in `~/playbooks`. The real `~/.aiplam`, `~/.agents`, `~/.claude` and so on are not touched: in the sandbox shell
+(where `AIPLAM_SANDBOX` is set), aiplam refuses any base folder outside the sandbox, even when run from a folder
+outside it. In the copies,
 `aiplam-lettuce-playbook` is a git repository with tags `v1.0.0` (without `aiplam-lettuce-data-report`) and `v1.1.0`,
 and `aiplam-tomato-playbook` is a git repository on branch `main`; the others are plain folders (version `unknown`).
 
