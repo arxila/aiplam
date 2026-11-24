@@ -59,7 +59,7 @@ func TestTestdataPlaybooks(t *testing.T) {
 		}
 	}
 
-	e.mustRun(ExitOK, "init", "-g")
+	e.mustRun(ExitOK, "init", "-g", "standard")
 
 	// Standard layout: only aiplam-lettuce-* folders with a SKILL.md are linked; the standard agent reads only skills.
 	e.mustRun(ExitOK, "add", "aiplam-lettuce", lettuce)
@@ -103,7 +103,7 @@ func TestTestdataPlaybooks(t *testing.T) {
 
 	// A second profile: it collides with the first one (both provide aiplam-tomato), so it can replace it but not join it.
 	all := linked()
-	e.mustRun(ExitOK, "profile", "add", "other")
+	e.mustRun(ExitOK, "profile", "add", "other", "standard")
 	e.mustRun(ExitOK, "add", "aiplam-tomato", tomato, "-sp", ".", "-p", "other")
 	e.mustRun(ExitFailure, "profile", "enable", "other")
 	e.mustRun(ExitOK, "profile", "switch", "other")
@@ -112,7 +112,7 @@ func TestTestdataPlaybooks(t *testing.T) {
 	expect(all...)
 
 	// A third profile that does not collide can be enabled besides the first one.
-	e.mustRun(ExitOK, "profile", "add", "extra")
+	e.mustRun(ExitOK, "profile", "add", "extra", "standard")
 	e.mustRun(ExitOK, "remove", "aiplam-blueberry")
 	e.mustRun(ExitOK, "add", "aiplam-blueberry", blueberry, "-p", "extra")
 	e.mustRun(ExitOK, "profile", "enable", "extra")
@@ -122,7 +122,7 @@ func TestTestdataPlaybooks(t *testing.T) {
 	// Another working scope, assigned Claude Code, links every kind of artifact Claude Code reads, from ~/.claude: it
 	// does not collide with the profiles for the standard agent.
 	claude := filepath.Join(e.home, ".claude")
-	e.mustRun(ExitOK, "profile", "add", "greens", "--agent", "claude")
+	e.mustRun(ExitOK, "profile", "add", "greens", "claude")
 	e.mustRun(ExitOK, "add", "aiplam-lettuce", lettuce, "-p", "greens")
 	e.mustRun(ExitOK, "profile", "enable", "greens")
 	e.assertLink(filepath.Join(claude, "skills", "aiplam-lettuce-review"),
@@ -158,7 +158,7 @@ func TestTestdataPlaybooks(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.app.Cwd = project
-	e.mustRun(ExitOK, "init", ".")
+	e.mustRun(ExitOK, "init", ".", "standard")
 	e.mustRun(ExitFailure, "add", "aiplam-garlic", tomato, "-sp", ".")
 	e.mustRun(ExitOK, "remove", "aiplam-garlic", "--global")
 	e.mustRun(ExitOK, "add", "aiplam-garlic", tomato, "-sp", ".")

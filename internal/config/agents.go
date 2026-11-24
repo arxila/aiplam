@@ -105,7 +105,7 @@ type Agent struct {
 	ReadsStandard []Kind
 }
 
-// DefaultAgent is the agent of the profile 'aiplam init' creates when none is given.
+// DefaultAgent is the agent of profiles whose file names none.
 const DefaultAgent = "standard"
 
 var skillFormat = Format{File: "SKILL.md"}

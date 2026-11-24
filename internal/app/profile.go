@@ -28,7 +28,7 @@ import (
 )
 
 var profileUsage = `Usage: aiplam profile list
-       aiplam profile add <profile> [--agent AGENT]
+       aiplam profile add <profile> <agent>
        aiplam profile remove <profile>
        aiplam profile enable <profile>[,<profile>...]
        aiplam profile disable <profile>[,<profile>...]
@@ -45,7 +45,7 @@ kept in its own file (<basefolder>/.aiplam/<profile>.yaml), with an agent assign
 
 Subcommands:
   list      list the profiles and their agents; '*' marks the enabled ones
-  add       create an empty profile, with its agent (default: standard); names: letters, digits, '_' and '-'
+  add       create an empty profile, with its agent; names: letters, digits, '_' and '-'
             ('` + config.BaseConfigName + `' is reserved)
   remove    delete a profile that is not enabled, with its playbook registrations (nothing is unlinked)
   enable    enable profiles besides those already enabled: link their playbooks
@@ -76,7 +76,7 @@ twice.
 Agents, and where aiplam links each kind of artifact for them (in a project, in the home folder):
 ` + agentsHelp() + `
 Examples:
-  aiplam profile add acme --agent claude                       # a profile for the work for client Acme
+  aiplam profile add acme claude                               # a profile for the work for client Acme
   aiplam add acme ~/Workspace/acme-ai-playbook --profile acme
   aiplam profile enable acme                                   # link Acme's playbooks too
   aiplam profile switch acme                                   # work only on Acme: disable the other profiles
@@ -97,8 +97,9 @@ func (a *App) cmdProfile(args []string) error {
 		return usagef("profile needs a subcommand: list, add, remove, enable, disable, switch or agent")
 	}
 	sub, rest := p.positional[0], p.positional[1:]
-	if _, ok := p.values["agent"]; ok && sub != "add" {
-		return usagef("only 'profile add' takes --agent; use 'profile agent <profile> <agent>' to change a profile's agent")
+	if _, ok := p.values["agent"]; ok {
+		return usagef("profile takes the agent as an argument, not with --agent: 'aiplam profile add <profile> " +
+			"<agent>' creates a profile, and 'aiplam profile agent <profile> <agent>' changes its agent")
 	}
 	switch sub {
 	case "list":
@@ -106,9 +107,39 @@ func (a *App) cmdProfile(args []string) error {
 			return usagef("unexpected argument: %s", rest[0])
 		}
 		return a.profileList()
-	case "add", "remove":
+	case "add":
+		agents := strings.Join(config.AgentNames(), ", ")
+		switch {
+		case len(rest) == 0:
+			return usagef("profile add needs a profile name and an agent (%s)", agents)
+		case len(rest) == 1:
+			if _, ok := config.LookupAgent(rest[0]); ok {
+				return usagef("profile add needs the profile name before the agent: 'aiplam profile add <profile> %s'",
+					rest[0])
+			}
+			return usagef("profile add needs the agent after the profile name: 'aiplam profile add %s <agent>', with "+
+				"<agent> one of %s", rest[0], agents)
+		case len(rest) > 2:
+			return usagef("unexpected argument: %s", rest[2])
+		}
+		agent, ok := config.LookupAgent(rest[1])
+		if !ok {
+			if _, swapped := config.LookupAgent(rest[0]); swapped {
+				return usagef("profile add takes the profile name first, then the agent: 'aiplam profile add %s %s'",
+					rest[1], rest[0])
+			}
+			return usagef("unknown agent '%s': use %s", rest[1], agents)
+		}
+		if !config.ValidProfileName(rest[0]) {
+			return invalidProfileName(rest[0])
+		}
+		if _, err := a.loadBaseConfig(); err != nil {
+			return err
+		}
+		return a.profileAdd(rest[0], agent)
+	case "remove":
 		if len(rest) != 1 {
-			return usagef("profile %s needs one profile name", sub)
+			return usagef("profile remove needs one profile name")
 		}
 		if !config.ValidProfileName(rest[0]) {
 			return invalidProfileName(rest[0])
@@ -116,13 +147,6 @@ func (a *App) cmdProfile(args []string) error {
 		conf, err := a.loadBaseConfig()
 		if err != nil {
 			return err
-		}
-		if sub == "add" {
-			agent, err := parseAgent(p, config.DefaultAgent)
-			if err != nil {
-				return err
-			}
-			return a.profileAdd(rest[0], agent)
 		}
 		return a.profileRemove(conf, rest[0])
 	case "agent":
@@ -155,7 +179,8 @@ func (a *App) cmdProfile(args []string) error {
 		}
 		for _, name := range names {
 			if sub != "disable" && !config.ProfileExists(a.Base, name) {
-				return fmt.Errorf("profile '%s' does not exist; create it with '%s'", name, a.hint("profile add "+name))
+				return fmt.Errorf("profile '%s' does not exist; create it with '%s'", name,
+					a.hint("profile add "+name+" <agent>"))
 			}
 		}
 		switch sub {

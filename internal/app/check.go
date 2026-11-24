@@ -94,7 +94,7 @@ func (a *App) cmdCheck(args []string) error {
 		file := a.profileFile(name)
 		if !config.ProfileExists(a.Base, name) {
 			problem("the enabled profile '%s' does not exist (%s is missing): disable it with '%s', or create it again "+
-				"with '%s'", name, file, a.hint("profile disable "+name), a.hint("profile add "+name))
+				"with '%s'", name, file, a.hint("profile disable "+name), a.hint("profile add "+name+" <agent>"))
 			return nil
 		}
 		prof, err := config.LoadProfile(a.Base, name)

@@ -162,8 +162,8 @@ How it works:
     assigned, the one its playbooks are linked for.
 
 `)
-	b.WriteString("Agents: " + strings.Join(config.AgentNames(), ", ") + " (default: " + config.DefaultAgent +
-		").\n'aiplam profile --help' shows the kinds of artifacts each one reads, and from where.\n")
+	b.WriteString("Agents: " + strings.Join(config.AgentNames(), ", ") +
+		".\n'aiplam profile --help' shows the kinds of artifacts each one reads, and from where.\n")
 	b.WriteString(`
 Options for every command:
   -b, --base <basefolder>   use <basefolder> as base folder
@@ -172,7 +172,7 @@ Option for add, update, remove, list and check:
   -p, --profile PROFILE     act on profile PROFILE instead of the enabled ones
 
 Getting started:
-  aiplam init --global                                # ~ as base folder, with a profile for the standard agent
+  aiplam init --global claude                         # ~ as base folder, with a profile for Claude Code
   aiplam add arxila ~/Workspace/arxila-ai-playbook    # register a playbook and link its artifacts
   aiplam list
 
@@ -335,7 +335,7 @@ func (a *App) resolveBase() error {
 	case a.baseArg != "":
 		dir := a.absPath(a.baseArg)
 		if !config.IsBase(dir) {
-			return fmt.Errorf("'%s' is not a base folder (%s is missing); set it up with 'aiplam init %s'",
+			return fmt.Errorf("'%s' is not a base folder (%s is missing); set it up with 'aiplam init %s <agent>'",
 				a.baseArg, a.pretty(config.Dir(dir)), a.baseArg)
 		}
 		a.Base = dir
@@ -560,11 +560,11 @@ func (a *App) notInitialized() error {
 		if fsutil.SamePath(a.Base, fsutil.Canonical(a.Home)) {
 			arg = "--global"
 		}
-		return fmt.Errorf("'%s' is not set up as a base folder (%s is missing): run 'aiplam init %s' first",
+		return fmt.Errorf("'%s' is not set up as a base folder (%s is missing): run 'aiplam init %s <agent>' first",
 			a.pretty(a.Base), a.pretty(config.BaseConfigFile(a.Base)), arg)
 	}
 	return errors.New("no base folder was found from the current folder up, nor in the home folder: run " +
-		"'aiplam init <basefolder>' (or 'aiplam init --global', for the home folder) first")
+		"'aiplam init <basefolder> <agent>' (or 'aiplam init --global <agent>', for the home folder) first")
 }
 
 // profileState is a loaded profile.
@@ -652,7 +652,7 @@ func (a *App) load() (*state, error) {
 		if !config.ProfileExists(a.Base, name) {
 			return nil, fmt.Errorf("the enabled profile '%s' does not exist (%s is missing): disable it with '%s', or "+
 				"create it again with '%s'", name, a.profileFile(name), a.hint("profile disable "+name),
-				a.hint("profile add "+name))
+				a.hint("profile add "+name+" <agent>"))
 		}
 		s, err := a.loadProfileState(name, true)
 		if err != nil {
@@ -666,7 +666,7 @@ func (a *App) load() (*state, error) {
 	}
 	if !config.ProfileExists(a.Base, a.Profile) {
 		return nil, fmt.Errorf("profile '%s' does not exist; create it with '%s' ('%s' lists the profiles)", a.Profile,
-			a.hint("profile add "+a.Profile), a.hint("profile list"))
+			a.hint("profile add "+a.Profile+" <agent>"), a.hint("profile list"))
 	}
 	for _, s := range st.enabled {
 		if config.SameProfile(a.Base, s.name, a.Profile) {

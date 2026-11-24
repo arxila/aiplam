@@ -36,7 +36,7 @@ and `aiplam-tomato-playbook` is a git repository on branch `main`; the others ar
 
 ```bash
 cd ~/playbooks
-aiplam init --global                                      # a profile for the standard agent: ~/.agents
+aiplam init --global standard                             # a profile for the standard agent: ~/.agents
 
 # 4 skills
 aiplam add aiplam-lettuce aiplam-lettuce-playbook
@@ -59,7 +59,7 @@ aiplam check
 aiplam update aiplam-lettuce-data
 
 # a second profile that collides with the first one (both provide aiplam-tomato): it can replace it, not join it
-aiplam profile add other
+aiplam profile add other standard
 aiplam add aiplam-tomato aiplam-tomato-playbook --skills-path . -p other
 aiplam profile enable other                               # fails: its links already exist
 aiplam profile switch other                               # disable default, enable other
@@ -67,7 +67,7 @@ aiplam profile list
 aiplam profile switch default
 
 # a third profile that does not collide can be enabled besides the first one
-aiplam profile add extra
+aiplam profile add extra standard
 aiplam remove aiplam-blueberry
 aiplam add aiplam-blueberry aiplam-blueberry-playbook -p extra
 aiplam profile enable extra
@@ -75,7 +75,7 @@ aiplam list
 
 # another working scope, 'greens', assigned Claude Code: skills, subagent, command and rule linked from ~/.claude,
 # with no collision with the profiles for the standard agent
-aiplam profile add greens --agent claude
+aiplam profile add greens claude
 aiplam add aiplam-lettuce aiplam-lettuce-playbook -p greens
 aiplam profile enable greens
 # greens assigned Copilot instead: the .agent.md subagent, from ~/.copilot; warns that Copilot also reads ~/.agents
@@ -85,7 +85,7 @@ aiplam profile disable greens                             # ~/.copilot is remove
 # a project base folder, used by the commands run anywhere inside the base folder ~/projects/demo
 mkdir -p ~/projects/demo/module && cd ~/projects/demo
 git init -q                                               # init then suggests what to add to .gitignore
-aiplam init .                                             # .aiplam in ~/projects/demo
+aiplam init . standard                                    # .aiplam in ~/projects/demo
 aiplam add aiplam-garlic ~/playbooks/aiplam-tomato-playbook -sp .   # fails: already linked from ~/.agents
 aiplam remove aiplam-garlic --global
 aiplam add aiplam-garlic ~/playbooks/aiplam-tomato-playbook -sp .   # linked from ~/projects/demo/.agents

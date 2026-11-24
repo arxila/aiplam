@@ -33,17 +33,18 @@ import (
 
 // --- init ---------------------------------------------------------------------------------------------------------
 
-const initUsage = `Usage: aiplam init <basefolder> [--agent AGENT] [--profile PROFILE]
-       aiplam init --global [--agent AGENT] [--profile PROFILE]
+var initUsage = `Usage: aiplam init <basefolder> <agent> [--profile PROFILE]
+       aiplam init --global <agent> [--profile PROFILE]
 
 Sets up <basefolder> as a base folder:
   - creates <basefolder>/.aiplam, holding its configuration (aiplam-config.yaml, and one <profile>.yaml per profile);
-  - creates a first profile, with the chosen agent, and enables it.
+  - creates a first profile, with <agent> assigned, and enables it.
 
-A profile's agent decides which kinds of its playbooks' artifacts are linked, in which format, and from which agents
-configuration folders of <basefolder> (.agents/skills for the standard agent, .claude/skills, .claude/agents, ... for
-Claude Code): 'aiplam profile --help' lists the agents. Those folders are created when an artifact is first linked
-there. More profiles, for other working scopes (a client, a team, a kind of work...), can be added later with
+<agent> is one of: ` + strings.Join(config.AgentNames(), ", ") + `.
+'aiplam profile --help' describes them. A profile's agent decides which kinds of its playbooks' artifacts are linked,
+in which format, and from which agents configuration folders of <basefolder> (.agents/skills for the standard agent,
+.claude/skills, .claude/agents, ... for Claude Code). Those folders are created when an artifact is first linked there.
+More profiles, for other working scopes (a client, a team, a kind of work...), can be added later with
 'aiplam profile add', usually with the same agent, though each profile can have its own.
 
 From then on, commands run anywhere inside <basefolder> use its configuration: each command uses the nearest base
@@ -55,14 +56,13 @@ for the same agent in <basefolder>.
 
 Options:
   -g, --global            use the user's home folder (e.g. /home/username) as base folder, instead of <basefolder>
-  -a, --agent AGENT       the agent assigned to the first profile (default: standard)
   -p, --profile PROFILE   the name of the first profile (default: 'default')
 
 Examples:
-  aiplam init --global                      # ~/.aiplam, with a first profile for the standard agent (~/.agents)
-  aiplam init --global --agent claude       # ~/.aiplam, with a first profile for Claude Code (~/.claude)
-  aiplam init . --profile backend           # the current folder, with a first profile named 'backend'
-  aiplam init ~/Workspace/thymeleaf         # a project: commands run inside it use its configuration
+  aiplam init --global claude               # ~/.aiplam, with a first profile for Claude Code (~/.claude)
+  aiplam init --global standard             # ~/.aiplam, with a first profile for the standard agent (~/.agents)
+  aiplam init . claude --profile backend    # the current folder, with a first profile named 'backend'
+  aiplam init ~/Workspace/thymeleaf claude  # a project: commands run inside it use its configuration
 `
 
 func (a *App) cmdInit(args []string) error {
@@ -70,26 +70,45 @@ func (a *App) cmdInit(args []string) error {
 	if err != nil {
 		return err
 	}
-	switch {
-	case a.baseArg != "":
+	if _, ok := p.values["agent"]; ok {
+		return usagef("init takes the agent as an argument after the base folder, not with --agent (for example " +
+			"'aiplam init . claude' or 'aiplam init --global claude')")
+	}
+	if a.baseArg != "" {
 		return usagef("init takes the base folder to set up as an argument, not with --base")
-	case a.global && len(p.positional) > 0:
+	}
+	agents := strings.Join(config.AgentNames(), ", ")
+	isAgent := func(name string) bool { _, ok := config.LookupAgent(name); return ok }
+	pos := p.positional
+	switch {
+	case len(pos) == 0:
+		return usagef("init needs the base folder to set up, or --global for the home folder, and then the agent to "+
+			"link playbooks for (%s): for example 'aiplam init . claude' or 'aiplam init --global claude'", agents)
+	case a.global && len(pos) > 1:
 		return usagef("give either a base folder or --global, not both")
-	case !a.global && len(p.positional) == 0:
-		return usagef("init needs the base folder to set up (for example '.'), or --global for the home folder")
-	case len(p.positional) > 1:
-		return usagef("unexpected argument: %s", p.positional[1])
+	case !a.global && len(pos) == 1 && isAgent(pos[0]):
+		return usagef("init needs the base folder to set up before the agent (for example 'aiplam init . %s'), or "+
+			"--global for the home folder ('aiplam init --global %s')", pos[0], pos[0])
+	case !a.global && len(pos) == 1:
+		return usagef("init needs the agent after the base folder: 'aiplam init %s <agent>', with <agent> one of %s",
+			pos[0], agents)
+	case len(pos) > 2:
+		return usagef("unexpected argument: %s", pos[2])
+	}
+	name := pos[len(pos)-1]
+	agent, ok := config.LookupAgent(name)
+	if !ok {
+		if len(pos) == 2 && isAgent(pos[0]) {
+			return usagef("init takes the base folder first, then the agent: 'aiplam init %s %s'", pos[1], pos[0])
+		}
+		return usagef("unknown agent '%s': use %s", name, agents)
 	}
 	a.Base = a.Home
 	if !a.global {
-		a.Base = a.absPath(p.positional[0])
+		a.Base = a.absPath(pos[0])
 		if !fsutil.IsDir(a.Base) {
-			return fmt.Errorf("base folder '%s' does not exist", p.positional[0])
+			return fmt.Errorf("base folder '%s' does not exist", pos[0])
 		}
-	}
-	agent, err := parseAgent(p, config.DefaultAgent)
-	if err != nil {
-		return err
 	}
 	profile := a.Profile
 	if profile == "" {
@@ -145,19 +164,6 @@ func (a *App) cmdInit(args []string) error {
 	}
 	a.printf("Next: register a playbook with '%s'.\n", a.cmd("add <name> <playbookfolder>"))
 	return nil
-}
-
-// parseAgent returns the agent given with --agent, or the agent named def when none was given.
-func parseAgent(p parsedArgs, def string) (config.Agent, error) {
-	name := def
-	if v := p.value("agent"); v != "" {
-		name = v
-	}
-	agent, ok := config.LookupAgent(name)
-	if !ok {
-		return agent, usagef("unknown agent '%s': use %s", name, strings.Join(config.AgentNames(), ", "))
-	}
-	return agent, nil
 }
 
 // printHigherLevels notes, after init, the higher-level base folders whose artifacts cannot be linked here: the home

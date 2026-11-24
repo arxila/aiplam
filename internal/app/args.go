@@ -47,7 +47,8 @@ func (p parsedArgs) value(name string) string {
 }
 
 // shortOptions maps the short forms of options ("-a", "-sp") to their long names. "-h" (help) is handled apart, and
-// "-p" (profile) is removed by Run before commands parse their arguments.
+// "-p" (profile) is removed by Run before commands parse their arguments. "-a" (--agent) is no command's option: init
+// and profile accept it only to say that the agent is an argument.
 var shortOptions = map[string]string{
 	"a":   "agent",
 	"sp":  "skills-path",

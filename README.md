@@ -40,7 +40,7 @@ make dist       # dist/aiplam-<version>-<os>-<arch>.tar.gz (.zip for Windows) pe
 ## Quick start
 
 ```bash
-aiplam init --global --agent claude                 # ~ as base folder, with a first profile, for Claude Code
+aiplam init --global claude                         # ~ as base folder, with a first profile, for Claude Code
 cd ~/Workspace/acme-ai-playbook
 git switch --detach v1.2.0                          # choose the playbook's version
 aiplam add acme .                                   # register it as 'acme', and link its acme-* artifacts
@@ -140,7 +140,7 @@ agent sessions may start, such as a project's top folder. It holds:
   agents read. aiplam only manages the links in them: anything else there (settings, artifacts added by hand) is left
   alone.
 
-This is a home folder set up with `aiplam init --global --agent claude`, after `aiplam add acme
+This is a home folder set up with `aiplam init --global claude`, after `aiplam add acme
 ~/Workspace/acme-ai-playbook`:
 
 ```text
@@ -184,10 +184,10 @@ configuration folders:
                         formats                                  .claude/agents/acme-reviewer.md, ...
 ```
 
-`aiplam init <basefolder>` (or `aiplam init --global`, for the home folder) creates the `.aiplam` folder and a first
-profile. The agents configuration folders, and their subfolders for each kind (`.claude/skills`, ...), are created
-when an artifact is first linked there, and removed when unlinking leaves them empty: a folder holding anything else,
-such as `settings.json` or an artifact added by hand, is never removed.
+`aiplam init <basefolder> <agent>` (or `aiplam init --global <agent>`, for the home folder) creates the `.aiplam`
+folder and a first profile, for that agent. The agents configuration folders, and their subfolders for each kind
+(`.claude/skills`, ...), are created when an artifact is first linked there, and removed when unlinking leaves them
+empty: a folder holding anything else, such as `settings.json` or an artifact added by hand, is never removed.
 
 **Which base folder a command uses.** Commands use the nearest base folder from the current folder up (any folder
 holding a `.aiplam` folder), or else the home folder, and show which one they use (`Base folder: ...`); `--base
@@ -317,11 +317,11 @@ aiplam profile switch default,initech     # leave Acme for Initech: acme's links
 Each profile also has an **agent** assigned: the agent its playbooks are linked for (see [Agents](#agents)). It is
 usually the agent you work with, the same for every profile, but each profile can have its own: for example, when a
 client's projects are worked on with another agent. `init` creates a first profile, `default` (or the one given with
-`--profile`), with the standard agent (or the one given with `--agent`), and enables it; `profile add` takes
-`--agent` too, and `profile agent` changes a profile's agent later.
+`--profile`), with the agent it is given, and enables it; `profile add` takes the agent too, and `profile agent`
+changes a profile's agent later.
 
 ```bash
-aiplam profile add acme --agent claude                    # a profile for the work for client Acme
+aiplam profile add acme claude                            # a profile for the work for client Acme
 aiplam add acme ~/Workspace/acme/acme-ai-playbook -p acme # register a playbook in it: nothing is linked yet
 aiplam profile enable acme                                # link its playbooks too
 aiplam profile switch acme                                # work only on Acme: disable the other profiles
@@ -378,7 +378,7 @@ can be given at once, separated by commas. Profile names use letters, digits, `_
 ## Commands
 
 ```bash
-aiplam init <basefolder>|--global [--agent A] [--profile P]      # set up a base folder, and a first profile, enabled
+aiplam init <basefolder>|--global <agent> [--profile P]          # set up a base folder, and a first profile, enabled
 aiplam add <name> <playbookfolder> [--skills-path P ...]         # register a playbook and link its artifacts
 aiplam update [<name|id|playbookfolder>] [<playbookfolder>]      # link new artifacts, unlink deleted ones
 aiplam update --all
@@ -386,7 +386,7 @@ aiplam remove <name|id|playbookfolder> [<playbookfolder>]        # remove a play
 aiplam list [--all] [--json]                                     # profiles, playbooks, versions and artifacts
 aiplam check                                                     # what update would change; config and broken links
 aiplam profile list|remove [<profile>]                           # manage profiles (working scopes, each with an agent)
-aiplam profile add <profile> [--agent A]                         # create a profile, with its agent
+aiplam profile add <profile> <agent>                             # create a profile, with its agent
 aiplam profile enable|disable|switch <profile>[,<profile>...]    # choose the profiles linked
 aiplam profile agent <profile> <agent>                           # change a profile's agent
 ```
@@ -396,9 +396,9 @@ unless given with `--base <basefolder>` or `--global` (the user's home folder, e
 `remove`, `list` and `check` act on the enabled profiles, or on the one given with `--profile PROFILE`. `add` needs
 `--profile` unless exactly one profile is enabled.
 
-Options have short forms: `-b` (`--base`), `-g` (`--global`), `-p` (`--profile`), `-a` (`--agent`), and `-sp`,
-`-sap`, `-cp`, `-pp`, `-rp` and `-ip` (`--skills-path`, `--subagents-path`, `--commands-path`, `--prompts-path`,
-`--rules-path` and `--instructions-path`).
+Options have short forms: `-b` (`--base`), `-g` (`--global`), `-p` (`--profile`), and `-sp`, `-sap`, `-cp`,
+`-pp`, `-rp` and `-ip` (`--skills-path`, `--subagents-path`, `--commands-path`, `--prompts-path`, `--rules-path` and
+`--instructions-path`).
 
 Without a selector, `update` acts on the playbook registered for the current folder. A selector is an id, a name
 (when only one playbook has it), a playbook folder (when only one playbook is registered there), or a name and a
