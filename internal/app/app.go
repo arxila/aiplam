@@ -26,9 +26,9 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"slices"
-	"sort"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -68,36 +68,38 @@ const Copyright = "(c) 2026 Arxila OSS - https://aiplam.arxila.io"
 // Exit codes.
 const (
 	ExitOK      = 0
-	ExitFailure = 1 // an error, a cancelled operation, or (check) something needs attention
+	ExitFailure = 1 // an error, a cancelled operation, or (status) something needs attention
 	ExitUsage   = 2 // invalid command line
 )
 
 // App runs aiplam commands. Its fields make it testable without touching the real home folder.
 type App struct {
-	// Home is the user's home folder: a leading "~" stands for it, and it is the base folder used when no other is
-	// found.
+	// Home is the user's home folder: a leading "~" stands for it, it is the user managed folder when it is managed,
+	// and the search for a managed folder stops there.
 	Home string
-	// Cwd is the current folder, where the search for a base folder starts.
+	// Cwd is the current folder, where the search for a managed folder starts.
 	Cwd    string
 	Stdout io.Writer
 	Stderr io.Writer
 	Git    *gitinfo.Reader
-	// Profile is the profile given with the --profile option, or "" (commands then act on the enabled profile). Run
-	// sets it.
-	Profile string
-	// Base is the base folder of the configuration commands act on (it holds the .aiplam folder and the agents
-	// configuration folders). Run sets it.
-	Base string
-	// Sandbox, when set, is the only folder base folders can be in: commands refuse any other. scripts/sandbox.sh
+	// AppData is the value of the APPDATA environment variable, for target folders under %APPDATA% (Windows).
+	AppData string
+	// GOOS is the operating system the agent templates are resolved for.
+	GOOS string
+	// Profiles are the profiles given with --profile (commands then act on them instead of the enabled profile). Run
+	// sets them.
+	Profiles []string
+	// Managed is the managed folder commands act on (it holds the .aiplam folder). Run, or the command, sets it.
+	Managed string
+	// Sandbox, when set, is the only folder managed folders can be in: commands refuse any other. scripts/sandbox.sh
 	// sets it, with the AIPLAM_SANDBOX environment variable, so that trying aiplam there cannot change the real
 	// configuration, such as ~/.aiplam, even when run from a folder outside the sandbox or given one.
 	Sandbox string
 
-	baseArg     string // the folder given with --base, or ""
-	global      bool   // whether --global was given
-	baseShown   bool   // whether the "Base folder: ..." line has been printed
-	gitWarned   bool
-	hintProfile string // the profile to name with --profile in suggested commands, when it is not the enabled one
+	user         bool // whether --user was given
+	elsewhere    bool // whether the managed folder is not the one commands run from the current folder would use
+	managedShown bool // whether the "Managed folder: ..." line has been printed
+	gitWarned    bool
 }
 
 // New returns an App for the current user, working directory and standard streams.
@@ -112,20 +114,21 @@ func New() (*App, error) {
 	}
 	// Resolve links (for example /var -> /private/var on macOS) so that home matches the canonical paths of the
 	// folders under it.
-	a := &App{Home: fsutil.Canonical(home), Cwd: cwd, Stdout: os.Stdout, Stderr: os.Stderr, Git: gitinfo.NewReader()}
+	a := &App{Home: fsutil.Canonical(home), Cwd: cwd, Stdout: os.Stdout, Stderr: os.Stderr, Git: gitinfo.NewReader(),
+		AppData: os.Getenv("APPDATA"), GOOS: runtime.GOOS}
 	if sandbox := os.Getenv("AIPLAM_SANDBOX"); sandbox != "" {
 		a.Sandbox = fsutil.Canonical(sandbox)
 	}
 	return a, nil
 }
 
-// checkSandbox fails when a sandbox is set and the base folder is outside it.
+// checkSandbox fails when a sandbox is set and the managed folder is outside it.
 func (a *App) checkSandbox() error {
-	if a.Sandbox == "" || fsutil.Within(fsutil.Canonical(a.Base), a.Sandbox) {
+	if a.Sandbox == "" || fsutil.Within(fsutil.Canonical(a.Managed), a.Sandbox) {
 		return nil
 	}
-	return fmt.Errorf("base folder '%s' is outside the aiplam sandbox ('%s'), so it is not used: run aiplam from a "+
-		"folder inside the sandbox, or unset AIPLAM_SANDBOX", a.Base, a.Sandbox)
+	return fmt.Errorf("managed folder '%s' is outside the aiplam sandbox ('%s'), so it is not used: run aiplam from "+
+		"a folder inside the sandbox, or unset AIPLAM_SANDBOX", a.Managed, a.Sandbox)
 }
 
 type command struct {
@@ -133,28 +136,40 @@ type command struct {
 	summary string
 	usage   string
 	run     func(a *App, args []string) error
+	// profiles says whether the command takes --profile.
+	profiles bool
+	// resolves says whether the command finds the managed folder itself (init, status and list), instead of Run.
+	resolves bool
+	// readOnly says whether the command changes nothing, so it does not take the lock.
+	readOnly bool
 }
 
 var commands []command
 
 func init() {
 	commands = []command{
-		{"init", "set up a base folder: its .aiplam folder and first profile", initUsage, (*App).cmdInit},
-		{"add", "register a playbook and link its artifacts", addUsage, (*App).cmdAdd},
-		{"update", "link new artifacts of a playbook and unlink deleted ones", updateUsage, (*App).cmdUpdate},
-		{"remove", "unlink a playbook's artifacts and unregister it", removeUsage, (*App).cmdRemove},
-		{"list", "list registered playbooks, their versions and artifacts", listUsage, (*App).cmdList},
-		{"check", "check the configuration and whether any update is needed", checkUsage, (*App).cmdCheck},
-		{"profile", "manage profiles (working scopes, each with an agent): create, remove, enable, disable, switch, " +
-			"change agent", profileUsage, (*App).cmdProfile},
+		{name: "init", summary: "make a folder a managed folder: its .aiplam folder and first profiles",
+			usage: initUsage, run: (*App).cmdInit, profiles: true, resolves: true},
+		{name: "status", summary: "show the managed folder, its enabled profiles, and anything that needs attention",
+			usage: statusUsage, run: (*App).cmdStatus, resolves: true, readOnly: true},
+		{name: "list", summary: "list the artifacts linked in the target folders of the enabled profiles",
+			usage: listUsage, run: (*App).cmdList, resolves: true, readOnly: true},
+		{name: "add", summary: "register a playbook and link its artifacts", usage: addUsage, run: (*App).cmdAdd,
+			profiles: true},
+		{name: "update", summary: "link new artifacts of a playbook and unlink deleted ones", usage: updateUsage,
+			run: (*App).cmdUpdate, profiles: true},
+		{name: "remove", summary: "unlink a playbook's artifacts and unregister it", usage: removeUsage,
+			run: (*App).cmdRemove, profiles: true},
+		{name: "profile", summary: "manage profiles: list, add, remove, enable, disable, switch", usage: profileUsage,
+			run: (*App).cmdProfile},
 	}
 }
 
 func (a *App) mainUsage() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "aiplam %s - AI Playbook Manager\n%s\n\n", Version, Copyright)
-	b.WriteString(`Links the artifacts of AI playbooks (git checkouts shared by a team), such as skills, from the agents
-configuration folders that coding agents read (.agents, .claude, .github, ...): symbolic links (on Windows,
+	b.WriteString(`Links the artifacts of AI playbooks (git checkouts shared by a team), such as skills, into the
+folders that coding agents read them from (.agents/skills, .claude/skills, ...): symbolic links (on Windows,
 directory junctions for folders, and symbolic links for files, which need developer mode).
 
 Usage: aiplam <command> [arguments]
@@ -166,30 +181,25 @@ Commands:
 	}
 	b.WriteString(`
 How it works:
-  - a base folder is the home folder, or a folder where agent sessions may start (such as a project's top folder),
-    that holds:
-      - a .aiplam folder, with aiplam's configuration for that base folder;
-      - agents configuration folders, the ones agents read: .agents, .claude, .github, ...;
-  - commands use the nearest base folder from the current folder up, or else the home folder;
-  - aiplam links the playbooks' artifacts (skills, subagents, commands, prompts, rules, instructions) that an agent
-    reads, in its format, from the agents configuration folders that agent reads, so updating a playbook only takes
-    switching its checkout to another tag and running 'aiplam update';
-  - playbooks are registered in profiles: working scopes (a client, a team, a kind of work...) that are enabled to
-    link their playbooks and disabled to unlink them; several can be enabled at once, and each has an agent
-    assigned, the one its playbooks are linked for.
+  - a managed folder is a folder with a .aiplam folder, which holds aiplam's configuration for it: usually the home
+    folder (the user managed folder) and the folders where agent sessions start, such as a project's top folder;
+  - commands use the nearest managed folder from the current folder up to the home folder; when there is none, the
+    home folder, if it is managed;
+  - the configuration holds profiles: working scopes (a client, a team, a kind of work...), each with its target
+    folders (where it links each kind of artifact: skills, subagents, rules...) and its registered playbooks;
+  - the target folders are given by hand, or taken from an agent template (` + "`--agent claude`" + `, ...);
+  - aiplam links the artifacts of the playbooks of the enabled profiles into their target folders, so updating a
+    playbook only takes switching its checkout to another tag and running 'aiplam update'.
 
 `)
-	b.WriteString("Agents: " + strings.Join(config.AgentNames(), ", ") +
-		".\n'aiplam profile --help' shows the kinds of artifacts each one reads, and from where.\n")
+	b.WriteString("Agent templates: " + config.TemplateList() + ".\n'aiplam profile --help' shows their target folders.\n")
 	b.WriteString(`
-Options for every command:
-  -b, --base <basefolder>   use <basefolder> as base folder
-  -g, --global              use the user's home folder (e.g. /home/username) as base folder
-Option for add, update, remove, list and check:
-  -p, --profile PROFILE     act on profile PROFILE instead of the enabled ones
+Options:
+  -u, --user                 use the user managed folder (the home folder, e.g. /home/username)
+  -p, --profile PROFILE,...  for init, add, update and remove: the profiles to act on
 
 Getting started:
-  aiplam init --global claude                         # ~ as base folder, with a profile for Claude Code
+  aiplam init --user --agent claude                   # ~ as managed folder, with a profile for Claude Code
   aiplam add arxila ~/Workspace/arxila-ai-playbook    # register a playbook and link its artifacts
   aiplam list
 
@@ -198,26 +208,32 @@ Run 'aiplam <command> --help' for a command's help, and 'aiplam --version' for t
 	return b.String()
 }
 
-// agentsHelp describes the agents and the kinds of artifacts each one reads, from the agents table.
-func agentsHelp() string {
+// templatesHelp describes the agent templates and their target folders, from the templates table.
+func templatesHelp() string {
 	var b strings.Builder
-	where := func(p config.Place, prefix string) string {
-		if p.IsZero() {
-			return "not in the home folder"
+	for _, t := range config.TemplateTable {
+		name := t.Name
+		if t.Standard {
+			name += " (and " + t.Name + config.StandardVariant + ")"
 		}
-		return prefix + p.Dir + "/" + p.Sub
-	}
-	for _, ag := range config.AgentTable {
-		fmt.Fprintf(&b, "  %-9s %s\n", ag.Name, ag.Product)
-		for _, k := range ag.SupportedKinds() {
-			s := ag.Kinds[k]
-			format := s.Format.Ext + " files"
-			if s.Format.File != "" {
-				format = "folders with a " + s.Format.File
+		fmt.Fprintf(&b, "  %s: %s\n", name, t.Product)
+		for _, tt := range t.Targets {
+			user := "not in the user managed folder"
+			if tt.User != "" {
+				user = "~/" + tt.User
+				if tt.UserWindows != "" {
+					user += " (Windows: " + tt.UserWindows + ")"
+				}
 			}
-			fmt.Fprintf(&b, "    %-13s %s, %s (%s)\n", k, where(s.Project, ""), where(s.Home, "~/"), format)
+			project := "not in projects"
+			if tt.Project != "" {
+				project = tt.Project
+			}
+			fmt.Fprintf(&b, "    %-13s %s, %s\n", tt.Kind, project, user)
 		}
 	}
+	fmt.Fprintf(&b, "  The %s variants link skills from .agents/skills instead (in projects and in ~).\n",
+		config.StandardVariant)
 	return b.String()
 }
 
@@ -225,10 +241,10 @@ func agentsHelp() string {
 func (a *App) Run(args []string) int {
 	args, opts, err := extractGlobal(args)
 	if err != nil {
-		return a.exitCode(err, a.mainUsage())
+		return a.exitCode(err, "Run 'aiplam --help' for help.\n")
 	}
-	a.Profile, a.baseArg, a.global = opts.profile, opts.base, opts.global
-	a.Base, a.baseShown, a.hintProfile = "", false, ""
+	a.Profiles, a.user = opts.profiles, opts.user
+	a.Managed, a.managedShown, a.elsewhere = "", false, false
 	if len(args) == 0 {
 		fmt.Fprint(a.Stderr, a.mainUsage())
 		return ExitUsage
@@ -265,141 +281,114 @@ func (a *App) Run(args []string) int {
 				return ExitOK
 			}
 		}
-		if a.baseArg != "" && a.global {
-			return a.exitCode(usagef("--base and --global cannot be used together"), c.usage)
+		if len(a.Profiles) > 0 && !c.profiles {
+			return a.exitCode(usagef("'aiplam %s' does not take --profile", c.name), c.usage)
 		}
-		if c.name != "init" {
-			if err := a.resolveBase(); err != nil {
+		if !c.resolves {
+			if err := a.resolveManaged(a.Cwd); err != nil {
 				return a.exitCode(err, c.usage)
 			}
 			if err := a.checkSandbox(); err != nil {
 				return a.exitCode(err, c.usage)
 			}
-			// Commands that change the configuration or the links run one at a time per base folder (init takes the
-			// lock itself, once it knows the base folder).
-			if c.name != "list" && c.name != "check" {
-				unlock, err := a.lock()
-				if err != nil {
-					return a.exitCode(err, c.usage)
-				}
-				defer unlock()
+		}
+		// Commands that change the configuration or the links run one at a time per managed folder (init takes the
+		// lock itself, once it knows the managed folder).
+		if !c.resolves && !c.readOnly {
+			unlock, err := a.lock()
+			if err != nil {
+				return a.exitCode(err, c.usage)
 			}
+			defer unlock()
 		}
 		return a.exitCode(c.run(a, args[1:]), c.usage)
 	}
 	a.errorf("unknown command: %s", args[0])
-	fmt.Fprint(a.Stderr, "\n"+a.mainUsage())
+	fmt.Fprint(a.Stderr, "\nRun 'aiplam --help' for the commands.\n")
 	return ExitUsage
 }
 
 // globalOptions are the options that Run removes from the command line before running a command.
 type globalOptions struct {
-	profile string // --profile/-p, or ""
-	base    string // --base/-b, or ""
-	global  bool   // --global/-g
+	profiles []string // --profile/-p (repeatable, each a comma-separated list)
+	user     bool     // --user/-u
 }
 
-// extractGlobal removes the --profile/-p, --base/-b and --global/-g options (allowed anywhere before "--") from args
-// and returns them.
+// extractGlobal removes the --profile/-p and --user/-u options (allowed anywhere before "--") from args and returns
+// them.
 func extractGlobal(args []string) ([]string, globalOptions, error) {
 	var opts globalOptions
-	var rest []string
+	var rest, profiles []string
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--" {
 			rest = append(rest, args[i:]...)
 			break
 		}
-		if arg == "--global" || arg == "-g" {
-			opts.global = true
-			continue
-		}
-		var name, value string
 		switch {
-		case arg == "--profile" || arg == "-p" || arg == "--base" || arg == "-b":
+		case arg == "--user" || arg == "-u":
+			opts.user = true
+		case arg == "--profile" || arg == "-p":
 			if i+1 >= len(args) {
 				return nil, opts, usagef("option %s needs a value", arg)
 			}
 			i++
-			name, value = arg, args[i]
+			profiles = append(profiles, args[i])
+		case strings.HasPrefix(arg, "--profile=") || strings.HasPrefix(arg, "-p="):
+			_, v, _ := strings.Cut(arg, "=")
+			profiles = append(profiles, v)
 		default:
-			found := false
-			for _, prefix := range []string{"--profile=", "-p=", "--base=", "-b="} {
-				if v, ok := strings.CutPrefix(arg, prefix); ok {
-					name, value, found = strings.TrimSuffix(prefix, "="), v, true
-					break
-				}
-			}
-			if !found {
-				rest = append(rest, arg)
-				continue
-			}
+			rest = append(rest, arg)
 		}
-		switch name {
-		case "--profile", "-p":
-			if !config.ValidProfileName(value) {
-				return nil, opts, invalidProfileName(value)
-			}
-			opts.profile = value
-		default:
-			if value == "" {
-				return nil, opts, usagef("option %s needs a base folder", name)
-			}
-			opts.base = value
+	}
+	if len(profiles) > 0 {
+		names, err := profileNameList(profiles)
+		if err != nil {
+			return nil, opts, err
 		}
+		opts.profiles = names
 	}
 	return rest, opts, nil
 }
 
-// resolveBase sets a.Base: the folder given with --base (which must hold a configuration), the home folder with
-// --global, or else the nearest folder holding a configuration from the current folder up, or the home folder.
-func (a *App) resolveBase() error {
-	switch {
-	case a.baseArg != "":
-		dir := a.absPath(a.baseArg)
-		if !config.IsBase(dir) {
-			return fmt.Errorf("'%s' is not a base folder (%s is missing); set it up with 'aiplam init %s <agent>'",
-				a.baseArg, a.pretty(config.Dir(dir)), a.baseArg)
+// resolveManaged sets a.Managed: the home folder with --user, or else the managed folder that applies to start (see
+// config.FindManaged). It fails when there is none.
+func (a *App) resolveManaged(start string) error {
+	home := fsutil.Canonical(a.Home)
+	if a.user {
+		a.Managed = home
+		if !config.IsManaged(home) {
+			return fmt.Errorf("the home folder '%s' is not a managed folder (%s is missing): make it one with "+
+				"'aiplam init --user --agent <agent>' first", a.pretty(home), a.pretty(config.Dir(home)))
 		}
-		a.Base = dir
-	case a.global:
-		a.Base = a.Home
-	default:
-		a.Base = config.FindBase(a.absPathAsGiven(a.Cwd), a.Home)
+		return nil
 	}
+	managed, ok := config.FindManaged(a.absPathAsGiven(start), home)
+	if !ok {
+		return fmt.Errorf("no managed folder applies to '%s': none was found from it up to the home folder, and the "+
+			"home folder is not one either. Make one with 'aiplam init <folder> --agent <agent>' (or 'aiplam init "+
+			"--user --agent <agent>', for the home folder) first", a.pretty(a.absPathAsGiven(start)))
+	}
+	a.Managed = managed
 	return nil
 }
 
-// showBase prints, once per command, the base folder whose configuration the command uses.
-func (a *App) showBase() {
-	if !a.baseShown {
-		a.baseShown = true
-		a.printf("Base folder: %s\n", a.pretty(a.Base))
+// isUser reports whether the managed folder is the user managed folder (the home folder).
+func (a *App) isUser() bool {
+	return fsutil.SamePath(a.Managed, fsutil.Canonical(a.Home))
+}
+
+// showManaged prints, once per command, the managed folder whose configuration the command uses.
+func (a *App) showManaged() {
+	if a.managedShown {
+		return
 	}
-}
-
-// baseOption returns the option that selects the base folder in suggested commands: the one given, if any.
-func (a *App) baseOption() string {
-	switch {
-	case a.baseArg != "":
-		return " --base " + a.pretty(a.Base)
-	case a.global:
-		return " --global"
+	a.managedShown = true
+	if a.isUser() {
+		a.printf("Managed folder: %s (user managed folder)\n", a.pretty(a.Managed))
+	} else {
+		a.printf("Managed folder: %s\n", a.pretty(a.Managed))
 	}
-	return ""
-}
-
-// isHome reports whether the base folder is the home folder, whose agents configuration folders can differ from those
-// of other base folders.
-func (a *App) isHome() bool {
-	return fsutil.SamePath(a.Base, fsutil.Canonical(a.Home))
-}
-
-// markAncestors turns into conflicts the creations of a plan whose artifact already exists where the same agent reads
-// the same kind of artifact in a higher-level base folder (see config.Ancestors), which agents may read besides the
-// base folder's.
-func (a *App) markAncestors(plan *playbook.Plan) {
-	playbook.MarkAncestors(plan, config.Ancestors(a.Base, a.Home), fsutil.Canonical(a.Home))
 }
 
 // lockName is the name of the lock file in the .aiplam folder; ignoreName, of the file that keeps it (and the
@@ -409,23 +398,23 @@ const (
 	ignoreName = ".gitignore"
 )
 
-// lock makes sure that no other aiplam command changes the base folder while this one runs, and defers the first
+// lock makes sure that no other aiplam command changes the managed folder while this one runs, and defers the first
 // interruption (Ctrl+C) until it ends, so that the links and the configuration stay consistent: changes take
-// milliseconds. A second interruption stops aiplam at once. It does nothing for a base folder without a .aiplam folder
-// (the command then fails, as it is not set up). The returned function releases the lock and reports an interruption
+// milliseconds. A second interruption stops aiplam at once. It does nothing for a folder without a .aiplam folder (the
+// command then fails, as it is not set up). The returned function releases the lock and reports an interruption
 // received meanwhile.
 func (a *App) lock() (func(), error) {
-	dir := config.Dir(a.Base)
+	dir := config.Dir(a.Managed)
 	if !fsutil.IsDir(dir) {
 		return func() {}, nil
 	}
 	unlock, err := fsutil.Lock(filepath.Join(dir, lockName))
 	if errors.Is(err, fsutil.ErrLocked) {
-		return nil, fmt.Errorf("another aiplam command is changing base folder '%s': try again when it ends",
-			a.pretty(a.Base))
+		return nil, fmt.Errorf("another aiplam command is changing managed folder '%s': try again when it ends",
+			a.pretty(a.Managed))
 	}
 	if err != nil {
-		return nil, fmt.Errorf("cannot lock base folder '%s': %w", a.pretty(a.Base), err)
+		return nil, fmt.Errorf("cannot lock managed folder '%s': %w", a.pretty(a.Managed), err)
 	}
 	if ignore := filepath.Join(dir, ignoreName); !fsutil.IsFile(ignore) {
 		_ = os.WriteFile(ignore, []byte("# aiplam's lock file, and temporary files of interrupted saves.\n/"+lockName+
@@ -463,6 +452,11 @@ func (a *App) exitCode(err error, usage string) int {
 	var ue *usageError
 	if errors.As(err, &ue) {
 		a.errorf("%s", ue.msg)
+		// Only the synopsis: the full help is a --help away.
+		if synopsis, _, ok := strings.Cut(usage, "\n\n"); ok && strings.HasPrefix(usage, "Usage: aiplam ") {
+			name, _, _ := strings.Cut(strings.TrimPrefix(usage, "Usage: aiplam "), " ")
+			usage = synopsis + "\n\nRun 'aiplam " + name + " --help' for details.\n"
+		}
 		fmt.Fprint(a.Stderr, "\n"+usage)
 		return ExitUsage
 	}
@@ -500,17 +494,15 @@ func (a *App) pretty(path string) string {
 // absPath resolves a path given on the command line: "~" is expanded and relative paths are taken from the current
 // folder; symbolic links are resolved when the path exists.
 func (a *App) absPath(path string) string {
+	return fsutil.Canonical(a.absPathAsGiven(path))
+}
+
+// absPathAsGiven returns a path given on the command line as an absolute, cleaned path ("~" expanded, relative paths
+// taken from the current folder), without resolving links.
+func (a *App) absPathAsGiven(path string) string {
 	path = fsutil.ExpandHome(path, a.Home)
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(a.Cwd, path)
-	}
-	return fsutil.Canonical(path)
-}
-
-// absPathAsGiven returns path as an absolute, cleaned path, without resolving links.
-func (a *App) absPathAsGiven(path string) string {
-	if abs, err := filepath.Abs(path); err == nil {
-		return abs
 	}
 	return filepath.Clean(path)
 }
@@ -527,42 +519,27 @@ func (a *App) version(folder string) gitinfo.Version {
 	return a.Git.Read(folder)
 }
 
-func invalidProfileName(name string) error {
-	return usagef("invalid profile name '%s': use letters, digits, '_' and '-', starting with a letter or digit ('%s' is "+
-		"reserved)", name, config.BaseConfigName)
-}
-
-// cmd returns an aiplam command line to suggest to the user, with the --profile option when the command acts on a
-// profile that is not the enabled one.
-func (a *App) cmd(command string) string {
-	if a.hintProfile == "" {
-		return a.hint(command)
-	}
-	return a.hint(command) + " --profile " + a.hintProfile
-}
-
-// hint returns an aiplam command line to suggest to the user, with the option that selects the base folder when one
-// was given.
+// hint returns an aiplam command line to suggest to the user, acting on the managed folder of the command: with --user
+// when it was given (or the managed folder, given as a folder, is the user one), or run from inside the managed folder
+// when the current folder leads to another one.
 func (a *App) hint(command string) string {
-	return "aiplam " + command + a.baseOption()
-}
-
-// noProfileOption fails when --profile was given to a command that does not take it.
-func (a *App) noProfileOption(command string) error {
-	if a.Profile != "" {
-		return usagef("'aiplam %s' does not take --profile", command)
+	switch {
+	case a.user || (a.elsewhere && a.isUser()):
+		return "aiplam " + command + " --user"
+	case a.elsewhere:
+		return "cd " + a.pretty(a.Managed) + " && aiplam " + command
 	}
-	return nil
+	return "aiplam " + command
 }
 
-// loadBaseConfig loads the base folder's configuration and fails when it does not exist or is not valid.
-func (a *App) loadBaseConfig() (*config.BaseConfig, error) {
-	file := a.pretty(config.BaseConfigFile(a.Base))
-	conf, err := config.LoadBaseConfig(a.Base)
+// loadConfig loads the aiplam configuration and fails when it does not exist or is not valid.
+func (a *App) loadConfig() (*config.Config, error) {
+	file := a.pretty(config.ConfigFile(a.Managed))
+	conf, err := config.LoadConfig(a.Managed)
 	if errors.Is(err, config.ErrNotInitialized) {
 		return nil, a.notInitialized()
 	}
-	a.showBase()
+	a.showManaged()
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w; fix it by hand", file, err)
 	}
@@ -570,46 +547,48 @@ func (a *App) loadBaseConfig() (*config.BaseConfig, error) {
 		for _, e := range errs {
 			a.errorf("%s: %s", file, e)
 		}
-		a.errorf("fix %s by hand; '%s' lists its problems.", file, a.hint("check"))
+		a.errorf("fix %s by hand.", file)
 		return nil, errSilent
 	}
 	return conf, nil
 }
 
-// notInitialized returns the error for a base folder without configuration.
+// notInitialized returns the error for a managed folder without aiplam configuration.
 func (a *App) notInitialized() error {
-	if a.baseArg != "" || a.global || config.IsBase(a.Base) {
-		arg := a.pretty(a.Base)
-		if fsutil.SamePath(a.Base, fsutil.Canonical(a.Home)) {
-			arg = "--global"
-		}
-		return fmt.Errorf("'%s' is not set up as a base folder (%s is missing): run 'aiplam init %s <agent>' first",
-			a.pretty(a.Base), a.pretty(config.BaseConfigFile(a.Base)), arg)
+	arg := a.pretty(a.Managed)
+	if a.isUser() {
+		arg = "--user"
 	}
-	return errors.New("no base folder was found from the current folder up, nor in the home folder: run " +
-		"'aiplam init <basefolder> <agent>' (or 'aiplam init --global <agent>', for the home folder) first")
+	return fmt.Errorf("'%s' has a %s folder but no %s: run 'aiplam init %s --agent <agent>' to set it up",
+		a.pretty(a.Managed), config.DirName, config.ConfigName+config.FileExt, arg)
 }
 
 // profileState is a loaded profile.
 type profileState struct {
 	name    string
 	prof    *config.Profile
-	agent   config.Agent
-	folders []config.KindFolder // where its agent reads artifacts in the base folder
-	enabled bool                // whether it is enabled (linked from the agents configuration folders)
-	entries []playbook.Entry    // its playbooks
+	enabled bool              // whether it is enabled (its playbooks are linked)
+	entries []playbook.Entry  // its playbooks
+	targets []playbook.Target // its target folders, resolved
 }
 
-// group returns the profile's playbooks and the folders where their artifacts are linked.
+// group returns the profile's playbooks and targets.
 func (s *profileState) group() playbook.Group {
-	return playbook.Group{Profile: s.name, Entries: s.entries, Folders: s.folders}
+	return playbook.Group{Profile: s.name, Entries: s.entries, Targets: s.targets}
 }
 
 // newProfileState builds the state of a loaded (valid) profile.
-func (a *App) newProfileState(name string, prof *config.Profile, enabled bool) *profileState {
-	agent, _ := config.LookupAgent(prof.Agent)
-	return &profileState{name: name, prof: prof, agent: agent, folders: agent.KindFolders(a.Base, a.isHome()),
-		enabled: enabled, entries: playbook.Entries(name, prof.Playbooks, a.Base)}
+func (a *App) newProfileState(prof *config.Profile, enabled bool) (*profileState, error) {
+	s := &profileState{name: prof.Name, prof: prof, enabled: enabled,
+		entries: playbook.Entries(prof.Name, prof.Playbooks, a.Managed)}
+	for _, t := range prof.Targets {
+		dir, stop, err := config.TargetDir(a.Managed, t.Folder, a.AppData)
+		if err != nil {
+			return nil, fmt.Errorf("profile '%s': %w", prof.Name, err)
+		}
+		s.targets = append(s.targets, playbook.Target{Kind: t.Kind, Folder: t.Folder, Dir: dir, Stop: stop})
+	}
+	return s, nil
 }
 
 // groups returns the groups of profiles.
@@ -623,70 +602,40 @@ func groups(profiles []*profileState) []playbook.Group {
 
 // state is what commands that act on profiles work with.
 type state struct {
-	conf     *config.BaseConfig
-	profiles []*profileState // the profiles acted on: the one given with --profile, or the enabled ones
-	enabled  []*profileState // every enabled profile
-	missing  []string        // the enabled profiles whose file is missing (only with loadSkippingMissing)
+	conf    *config.Config
+	enabled []*profileState // the enabled profiles (those whose file exists)
+	missing []string        // the enabled profiles whose file is missing (only with skipMissing)
 }
 
-// others returns the enabled profiles other than profile.
-func (st *state) others(profile string) []playbook.Group {
-	var others []*profileState
+// profile returns the enabled profile named name, or nil.
+func (st *state) profile(managed, name string) *profileState {
 	for _, s := range st.enabled {
-		if s.name != profile {
-			others = append(others, s)
-		}
-	}
-	return groups(others)
-}
-
-// entries returns the playbooks of the profiles acted on.
-func (st *state) entries() []playbook.Entry {
-	var all []playbook.Entry
-	for _, s := range st.profiles {
-		all = append(all, s.entries...)
-	}
-	return all
-}
-
-// profile returns the loaded profile named name.
-func (st *state) profile(name string) *profileState {
-	for _, s := range st.profiles {
-		if s.name == name {
+		if config.SameProfile(managed, s.name, name) {
 			return s
 		}
 	}
 	return nil
 }
 
-// file returns the path of the profile's file, for display.
+// profileFile returns the path of a profile's file, for display.
 func (a *App) profileFile(profile string) string {
-	return a.pretty(config.ProfileFile(a.Base, profile))
+	return a.pretty(config.ProfileFile(a.Managed, profile))
 }
 
-// load loads the base folder's configuration, every enabled profile, and the profile given with --profile (which must
-// exist). It fails when any of them is missing or not valid.
-func (a *App) load() (*state, error) {
-	return a.loadProfiles(false)
-}
-
-// loadSkippingMissing is load for commands that only read: an enabled profile whose file is missing is left out, with
-// a warning, and recorded in the state's missing profiles.
-func (a *App) loadSkippingMissing() (*state, error) {
-	return a.loadProfiles(true)
-}
-
-func (a *App) loadProfiles(skipMissing bool) (*state, error) {
-	conf, err := a.loadBaseConfig()
+// loadState loads the aiplam configuration and every enabled profile. An enabled profile whose file is missing makes
+// it fail, unless skipMissing is set: it is then left out, with a warning, and recorded in the state's missing
+// profiles.
+func (a *App) loadState(skipMissing bool) (*state, error) {
+	conf, err := a.loadConfig()
 	if err != nil {
 		return nil, err
 	}
 	st := &state{conf: conf}
 	for _, name := range conf.Enabled {
-		if !config.ProfileExists(a.Base, name) {
+		if !config.ProfileExists(a.Managed, name) {
 			missing := fmt.Sprintf("the enabled profile '%s' does not exist (%s is missing): disable it with '%s', or "+
 				"create it again with '%s'", name, a.profileFile(name), a.hint("profile disable "+name),
-				a.hint("profile add "+name+" <agent>"))
+				a.hint("profile add "+name+" --agent <agent>"))
 			if !skipMissing {
 				return nil, errors.New(missing)
 			}
@@ -700,68 +649,92 @@ func (a *App) loadProfiles(skipMissing bool) (*state, error) {
 		}
 		st.enabled = append(st.enabled, s)
 	}
-	if a.Profile == "" {
-		st.profiles = st.enabled
-		return st, nil
-	}
-	if !config.ProfileExists(a.Base, a.Profile) {
-		return nil, fmt.Errorf("profile '%s' does not exist; create it with '%s' ('%s' lists the profiles)", a.Profile,
-			a.hint("profile add "+a.Profile+" <agent>"), a.hint("profile list"))
-	}
-	for _, s := range st.enabled {
-		if config.SameProfile(a.Base, s.name, a.Profile) {
-			st.profiles = []*profileState{s}
-			return st, nil
-		}
-	}
-	s, err := a.loadProfileState(a.Profile, false)
-	if err != nil {
-		return nil, err
-	}
-	st.profiles = []*profileState{s}
 	return st, nil
 }
 
+// loadProfileState loads a profile and builds its state; it fails when the profile is missing or not valid.
 func (a *App) loadProfileState(name string, enabled bool) (*profileState, error) {
 	prof, err := a.loadProfile(name)
 	if err != nil {
 		return nil, err
 	}
-	return a.newProfileState(name, prof, enabled), nil
-}
-
-// useProfile makes the commands suggested from now on name profile with --profile, unless it is the only enabled
-// profile.
-func (a *App) useProfile(st *state, s *profileState) {
-	a.hintProfile = ""
-	if !s.enabled || len(st.enabled) > 1 {
-		a.hintProfile = s.name
-	}
+	return a.newProfileState(prof, enabled)
 }
 
 // loadProfile loads a profile and fails when it is missing or not valid.
 func (a *App) loadProfile(profile string) (*config.Profile, error) {
-	prof, err := config.LoadProfile(a.Base, profile)
+	// The profile is known by its file's name ("work", even when given as "Work" on a file system that ignores case),
+	// which its content must repeat, so that it is saved back to the same file.
+	profile = config.ProfileName(a.Managed, profile)
+	prof, err := config.LoadProfile(a.Managed, profile)
 	if errors.Is(err, config.ErrNoProfile) {
 		return nil, fmt.Errorf("profile '%s' does not exist ('%s' lists the profiles)", profile, a.hint("profile list"))
 	}
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w; fix it by hand", a.profileFile(profile), err)
 	}
-	if errs := prof.Validate(a.Base); len(errs) > 0 {
+	if errs := prof.Validate(a.Managed, profile, a.isUser()); len(errs) > 0 {
 		for _, e := range errs {
 			a.errorf("%s: %s", a.profileFile(profile), e)
 		}
-		a.errorf("fix %s by hand; '%s' lists its problems.", a.profileFile(profile), a.hint("check --profile "+profile))
+		a.errorf("fix %s by hand.", a.profileFile(profile))
 		return nil, errSilent
 	}
 	return prof, nil
 }
 
-// notEnabledNote explains that a profile's playbooks are not linked.
-func (a *App) notEnabledNote(profile string) string {
-	return fmt.Sprintf("profile '%s' is not enabled (its playbooks are linked for its agent when it is enabled with "+
-		"'%s')", profile, a.hint("profile enable "+profile))
+// selectProfiles returns the profiles a command acts on: those given with --profile (enabled or not), or else the
+// enabled profile, which must be the only one.
+func (a *App) selectProfiles(st *state, verb string) ([]*profileState, error) {
+	if len(a.Profiles) == 0 {
+		switch len(st.enabled) {
+		case 1:
+			return st.enabled, nil
+		case 0:
+			return nil, fmt.Errorf("no profile is enabled: choose the profile to %s with --profile", verb)
+		}
+		return nil, fmt.Errorf("%d profiles are enabled (%s): choose the profile to %s with --profile",
+			len(st.enabled), profileNames(st.enabled), verb)
+	}
+	var selected []*profileState
+	for _, name := range a.Profiles {
+		if s := st.profile(a.Managed, name); s != nil {
+			selected = append(selected, s)
+			continue
+		}
+		if !config.ProfileExists(a.Managed, name) {
+			return nil, fmt.Errorf("profile '%s' does not exist; create it with '%s' ('%s' lists the profiles)", name,
+				a.hint("profile add "+name+" --agent <agent>"), a.hint("profile list"))
+		}
+		s, err := a.loadProfileState(name, st.conf.IsEnabled(a.Managed, name))
+		if err != nil {
+			return nil, err
+		}
+		selected = append(selected, s)
+	}
+	return selected, nil
+}
+
+// withProfile returns a suggested aiplam command, with --profile when the profile has to be named (it is not the only
+// enabled one).
+func (a *App) withProfile(st *state, profile, command string) string {
+	if len(st.enabled) == 1 && st.enabled[0].name == profile {
+		return a.hint(command)
+	}
+	return a.hint(command + " --profile " + profile)
+}
+
+// replaceProfiles returns profiles with those named like one of updated replaced by it.
+func replaceProfiles(profiles []*profileState, updated ...*profileState) []*profileState {
+	out := append([]*profileState{}, profiles...)
+	for i, p := range out {
+		for _, u := range updated {
+			if p.name == u.name {
+				out[i] = u
+			}
+		}
+	}
+	return out
 }
 
 // profileNames returns the names of profiles, separated by commas.
@@ -773,56 +746,61 @@ func profileNames(profiles []*profileState) string {
 	return strings.Join(names, ", ")
 }
 
-// where describes the profiles acted on, for messages: "profile 'x'", "the enabled profiles (x, y)" or "no enabled
-// profile".
-func (st *state) where() string {
-	switch {
-	case len(st.profiles) == 1:
-		return fmt.Sprintf("profile '%s'", st.profiles[0].name)
-	case len(st.profiles) == 0:
-		return "no enabled profile"
-	}
-	return "the enabled profiles (" + profileNames(st.profiles) + ")"
+// notEnabledNote explains that a profile's playbooks are not linked.
+func (a *App) notEnabledNote(profile string) string {
+	return fmt.Sprintf("profile '%s' is not enabled (its playbooks are linked when it is enabled with '%s')", profile,
+		a.hint("profile enable "+profile))
 }
 
-// selectEntry finds the registered playbook that args designate among those of the profiles acted on:
+// templateCheck warns when a profile created from an agent template no longer has the template's targets.
+func (a *App) templateCheck(s *profileState) {
+	if s.prof.Agent == config.CustomAgent {
+		return
+	}
+	targets, ok := config.TemplateTargets(s.prof.Agent, a.isUser(), a.GOOS)
+	if !ok || targets.Same(s.prof.Targets) {
+		return
+	}
+	var want []string
+	for _, t := range targets {
+		want = append(want, t.Kind+": "+t.Folder)
+	}
+	a.warnf("profile '%s': its targets no longer match those of agent template '%s' (%s); if they were changed on "+
+		"purpose, set 'agent: %s' in %s.", s.name, s.prof.Agent, strings.Join(want, ", "), config.CustomAgent,
+		a.profileFile(s.name))
+}
+
+// targetList describes a profile's targets, one per line, indented.
+func targetList(targets config.Targets) string {
+	var b strings.Builder
+	for _, t := range targets {
+		fmt.Fprintf(&b, "  %s: %s\n", t.Kind, t.Folder)
+	}
+	return b.String()
+}
+
+// selectEntry finds the registered playbook of a profile that args designate:
 //   - no argument: the playbook registered for the current folder (it must be the only one there);
 //   - one argument: an id, else a name, else a folder, each of which must designate a single playbook;
 //   - two arguments: a name and a folder, which must match a single registered playbook.
-func (a *App) selectEntry(st *state, args []string) (playbook.Entry, error) {
-	entries := st.entries()
-	several := len(st.profiles) > 1
-	label := func(e playbook.Entry) string {
-		if several {
-			return e.ID + " of profile " + e.Profile
-		}
-		return e.ID
-	}
+func (a *App) selectEntry(s *profileState, args []string) (playbook.Entry, error) {
 	list := func(es []playbook.Entry) string {
-		var s []string
+		var ids []string
 		for _, e := range es {
-			s = append(s, label(e))
+			ids = append(ids, e.ID)
 		}
-		return strings.Join(s, ", ")
+		return strings.Join(ids, ", ")
 	}
 	filter := func(match func(playbook.Entry) bool) []playbook.Entry {
 		var out []playbook.Entry
-		for _, e := range entries {
+		for _, e := range s.entries {
 			if match(e) {
 				out = append(out, e)
 			}
 		}
 		return out
 	}
-	// ambiguous builds the error for several matches, suggesting --profile when they belong to different profiles.
-	ambiguous := func(what string, matches []playbook.Entry, give string) error {
-		for _, m := range matches[1:] {
-			if m.Profile != matches[0].Profile {
-				return fmt.Errorf("several playbooks match %s (%s); choose the profile with --profile", what, list(matches))
-			}
-		}
-		return fmt.Errorf("several playbooks match %s (%s); %s", what, list(matches), give)
-	}
+	where := fmt.Sprintf("profile '%s'", s.name)
 	switch len(args) {
 	case 0:
 		cwd := fsutil.Canonical(a.Cwd)
@@ -830,11 +808,12 @@ func (a *App) selectEntry(st *state, args []string) (playbook.Entry, error) {
 		switch len(matches) {
 		case 0:
 			return playbook.Entry{}, fmt.Errorf("no playbook of %s is registered for the current folder '%s'; give "+
-				"a name, id or playbook folder ('%s' shows them)", st.where(), a.pretty(a.Cwd), a.hint("list"))
+				"a name, id or playbook folder", where, a.pretty(a.Cwd))
 		case 1:
 			return matches[0], nil
 		default:
-			return playbook.Entry{}, ambiguous("the current folder", matches, "give a name or id")
+			return playbook.Entry{}, fmt.Errorf("several playbooks of %s are registered for the current folder (%s); "+
+				"give a name or id", where, list(matches))
 		}
 	case 1:
 		arg := args[0]
@@ -845,32 +824,30 @@ func (a *App) selectEntry(st *state, args []string) (playbook.Entry, error) {
 			if matches := filter(match); len(matches) == 1 {
 				return matches[0], nil
 			} else if len(matches) > 1 {
-				return playbook.Entry{}, ambiguous("'"+arg+"'", matches, "give an id, or the name and the playbook folder")
+				return playbook.Entry{}, fmt.Errorf("several playbooks of %s match '%s' (%s); give an id, or the name "+
+					"and the playbook folder", where, arg, list(matches))
 			}
 		}
 		folder := a.absPath(arg)
 		matches := filter(func(e playbook.Entry) bool { return fsutil.SamePath(e.Dir, folder) })
 		switch len(matches) {
 		case 0:
-			return playbook.Entry{}, fmt.Errorf("no playbook of %s is registered with name, id or playbook folder '%s' "+
-				"('%s' shows them)", st.where(), arg, a.hint("list"))
+			return playbook.Entry{}, fmt.Errorf("no playbook of %s is registered with name, id or playbook folder '%s'",
+				where, arg)
 		case 1:
 			return matches[0], nil
 		default:
-			return playbook.Entry{}, ambiguous("playbook folder '"+arg+"'", matches, "give a name or id")
+			return playbook.Entry{}, fmt.Errorf("several playbooks of %s are registered for playbook folder '%s' (%s); "+
+				"give a name or id", where, arg, list(matches))
 		}
 	case 2:
 		folder := a.absPath(args[1])
 		matches := filter(func(e playbook.Entry) bool { return e.Name == args[0] && fsutil.SamePath(e.Dir, folder) })
-		switch len(matches) {
-		case 0:
-			return playbook.Entry{}, fmt.Errorf("no playbook of %s named '%s' is registered for playbook folder '%s'",
-				st.where(), args[0], args[1])
-		case 1:
+		if len(matches) == 1 {
 			return matches[0], nil
-		default:
-			return playbook.Entry{}, ambiguous("'"+args[0]+"' in playbook folder '"+args[1]+"'", matches, "")
 		}
+		return playbook.Entry{}, fmt.Errorf("no playbook of %s named '%s' is registered for playbook folder '%s'",
+			where, args[0], args[1])
 	default:
 		return playbook.Entry{}, usagef("too many arguments")
 	}
@@ -891,95 +868,40 @@ func (a *App) cleanup(plan playbook.Plan) {
 	playbook.Cleanup(plan, func(dir string) { a.printf("  - %s (empty folder removed)\n", a.pretty(dir)) })
 }
 
-// folderList describes where the profile's agent reads artifacts in the base folder: "~/.claude/skills,
-// ~/.claude/agents, ...".
-func (a *App) folderList(s *profileState) string {
-	var dirs []string
-	for _, f := range s.folders {
-		dirs = append(dirs, a.pretty(f.Dir))
+// undo reverts the link changes of an applied plan after saving the configuration failed.
+func (a *App) undo(plan playbook.Plan, saveErr error, state string) error {
+	if err := playbook.Revert(plan.Changes()); err != nil {
+		return fmt.Errorf("%w; undoing the link changes also failed (%v): run '%s' to see what is left", saveErr, err,
+			a.hint("status"))
 	}
-	if len(dirs) == 0 {
-		return "none"
+	if len(plan.Changes()) == 0 {
+		return fmt.Errorf("%w; %s", saveErr, state)
 	}
-	return strings.Join(dirs, ", ")
-}
-
-// warnDoubleLoads warns about artifacts that agents may load twice: those linked by an enabled profile for an agent
-// that also reads the standard agent's folders, and by another enabled profile from those folders.
-func (a *App) warnDoubleLoads(profiles []*profileState) {
-	standard, _ := config.LookupAgent(config.DefaultAgent)
-	names := func(s *profileState, kind config.Kind) map[string]bool {
-		found := map[string]bool{}
-		for _, f := range s.folders {
-			if f.Kind != kind {
-				continue
-			}
-			for _, e := range s.entries {
-				items, _ := playbook.Items(s.entries, e, f)
-				for _, it := range items {
-					found[it.Name] = true
-				}
-			}
-		}
-		return found
-	}
-	for _, p := range profiles {
-		for _, kind := range p.agent.ReadsStandard {
-			std, ok := standard.Place(kind, a.isHome())
-			own, ownOK := p.agent.Place(kind, a.isHome())
-			if !ok || !ownOK || own == std {
-				continue
-			}
-			mine := names(p, kind)
-			for _, q := range profiles {
-				if place, ok := q.agent.Place(kind, a.isHome()); q == p || !ok || place != std {
-					continue
-				}
-				var both []string
-				for name := range names(q, kind) {
-					if mine[name] {
-						both = append(both, name)
-					}
-				}
-				if len(both) == 0 {
-					continue
-				}
-				sort.Strings(both)
-				what, verb, pronoun := kind.Singular()+" "+both[0], "is", "it"
-				if len(both) > 1 {
-					what, verb, pronoun = string(kind)+" "+strings.Join(both, ", "), "are", "they"
-				}
-				a.warnf("%s %s linked for agent %s (profile %s) and, by profile %s, from %s, which %s also reads: %s may "+
-					"be loaded twice; check how %s handles that.", what, verb, p.agent.Name, p.name, q.name,
-					a.pretty(filepath.Join(a.Base, filepath.FromSlash(std.Dir), filepath.FromSlash(std.Sub))),
-					p.agent.Name, pronoun, p.agent.Product)
-			}
-		}
-	}
+	return fmt.Errorf("%w; the link changes were undone and %s", saveErr, state)
 }
 
 // Advice for each kind of conflict (see conflictAdvice).
 const (
-	adviceInTheWay  = "remove or rename what is in the way"
-	adviceProviders = "unregister one of the playbooks that provide the same artifact, or rename it in one of them"
-	adviceAncestor  = "remove from the higher-level base folder the artifacts it already links (with 'aiplam remove " +
-		"... --base <basefolder>'; 'aiplam list --all' lists them)"
+	adviceInTheWay = "remove or rename what is in the way (a link to the same artifact made by another playbook or " +
+		"profile is in the way too: every link belongs to a single playbook of a single profile)"
+	adviceDuplicate = "give one of the playbooks a format (or name) that does not match the same artifacts, or " +
+		"unregister one of them"
+	adviceSame = "register the playbook in only one of the profiles enabled together"
 )
 
-// conflictAdvice says how to resolve the conflicts of a plan, for each kind of conflict it has: what is in the way of
-// a link, other playbooks providing the same artifact, and artifacts linked by a higher-level base folder.
+// conflictAdvice says how to resolve the conflicts of a plan, for each kind of conflict it has.
 func (a *App) conflictAdvice(plan playbook.Plan) string {
 	var advice []string
 	if hasConflicts(plan, playbook.NotLink, playbook.OtherLink, playbook.Exists) {
 		advice = append(advice, adviceInTheWay)
 	}
-	if hasConflicts(plan, playbook.OtherProvider) {
-		advice = append(advice, adviceProviders)
+	if hasConflicts(plan, playbook.Duplicate) {
+		advice = append(advice, adviceDuplicate)
 	}
-	if hasConflicts(plan, playbook.Ancestor) {
-		advice = append(advice, adviceAncestor)
+	if hasConflicts(plan, playbook.SamePlaybook) {
+		advice = append(advice, adviceSame)
 	}
-	return strings.Join(advice, ", and ") + ", then try again"
+	return strings.Join(advice, "; and ") + "; then try again"
 }
 
 // hasConflicts reports whether plan has conflicts with any of causes.
@@ -992,73 +914,50 @@ func hasConflicts(plan playbook.Plan, causes ...playbook.ConflictCause) bool {
 	return false
 }
 
+// printConflicts prints the conflicts of a plan, once each.
 func (a *App) printConflicts(plan playbook.Plan) {
-	for _, text := range a.conflictTexts(plan) {
-		a.warnf("%s", text)
-	}
-}
-
-// conflictTexts describes the conflicts of a plan, once each (an artifact provided by two playbooks conflicts in
-// every agents configuration folder).
-func (a *App) conflictTexts(plan playbook.Plan) []string {
-	var texts []string
 	seen := map[string]bool{}
 	for _, c := range plan.Conflicts() {
 		if text := a.conflictText(c); !seen[text] {
 			seen[text] = true
-			texts = append(texts, text)
+			a.errorf("%s", text)
 		}
 	}
-	return texts
 }
 
-// conflictText describes a conflicting action: "skill x-a: '~/.agents/skills/x-a' already exists and ...".
+// conflictText describes a conflicting action: "skills x-a (playbook x (profile default)): '~/.agents/skills/x-a'
+// already exists and ...".
 func (a *App) conflictText(c playbook.Action) string {
 	var why string
 	switch c.Cause {
+	case playbook.SamePlaybook:
+		return fmt.Sprintf("playbook %s: the same playbook (name '%s', playbook folder '%s') is registered in %s, and "+
+			"the same playbook cannot be in two enabled profiles", c.Playbook, c.Name, a.pretty(c.Source),
+			strings.Join(c.Others, ", "))
 	case playbook.OtherLink:
 		why = fmt.Sprintf("'%s' already exists and links to '%s'", a.pretty(c.Link), a.pretty(c.Current))
-	case playbook.OtherProvider:
-		why = "also provided by playbook " + strings.Join(c.Others, ", ")
 	case playbook.Exists:
-		why = fmt.Sprintf("'%s' already exists", a.pretty(c.Link))
-	case playbook.Ancestor:
-		why = fmt.Sprintf("'%s' already exists where agent %s reads it in a higher-level base folder, and agents "+
-			"reading both would see it twice", a.pretty(c.Current), c.Agent)
+		why = fmt.Sprintf("'%s' already exists, linking to the same artifact, but it does not belong to this playbook",
+			a.pretty(c.Link))
+	case playbook.Duplicate:
+		why = fmt.Sprintf("'%s' would also be linked by %s", a.pretty(c.Link), strings.Join(c.Others, ", "))
 	default:
 		why = fmt.Sprintf("'%s' already exists and is not a link", a.pretty(c.Link))
 	}
-	return fmt.Sprintf("%s %s: %s", c.Artifact.Singular(), c.Name, why)
+	return fmt.Sprintf("%s %s of playbook %s: %s", c.Artifact, c.Name, c.Playbook, why)
 }
 
-// checkPlaybookFolders returns an error when a playbook folder is missing, when an artifact folder set for a kind is
-// missing, or when one of the playbook's artifact folders (those set, and those for the kind folders of its profile's
-// agent, given in folders) lies outside the playbook folder (through a link).
-func (a *App) checkPlaybookFolders(e playbook.Entry, folders []config.KindFolder) error {
+// checkPlaybookFolders returns an error when a playbook folder is missing, or when one of its folders for the kinds
+// of its profile's targets lies outside the playbook folder (through a link).
+func (a *App) checkPlaybookFolders(e playbook.Entry, targets []playbook.Target) error {
 	if !fsutil.IsDir(e.Dir) {
-		return fmt.Errorf("playbook %s: playbook folder '%s' does not exist; restore it, or unregister the playbook "+
-			"with '%s'", e.ID, a.pretty(e.Dir), a.cmd("remove "+e.ID))
+		return fmt.Errorf("playbook %s: playbook folder '%s' does not exist; restore it, or unregister the playbook",
+			e.Label(), a.pretty(e.Dir))
 	}
-	check := func(kind config.Kind, dir string, set bool) error {
-		switch {
-		case !fsutil.IsDir(dir) && set:
-			return fmt.Errorf("playbook %s: %s folder '%s' does not exist", e.ID, kind, a.pretty(dir))
-		case fsutil.IsDir(dir) && !fsutil.Within(dir, e.Dir):
-			return fmt.Errorf("playbook %s: %s folder '%s' is outside the playbook folder '%s' (through a link)", e.ID,
-				kind, a.pretty(dir), a.pretty(e.Dir))
-		}
-		return nil
-	}
-	for _, k := range config.Kinds {
-		if e.PathSet(k) {
-			if err := check(k, e.PathDir(e.Artifacts.Kind(k).Path), true); err != nil {
-				return err
-			}
-		}
-	}
-	for _, f := range folders {
-		if err := check(f.Kind, e.KindDir(f), false); err != nil {
-			return err
+	for _, t := range targets {
+		if dir := e.SourceDir(t.Kind); fsutil.IsDir(dir) && !fsutil.Within(dir, e.Dir) {
+			return fmt.Errorf("playbook %s: its %s folder '%s' is outside the playbook folder '%s' (through a link)",
+				e.Label(), t.Kind, a.pretty(dir), a.pretty(e.Dir))
 		}
 	}
 	return nil

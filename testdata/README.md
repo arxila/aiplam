@@ -2,9 +2,9 @@
 
 Small playbooks with different layouts, for trying aiplam by hand and for the tests (`TestTestdataPlaybooks` in
 `internal/app/testdata_test.go` runs the scenarios below). Go ignores folders named `testdata`, so nothing here is
-built. Their prefixes follow the `aiplam-<fruit or vegetable>` convention.
+built. Their names follow the `aiplam-<fruit or vegetable>` convention.
 
-| Playbook                    | Skills artifact folder | Skills                                                    |
+| Playbook                    | Skills subfolder       | Skills                                                    |
 |-----------------------------|------------------------|-----------------------------------------------------------|
 | `aiplam-lettuce-playbook`   | `skills/` (default)    | `aiplam-lettuce-review`, `aiplam-lettuce-deploy`,         |
 |                             |                        | `aiplam-lettuce-data-clean`, `aiplam-lettuce-data-report` |
@@ -16,82 +16,82 @@ built. Their prefixes follow the `aiplam-<fruit or vegetable>` convention.
 
 What each one covers:
 
-- `aiplam-lettuce-playbook`: two overlapping prefixes in one repository, `aiplam-lettuce` and the longer
-  `aiplam-lettuce-data`. `skills/aiplam-lettuce-notes` (no `SKILL.md`) and `skills/other-tool` (no registered
-  prefix) are not skills. It also has artifacts of other kinds, which the standard agent ignores: a subagent in two
-  formats (`agents/aiplam-lettuce-reviewer.md`, and `.agent.md` for Copilot), a command
-  (`commands/aiplam-lettuce-ship.md`) and a rule (`rules/aiplam-lettuce-style.md`).
-- `aiplam-tomato-playbook`: skills at the root of the repository, with two unrelated prefixes (`aiplam-tomato` and
-  `aiplam-garlic`); `docs/` is not a skill.
-- `aiplam-lettuce-fork`: the name `aiplam-lettuce` from a second playbook folder, with a custom skills path.
-- `aiplam-blueberry-playbook`: registered as `aiplam-lettuce` it is cancelled, because `aiplam-lettuce-review` is
-  already provided; registered as `aiplam-blueberry` it works.
+- `aiplam-lettuce-playbook`: `skills/aiplam-lettuce-notes` has no `SKILL.md`, but it matches the default format
+  (`aiplam-lettuce-*`), so it is linked as well: aiplam links whatever the format matches. `skills/other-tool` does
+  not match it. Registering the same folder again as `aiplam-lettuce-data` fails: its format overlaps, and every link
+  belongs to a single playbook. It also has artifacts of other kinds: a subagent in two formats
+  (`agents/aiplam-lettuce-reviewer.md`, and `.agent.md` for Copilot), a command (`commands/aiplam-lettuce-ship.md`)
+  and a rule (`rules/aiplam-lettuce-style.md`). Its subagents are in `agents/`, not in the default `subagents/`.
+- `aiplam-tomato-playbook`: skills at the root of the repository, with two unrelated names (`aiplam-tomato` and
+  `aiplam-garlic`) whose formats do not overlap; `docs/` matches neither.
+- `aiplam-lettuce-fork`: the name `aiplam-lettuce` from a second playbook folder, with its skills in `ai/skills`.
+- `aiplam-blueberry-playbook`: registered as `aiplam-lettuce` it is refused, because `aiplam-lettuce-review` is
+  already linked; registered as `aiplam-blueberry` it works.
 
 ## Trying them
 
 `make sandbox` builds aiplam and opens a shell where `HOME` is a new temporary folder, with copies of these playbooks
 in `~/playbooks`. The real `~/.aiplam`, `~/.agents`, `~/.claude` and so on are not touched: in the sandbox shell
-(where `AIPLAM_SANDBOX` is set), aiplam refuses any base folder outside the sandbox, even when run from a folder
-outside it. In the copies,
-`aiplam-lettuce-playbook` is a git repository with tags `v1.0.0` (without `aiplam-lettuce-data-report`) and `v1.1.0`,
-and `aiplam-tomato-playbook` is a git repository on branch `main`; the others are plain folders (version `unknown`).
+(where `AIPLAM_SANDBOX` is set), aiplam refuses any managed folder outside the sandbox, even when run from a folder
+outside it. In the copies, `aiplam-lettuce-playbook` is a git repository with tags `v1.0.0` (without
+`aiplam-lettuce-data-report`) and `v1.1.0`, and `aiplam-tomato-playbook` is a git repository on branch `main`; the
+others are plain folders (version `unknown`).
 
 ```bash
 cd ~/playbooks
-aiplam init --global standard                             # a profile for the standard agent: ~/.agents
+aiplam init --user --agent standard                       # a profile with skills in ~/.agents/skills
 
-# 4 skills
+# 5 skills (aiplam-lettuce-notes included)
 aiplam add aiplam-lettuce aiplam-lettuce-playbook
-# longest prefix: takes over aiplam-lettuce-data-*
+# refused: its format overlaps aiplam-lettuce's in the same folder
 aiplam add aiplam-lettuce-data aiplam-lettuce-playbook
 # ids become aiplam-lettuce@aiplam-lettuce-playbook and aiplam-lettuce@aiplam-lettuce-fork
-aiplam add aiplam-lettuce aiplam-lettuce-fork --skills-path ai/skills
-# cancelled: aiplam-lettuce-review is already provided
+aiplam add aiplam-lettuce aiplam-lettuce-fork --folder skills:ai/skills
+# refused: aiplam-lettuce-review is already linked
 aiplam add aiplam-lettuce aiplam-blueberry-playbook
 aiplam add aiplam-blueberry aiplam-blueberry-playbook
-# skills at the root, two prefixes in the same playbook folder
-aiplam add aiplam-tomato aiplam-tomato-playbook --skills-path .
-aiplam add aiplam-garlic aiplam-tomato-playbook --skills-path .
+# skills at the root, two names on the same playbook folder
+aiplam add aiplam-tomato aiplam-tomato-playbook --folder skills:.
+aiplam add aiplam-garlic aiplam-tomato-playbook --folder skills:.
 aiplam list
-aiplam check
+aiplam status
 
-# select another version: check reports the link to remove, and update removes it
+# select another version: status reports the link to remove, and update removes it
 git -C aiplam-lettuce-playbook switch -q --detach v1.0.0
-aiplam check
-aiplam update aiplam-lettuce-data
+aiplam status
+aiplam update aiplam-lettuce@aiplam-lettuce-playbook
 
-# a second profile that collides with the first one (both provide aiplam-tomato): it can replace it, not join it
-aiplam profile add other standard
-aiplam add aiplam-tomato aiplam-tomato-playbook --skills-path . -p other
-aiplam profile enable other                               # fails: its links already exist
+# a second profile registering the same playbook: it can replace the first one, not join it
+aiplam profile add other --agent standard
+aiplam add aiplam-tomato aiplam-tomato-playbook --folder skills:. -p other
+aiplam profile enable other                               # refused: the same playbook in two enabled profiles
 aiplam profile switch other                               # disable default, enable other
 aiplam profile list
 aiplam profile switch default
 
 # a third profile that does not collide can be enabled besides the first one
-aiplam profile add extra standard
+aiplam profile add extra --agent standard
 aiplam remove aiplam-blueberry
 aiplam add aiplam-blueberry aiplam-blueberry-playbook -p extra
 aiplam profile enable extra
 aiplam list
 
-# another working scope, 'greens', assigned Claude Code: skills, subagent, command and rule linked from ~/.claude,
-# with no collision with the profiles for the standard agent
-aiplam profile add greens claude
-aiplam add aiplam-lettuce aiplam-lettuce-playbook -p greens
+# another working scope for Claude Code, with the lettuce playbook under another name (the same playbook cannot be
+# in two enabled profiles), its formats given by hand, and its subagents in agents/
+aiplam profile add greens --agent claude
+aiplam add greens aiplam-lettuce-playbook -p greens -f 'skills:skills:aiplam-lettuce-*' \
+    -f 'subagents:agents:aiplam-lettuce-*.md' -f 'commands:commands:aiplam-lettuce-*' -f 'rules:rules:aiplam-lettuce-*'
 aiplam profile enable greens
-# greens assigned Copilot instead: the .agent.md subagent, from ~/.copilot; warns that Copilot also reads ~/.agents
-aiplam profile agent greens copilot
-aiplam profile disable greens                             # ~/.copilot is removed once empty
+aiplam list
+aiplam profile disable greens                             # ~/.claude is removed once empty
 
-# a project base folder, used by the commands run anywhere inside the base folder ~/projects/demo
+# a project's managed folder, used by the commands run anywhere inside ~/projects/demo
 mkdir -p ~/projects/demo/module && cd ~/projects/demo
 git init -q                                               # init then suggests what to add to .gitignore
-aiplam init . standard                                    # .aiplam in ~/projects/demo
-aiplam add aiplam-garlic ~/playbooks/aiplam-tomato-playbook -sp .   # fails: already linked from ~/.agents
-aiplam remove aiplam-garlic --global
-aiplam add aiplam-garlic ~/playbooks/aiplam-tomato-playbook -sp .   # linked from ~/projects/demo/.agents
+aiplam init . --agent standard                            # .aiplam in ~/projects/demo
+aiplam add aiplam-garlic ~/playbooks/aiplam-tomato-playbook --folder skills:.   # ~/projects/demo/.agents/skills
 cat .aiplam/default.yaml                                  # folder: ../../playbooks/aiplam-tomato-playbook
 cd module
-aiplam list --all                                         # the project's base folder, then ~
+aiplam status                                             # the project's managed folder, and its git repository
+aiplam list --user                                        # the user managed folder's links
 ```

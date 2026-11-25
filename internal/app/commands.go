@@ -19,11 +19,10 @@
 package app
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
+	"sort"
 	"strings"
 
 	"arxila.io/aiplam/internal/config"
@@ -31,102 +30,104 @@ import (
 	"arxila.io/aiplam/internal/playbook"
 )
 
+// targetOptions documents --agent and --folder for init and profile add.
+const targetOptions = `Target folders (exactly one of):
+  -a, --agent AGENT              take them from an agent template (` + "'aiplam profile --help'" + ` lists them): the
+                                 template only fills them in; the profile then works as if they had been given by hand
+  -f, --folder KIND:FOLDER,...   give them by hand: the folder, relative to the managed folder, where the artifacts of
+                                 each kind are linked. Kinds are any names (skills, subagents, my-prompts...); they
+                                 match the playbooks' subfolders of the same name. Repeat the option or separate the
+                                 items with commas; quote folders holding commas or colons ("my, folder"). Folders
+                                 cannot contain '..'; in the user managed folder, they can start with %APPDATA%
+                                 (Windows)`
+
+// targetsFromOptions returns the agent and the targets given with --agent or --folder, for the user managed folder when
+// user is set.
+func (a *App) targetsFromOptions(p parsedArgs, user bool, command string) (string, config.Targets, error) {
+	agents, folders := p.values["agent"], p.values["folder"]
+	switch {
+	case len(agents) == 0 && len(folders) == 0:
+		return "", nil, usagef("%s needs the target folders: an agent template with --agent (%s), or folders with "+
+			"--folder <kind>:<folder>", command, config.TemplateList())
+	case len(agents) > 0 && len(folders) > 0:
+		return "", nil, usagef("give either --agent or --folder, not both")
+	case len(agents) > 1:
+		return "", nil, usagef("--agent can be given only once")
+	case len(agents) == 1:
+		targets, ok := config.TemplateTargets(agents[0], user, a.GOOS)
+		if !ok {
+			return "", nil, usagef("unknown agent template '%s': use %s", agents[0], config.TemplateList())
+		}
+		return agents[0], targets, nil
+	}
+	targets, err := parseTargets(folders, user, a.GOOS)
+	return config.CustomAgent, targets, err
+}
+
 // --- init ---------------------------------------------------------------------------------------------------------
 
-var initUsage = `Usage: aiplam init <basefolder> <agent> [--profile PROFILE]
-       aiplam init --global <agent> [--profile PROFILE]
+var initUsage = `Usage: aiplam init <folder> (--agent AGENT | --folder KIND:FOLDER...) [--profile PROFILE...]
+       aiplam init --user (--agent AGENT | --folder KIND:FOLDER...) [--profile PROFILE...]
 
-Sets up <basefolder> as a base folder:
-  - creates <basefolder>/.aiplam, holding its configuration (aiplam-config.yaml, and one <profile>.yaml per profile);
-  - creates a first profile, with <agent> assigned, and enables it.
+Makes <folder> (or, with --user, the home folder) a managed folder:
+  - creates <folder>/.aiplam, holding its configuration (aiplam-config.yaml, and one <profile>.yaml per profile);
+  - creates its first profiles (by default, one named 'default'), all with the same target folders, and enables them.
 
-<agent> is one of: ` + strings.Join(config.AgentNames(), ", ") + `.
-'aiplam profile --help' describes them. A profile's agent decides which kinds of its playbooks' artifacts are linked,
-in which format, and from which agents configuration folders of <basefolder> (.agents/skills for the standard agent,
-.claude/skills, .claude/agents, ... for Claude Code). Those folders are created when an artifact is first linked there.
-More profiles, for other working scopes (a client, a team, a kind of work...), can be added later with
-'aiplam profile add', usually with the same agent, though each profile can have its own.
+From then on, commands run anywhere inside <folder> use its configuration: each command uses the nearest managed
+folder from the current folder up to the home folder (or, when there is none, the home folder, if it is managed).
 
-From then on, commands run anywhere inside <basefolder> use its configuration: each command uses the nearest base
-folder from the current folder up, or else the home folder (unless given --base or --global).
-
-Agents read the agents configuration folders of the folder they start in, of the home folder and, some of them, of
-every folder in between. So an artifact already linked for an agent in a higher-level base folder cannot be linked
-for the same agent in <basefolder>.
+` + targetOptions + `
 
 Options:
-  -g, --global            use the user's home folder (e.g. /home/username) as base folder, instead of <basefolder>
-  -p, --profile PROFILE   the name of the first profile (default: 'default')
+  -u, --user                 make the home folder (e.g. /home/username) the managed folder, instead of <folder>
+  -p, --profile PROFILE,...  the names of the first profiles (default: 'default'); repeat the option or separate the
+                             names with commas
 
 Examples:
-  aiplam init --global claude               # ~/.aiplam, with a first profile for Claude Code (~/.claude)
-  aiplam init --global standard             # ~/.aiplam, with a first profile for the standard agent (~/.agents)
-  aiplam init . claude --profile backend    # the current folder, with a first profile named 'backend'
-  aiplam init ~/Workspace/thymeleaf claude  # a project: commands run inside it use its configuration
+  aiplam init --user --agent claude                 # ~/.aiplam, with a profile for Claude Code (~/.claude/...)
+  aiplam init . --agent junie:standard              # Junie, with skills in .agents/skills
+  aiplam init . --folder skills:.agents/skills,rules:.junie/rules --profile backend
+  aiplam init ~/Workspace/thymeleaf --agent claude --profile work,personal
 `
 
 func (a *App) cmdInit(args []string) error {
-	p, err := parseArgs(args, []string{"agent"}, nil)
+	p, err := parseArgs(args, []string{"agent", "folder"}, nil)
 	if err != nil {
 		return err
 	}
-	if _, ok := p.values["agent"]; ok {
-		return usagef("init takes the agent as an argument after the base folder, not with --agent (for example " +
-			"'aiplam init . claude' or 'aiplam init --global claude')")
-	}
-	if a.baseArg != "" {
-		return usagef("init takes the base folder to set up as an argument, not with --base")
-	}
-	agents := strings.Join(config.AgentNames(), ", ")
-	isAgent := func(name string) bool { _, ok := config.LookupAgent(name); return ok }
-	pos := p.positional
 	switch {
-	case len(pos) == 0:
-		return usagef("init needs the base folder to set up, or --global for the home folder, and then the agent to "+
-			"link playbooks for (%s): for example 'aiplam init . claude' or 'aiplam init --global claude'", agents)
-	case a.global && len(pos) > 1:
-		return usagef("give either a base folder or --global, not both")
-	case !a.global && len(pos) == 1 && isAgent(pos[0]):
-		return usagef("init needs the base folder to set up before the agent (for example 'aiplam init . %s'), or "+
-			"--global for the home folder ('aiplam init --global %s')", pos[0], pos[0])
-	case !a.global && len(pos) == 1:
-		return usagef("init needs the agent after the base folder: 'aiplam init %s <agent>', with <agent> one of %s",
-			pos[0], agents)
-	case len(pos) > 2:
-		return usagef("unexpected argument: %s", pos[2])
+	case a.user && len(p.positional) > 0:
+		return usagef("give either a folder or --user, not both")
+	case !a.user && len(p.positional) == 0:
+		return usagef("init needs the folder to make a managed folder, or --user for the home folder")
+	case len(p.positional) > 1:
+		return usagef("unexpected argument: %s", p.positional[1])
 	}
-	name := pos[len(pos)-1]
-	agent, ok := config.LookupAgent(name)
-	if !ok {
-		if len(pos) == 2 && isAgent(pos[0]) {
-			return usagef("init takes the base folder first, then the agent: 'aiplam init %s %s'", pos[1], pos[0])
-		}
-		return usagef("unknown agent '%s': use %s", name, agents)
+	a.Managed = fsutil.Canonical(a.Home)
+	if !a.user {
+		a.Managed = a.absPath(p.positional[0])
 	}
-	a.Base = a.Home
-	if !a.global {
-		a.Base = a.absPath(pos[0])
-		if info, err := os.Stat(a.Base); err == nil && !info.IsDir() {
-			return fmt.Errorf("'%s' is not a folder: give the folder to set up as a base folder", pos[0])
+	// The targets depend on whether the folder is the home folder, given with --user or not.
+	agent, targets, err := a.targetsFromOptions(p, a.isUser(), "init")
+	if err != nil {
+		return err
+	}
+	if !a.user {
+		if info, err := os.Stat(a.Managed); err == nil && !info.IsDir() {
+			return fmt.Errorf("'%s' is not a folder: give the folder to make a managed folder", p.positional[0])
 		}
-		if !fsutil.IsDir(a.Base) {
-			return fmt.Errorf("base folder '%s' does not exist", pos[0])
+		if !fsutil.IsDir(a.Managed) {
+			return fmt.Errorf("folder '%s' does not exist", p.positional[0])
 		}
 	}
 	if err := a.checkSandbox(); err != nil {
 		return err
 	}
-	profile := a.Profile
-	if profile == "" {
-		profile = config.DefaultProfile
+	profiles := a.Profiles
+	if len(profiles) == 0 {
+		profiles = []string{config.DefaultProfile}
 	}
-	// Commands suggested from here on name the base folder when the current folder does not lead to it.
-	useBase := func() {
-		if !a.global && !fsutil.SamePath(config.FindBase(a.absPathAsGiven(a.Cwd), a.Home), a.Base) {
-			a.baseArg = a.Base
-		}
-	}
-	if err := os.MkdirAll(config.Dir(a.Base), 0o755); err != nil {
+	if err := os.MkdirAll(config.Dir(a.Managed), 0o755); err != nil {
 		return err
 	}
 	unlock, err := a.lock()
@@ -134,147 +135,113 @@ func (a *App) cmdInit(args []string) error {
 		return err
 	}
 	defer unlock()
-	file := config.BaseConfigFile(a.Base)
+	file := config.ConfigFile(a.Managed)
 	if _, err := os.Stat(file); err == nil {
-		useBase()
-		return fmt.Errorf("'%s' is already set up as a base folder: %s exists. Manage its profiles, and their "+
-			"agents, with '%s'", a.pretty(a.Base), a.pretty(file), a.hint("profile"))
+		return fmt.Errorf("'%s' is already a managed folder: %s exists. Manage its profiles with 'aiplam profile'",
+			a.pretty(a.Managed), a.pretty(file))
 	}
-	if config.ProfileExists(a.Base, profile) {
-		// Left by an earlier setup whose configuration file was lost: removing the profile would lose its playbooks.
-		return fmt.Errorf("%s already exists, from an earlier setup of this base folder whose %s is missing: to keep "+
-			"its profiles, recreate %s by hand, listing the profiles to enable (for example 'enabled: [%s]'); or "+
-			"choose another name for the first profile with --profile", a.profileFile(profile),
-			a.pretty(config.BaseConfigFile(a.Base)), config.BaseConfigName+config.FileExt, profile)
+	for _, profile := range profiles {
+		if config.ProfileExists(a.Managed, profile) {
+			// Left by an earlier setup whose configuration file was lost: overwriting it would lose its playbooks.
+			return fmt.Errorf("%s already exists, from an earlier setup of this managed folder whose %s is missing: to "+
+				"keep its profiles, recreate %s by hand, listing the profiles to enable (for example 'enabled: [%s]'); "+
+				"or choose other profile names with --profile", a.profileFile(profile), a.pretty(file),
+				config.ConfigName+config.FileExt, profile)
+		}
 	}
-	prof := &config.Profile{Agent: agent.Name}
-	if err := config.SaveProfile(a.Base, profile, prof); err != nil {
+	a.showManaged()
+	// On a failure, the profiles already written are removed, so that init can simply be run again.
+	var written []string
+	undo := func(err error) error {
+		for _, profile := range written {
+			_ = os.Remove(config.ProfileFile(a.Managed, profile))
+		}
 		return err
 	}
-	if err := config.SaveBaseConfig(a.Base, &config.BaseConfig{Enabled: []string{profile}}); err != nil {
-		return err
+	for _, profile := range profiles {
+		if err := config.SaveProfile(a.Managed, &config.Profile{Name: profile, Agent: agent, Targets: targets}); err != nil {
+			return undo(err)
+		}
+		written = append(written, profile)
 	}
-	useBase()
-	s := a.newProfileState(profile, prof, true)
+	if err := config.SaveConfig(a.Managed, &config.Config{Enabled: profiles}); err != nil {
+		return undo(err)
+	}
 	a.printf("Created %s\n", a.pretty(file))
-	a.printf("Created profile '%s' (%s), with agent %s (%s), enabled: its playbooks' artifacts are linked from %s.\n",
-		profile, a.profileFile(profile), agent.Name, agent.Product, a.folderList(s))
-	a.printHigherLevels()
-	if repo := gitRepository(a.Base); repo != "" && len(s.folders) > 0 {
+	for _, profile := range profiles {
+		a.printf("Created profile '%s' (%s), with agent %s, enabled\n", profile, a.profileFile(profile), agent)
+	}
+	a.printf("Target folders (where the artifacts of each kind are linked, relative to the managed folder):\n%s",
+		targetList(targets))
+	if !a.isUser() {
+		// Only a managed folder above it (the home folder applies to folders outside it too, but does not hold them).
+		if above, ok := config.FindManaged(filepath.Dir(a.Managed), a.Home); ok && !fsutil.SamePath(above, a.Managed) &&
+			fsutil.Within(a.Managed, above) {
+			a.printf("Note: '%s' is inside managed folder '%s': from now on, commands run inside '%s' use its own "+
+				"configuration.\n", a.pretty(a.Managed), a.pretty(above), a.pretty(a.Managed))
+		}
+	}
+	if repo := config.GitRepository(a.Managed); repo != "" {
 		var lines []string
-		for _, f := range s.folders {
-			rel, _ := filepath.Rel(a.Base, f.Dir)
-			lines = append(lines, "'/"+filepath.ToSlash(rel)+"/<name>-*'")
+		for _, t := range targets {
+			lines = append(lines, "'/"+t.Folder+"/<name>-*'")
 		}
 		a.printf("Note: '%s' is inside a git repository. The %s folder can be committed to share the configuration "+
-			"(playbook folders are stored relative to '%s'), but the links aiplam makes in the agents configuration "+
-			"folders belong to each machine (and cannot be committed on Windows): add them to '%s', with lines such as "+
-			"%s for each playbook name (and the same for the agents of profiles added later).\n", a.pretty(a.Base),
-			config.DirName, a.pretty(a.Base), a.pretty(filepath.Join(a.Base, ".gitignore")), strings.Join(lines, ", "))
+			"(playbook folders are stored relative to '%s'), but the links aiplam makes in the target folders belong to "+
+			"each machine (and cannot be committed on Windows): add them to '%s', with lines such as %s for each "+
+			"playbook name (or matching the format given to 'aiplam add').\n", a.pretty(a.Managed), config.DirName,
+			a.pretty(a.Managed), a.pretty(filepath.Join(a.Managed, ".gitignore")), strings.Join(lines, ", "))
 	}
-	a.printf("Next: register a playbook with '%s'.\n", a.cmd("add <name> <playbookfolder>"))
+	next := "add <name> <playbookfolder>"
+	if len(profiles) > 1 {
+		next += " --profile <profile>"
+	}
+	a.printf("Next: register a playbook with '%s'.\n", a.hint(next))
 	return nil
-}
-
-// printHigherLevels notes, after init, the higher-level base folders whose artifacts cannot be linked here: the home
-// folder's agents configuration folders are read by every agent, and those of the base folders in between by some.
-func (a *App) printHigherLevels() {
-	home, between := false, []string{}
-	for _, r := range config.Ancestors(a.Base, a.Home) {
-		if fsutil.SamePath(r, fsutil.Canonical(a.Home)) {
-			home = true
-		} else {
-			between = append(between, a.pretty(r))
-		}
-	}
-	const rule = "artifacts already linked there for an agent cannot be linked here for the same agent"
-	homeDir := strings.TrimSuffix(a.Home, string(filepath.Separator)) + string(filepath.Separator)
-	switch {
-	case home && len(between) == 0:
-		a.printf("Note: the home folder at %s is also being used as a base folder for playbook management, and "+
-			"agents always read its agents configuration folders: %s.\n", homeDir, rule)
-	case home:
-		a.printf("Note: higher-level base folders exist: the home folder at %s, whose agents configuration folders "+
-			"agents always read, and %s, whose agents configuration folders some agents read too: %s.\n",
-			homeDir, strings.Join(between, ", "), rule)
-	case len(between) > 0:
-		a.printf("Note: higher-level base folders exist (%s), and some agents read their agents configuration "+
-			"folders too: %s.\n", strings.Join(between, ", "), rule)
-	}
-}
-
-// gitRepository returns the folder of the git repository that holds dir (the nearest folder from dir up with a .git
-// folder or file), or "".
-func gitRepository(dir string) string {
-	for {
-		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
-			return dir
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return ""
-		}
-		dir = parent
-	}
 }
 
 // --- add ----------------------------------------------------------------------------------------------------------
 
-const addUsage = `Usage: aiplam add <name> <playbookfolder> [--<kind>-path PATH...] [--profile PROFILE]
+const addUsage = `Usage: aiplam add <name> <playbookfolder> [--folder KIND:SUBFOLDER[:FORMAT]...] [--profile PROFILE...]
 
-Registers the playbook in <playbookfolder> under <name> in a profile and, if the profile is enabled, links the
-playbook's artifacts that the profile's agent reads, at whatever tag or commit is checked out:
-  - the profile is the one given with --profile, which can be left out when exactly one profile is enabled;
-  - its artifacts are those named '<name>-*' in its artifact folder for each kind: skills (folders holding a
-    SKILL.md), and subagents (custom agent definitions, which some agents, such as Copilot and OpenCode, also offer
-    as primary agents), commands, prompts, rules and instructions (files);
-  - only the kinds the agent reads are linked, and only the files in its format ('.md', '.agent.md', '.toml', ...),
-    each from the agent's folder for the kind in the base folder ('aiplam profile --help' lists them); a playbook
-    registered in several profiles with different agents is linked by each for its agent;
-  - <playbookfolder> is stored relative to the base folder;
+Registers the playbook in <playbookfolder> under <name> in profiles and, in those that are enabled, links its
+artifacts into their target folders, at whatever tag or commit is checked out:
+  - the profiles are those given with --profile, enabled or not; it can be left out when exactly one profile is
+    enabled;
+  - for each kind of the profile's targets, the artifacts are the entries (folders and files alike) of the
+    playbook's subfolder for the kind whose names match the kind's format: by default, the subfolder named like the
+    kind and the format '<name>-*'. Hidden entries (named '.*') are never artifacts;
+  - <playbookfolder> is stored relative to the managed folder;
   - several playbooks can share a name if the last segments of their playbook folders differ: their ids are then
     '<name>@<last folder segment>'.
 
-The playbook's artifact folder for each kind is, by default, named like the subfolder where the profile's agent
-reads that kind: skills/, agents/ (for subagents), commands/, prompts/, rules/ and instructions/ for every agent known
-so far. Defaults are not stored, so they follow the profile's agent if it changes; a folder set with the options
-below is stored, and used whatever the agent. At least one artifact folder for a kind the agent reads must exist in
-<playbookfolder>.
+Subfolders that do not exist yet are fine: what a subfolder holds is linked whenever the playbook is updated or its
+profile enabled.
 
-aiplam never links or edits an agent's main instructions file (AGENTS.md, CLAUDE.md, ...): there is only one per
-folder. A playbook's guidelines go in rules or instructions instead (rules/<name>-guidelines.md, ...), one file per
-playbook, which agents load besides their main instructions file (see the README for each agent's details).
-
-Nothing is changed if:
-  - something other than the right link is already where a link must go;
-  - another playbook of the profile, or of another enabled profile, needs a link at the same place (profiles for
-    codex and for the standard agent, for example, share .agents/skills);
-  - an artifact with the same name is already linked for the same agent in a higher-level base folder.
+Every link belongs to a single playbook of a single profile, so nothing is registered or linked if:
+  - something is already where a link must go, even a link to the same artifact made by another playbook or profile;
+  - another playbook, of this profile or of another enabled profile, would link something at the same place;
+  - the same playbook (same name and playbook folder) is registered in another enabled profile.
 
 Options:
-  -sp, --skills-path PATH         the skills folder, relative to <playbookfolder> ('.' for <playbookfolder> itself)
-  -sap, --subagents-path PATH     the subagents folder
-  -cp, --commands-path PATH       the commands folder
-  -pp, --prompts-path PATH        the prompts folder
-  -rp, --rules-path PATH          the rules folder
-  -ip, --instructions-path PATH   the instructions folder
-  -p, --profile PROFILE           the profile to register it in (default: the enabled profile, when only one is)
+  -f, --folder KIND:SUBFOLDER[:FORMAT],...   where the artifacts of KIND are: SUBFOLDER of <playbookfolder> ('.' for
+                                             <playbookfolder> itself, never '..'), and the FORMAT of their names, in
+                                             which '*' matches any characters (default: '<name>-*'). KIND must be a
+                                             kind of every profile given. Repeat the option or separate the items with
+                                             commas; quote values holding commas or colons
+  -p, --profile PROFILE,...                  the profiles to register it in (default: the enabled profile, when only
+                                             one is)
 
 Examples:
-  aiplam add arxila .                                     # the current folder: skills/, agents/, ... in it
-  aiplam add arxila ~/Workspace/arxila-ai-playbook --skills-path ai/skills --subagents-path ai/subagents
-  aiplam add acme ../acme-ai-playbook --profile acme      # in profile 'acme', linked only if it is enabled
+  aiplam add arxila .                                          # the current folder: skills/, subagents/... in it
+  aiplam add arxila ~/Workspace/arxila-ai-playbook --folder skills:ai/skills --folder subagents:agents
+  aiplam add team ../team-playbook --folder skills:.          # skills named team-* at the playbook's root
+  aiplam add acme . -f 'subagents:agents:acme-*.agent.md'      # only the subagents in GitHub Copilot's format
+  aiplam add acme ../acme-ai-playbook --profile acme,acme-ci   # in profiles 'acme' and 'acme-ci'
 `
 
-// pathOption returns the name of the option that sets the folder of a kind of artifact: "skills-path".
-func pathOption(k config.Kind) string { return string(k) + "-path" }
-
 func (a *App) cmdAdd(args []string) error {
-	var options []string
-	for _, k := range config.Kinds {
-		options = append(options, pathOption(k))
-	}
-	p, err := parseArgs(args, options, nil)
+	p, err := parseArgs(args, []string{"folder"}, nil)
 	if err != nil {
 		return err
 	}
@@ -285,143 +252,133 @@ func (a *App) cmdAdd(args []string) error {
 	if !config.ValidName(name) {
 		return usagef("invalid name '%s': use letters, digits, '.', '_' and '-', starting with a letter or digit", name)
 	}
+	mappings, err := parseMappings(p.values["folder"])
+	if err != nil {
+		return err
+	}
+	if len(mappings) == 0 {
+		mappings = nil
+	}
 	folder := a.absPath(p.positional[1])
 	if !fsutil.IsDir(folder) {
 		return fmt.Errorf("playbook folder '%s' does not exist", p.positional[1])
 	}
-	var artifacts config.Artifacts
-	for _, k := range config.Kinds {
-		if _, ok := p.values[pathOption(k)]; !ok {
-			continue
-		}
-		path := p.value(pathOption(k))
-		if !config.ValidArtifactPath(path) {
-			return usagef("--%s must be a path inside the playbook folder, relative to it", pathOption(k))
-		}
-		artifacts.Kind(k).Path = filepath.ToSlash(filepath.Clean(path))
-	}
 
-	st, err := a.load()
+	st, err := a.loadState(false)
 	if err != nil {
 		return err
 	}
-	if len(st.profiles) != 1 {
-		if len(st.profiles) == 0 {
-			return errors.New("no profile is enabled: choose the profile to register the playbook in with --profile")
-		}
-		return fmt.Errorf("%d profiles are enabled (%s): choose the one to register the playbook in with --profile",
-			len(st.profiles), profileNames(st.profiles))
-	}
-	profile := st.profiles[0]
-	a.useProfile(st, profile)
-	current := profile.entries
-	for _, e := range current {
-		if e.Name != name {
-			continue
-		}
-		if fsutil.SamePath(e.Dir, folder) {
-			return fmt.Errorf("playbook '%s' is already registered for playbook folder '%s' in profile '%s' (id %s); "+
-				"use '%s'", name,
-				a.pretty(folder), profile.name, e.ID, a.cmd("update "+e.ID))
-		}
-		if fsutil.SameName(filepath.Base(e.Dir), filepath.Base(folder)) {
-			return fmt.Errorf("a playbook named '%s' is already registered for playbook folder '%s', whose last segment equals "+
-				"that of '%s': their ids would collide", name, a.pretty(e.Dir), a.pretty(folder))
-		}
-	}
-	rel, err := config.RelFolder(a.Base, folder)
+	selected, err := a.selectProfiles(st, "register the playbook in")
 	if err != nil {
 		return err
 	}
-
-	entry := config.Playbook{Name: name, Folder: rel, Artifacts: artifacts}
-	updated := &config.Profile{Agent: profile.prof.Agent,
-		Playbooks: append(append([]config.Playbook{}, profile.prof.Playbooks...), entry)}
-	final := a.newProfileState(profile.name, updated, profile.enabled)
-	e := final.entries[len(final.entries)-1]
-	if err := a.checkPlaybookFolders(e, final.folders); err != nil {
+	rel, err := config.RelFolder(a.Managed, folder)
+	if err != nil {
 		return err
 	}
-	// The playbook must have at least one artifact folder for a kind that its profile's agent reads.
-	var expected []string
-	found := false
-	for _, f := range final.folders {
-		if path := e.Path(f.Kind, f.DefaultPath) + "/"; !slices.Contains(expected, path) {
-			expected = append(expected, path)
+	var updated []*profileState
+	var entries []playbook.Entry
+	scope := map[playbook.Key]bool{}
+	for _, s := range selected {
+		for kind := range mappings {
+			if _, ok := s.prof.Targets.Folder(kind); !ok {
+				return usagef("--folder: '%s' is not a kind of profile '%s' (its kinds: %s)", kind, s.name,
+					strings.Join(s.prof.Targets.Kinds(), ", "))
+			}
 		}
-		found = found || fsutil.IsDir(e.KindDir(f))
-	}
-	if !found {
-		return fmt.Errorf("none of the artifact folders for the kinds that agent %s reads (%s) was found in '%s': set "+
-			"them with --skills-path and the like ('.' for the playbook folder itself)", final.agent.Name,
-			strings.Join(expected, ", "), a.pretty(folder))
+		for _, e := range s.entries {
+			if e.Name != name {
+				continue
+			}
+			if fsutil.SamePath(e.Dir, folder) {
+				return fmt.Errorf("playbook '%s' is already registered for playbook folder '%s' in profile '%s' (id %s); "+
+					"use '%s'", name, a.pretty(folder), s.name, e.ID, a.withProfile(st, s.name, "update "+e.ID))
+			}
+			if fsutil.SameName(filepath.Base(e.Dir), filepath.Base(folder)) {
+				return fmt.Errorf("a playbook named '%s' is already registered in profile '%s' for playbook folder '%s', "+
+					"whose last segment equals that of '%s': their ids would collide", name, s.name, a.pretty(e.Dir),
+					a.pretty(folder))
+			}
+		}
+		prof := *s.prof
+		prof.Playbooks = append(append([]config.Playbook{}, s.prof.Playbooks...),
+			config.Playbook{Name: name, Folder: rel, Mappings: mappings})
+		u, err := a.newProfileState(&prof, s.enabled)
+		if err != nil {
+			return err
+		}
+		e := u.entries[len(u.entries)-1]
+		if err := a.checkPlaybookFolders(e, u.targets); err != nil {
+			return err
+		}
+		updated = append(updated, u)
+		entries = append(entries, e)
+		if u.enabled {
+			scope[e.Key()] = true
+		}
 	}
 
 	var plan playbook.Plan
-	if profile.enabled {
-		plan, err = playbook.Build(final.group(), e, st.others(profile.name))
+	if len(scope) > 0 {
+		plan, err = playbook.Transition(groups(st.enabled), groups(replaceProfiles(st.enabled, updated...)), scope)
 		if err != nil {
 			return err
 		}
-		a.markAncestors(&plan)
-	} else {
-		// Nothing is linked, but the profile must stay linkable: no two playbooks needing a link at the same place.
-		plan.Actions, err = playbook.Overlaps(final.group(), e)
-		if err != nil {
-			return err
+		if len(plan.Conflicts()) > 0 {
+			a.printConflicts(plan)
+			a.errorf("playbook '%s' was not added: %s.", name, a.conflictAdvice(plan))
+			return errSilent
 		}
-	}
-	if len(plan.Conflicts()) > 0 {
-		a.printConflicts(plan)
-		a.errorf("playbook '%s' was not added: %s.", e.ID, a.conflictAdvice(plan))
-		return errSilent
 	}
 
-	a.printf("Adding playbook %s (%s) from %s to profile '%s'\n", e.ID, a.version(folder), a.pretty(folder), profile.name)
+	a.printf("Adding playbook %s (%s) from %s to profile(s) %s\n", name, a.version(folder), a.pretty(folder),
+		profileNames(selected))
+	total := 0
+	for i, u := range updated {
+		a.printf("  profile '%s':\n", u.name)
+		total += a.printSources(u, entries[i])
+	}
 	if err := playbook.Apply(plan, a.printAction); err != nil {
 		return fmt.Errorf("%w; the playbook was not registered: fix the problem and add it again", err)
 	}
-	if err := config.SaveProfile(a.Base, profile.name, updated); err != nil {
-		return a.undo(plan, err, "the playbook was not registered")
+	for i, u := range updated {
+		if err := config.SaveProfile(a.Managed, u.prof); err != nil {
+			// Put back the profiles already saved.
+			for _, s := range selected[:i] {
+				_ = config.SaveProfile(a.Managed, s.prof)
+			}
+			return a.undo(plan, err, "the playbook was not registered")
+		}
 	}
-	counts := a.countItems(final, e)
-	if counts == "" {
-		a.warnf("no artifacts named '%s-*' that agent %s reads were found in '%s'.", name, final.agent.Name,
-			a.pretty(folder))
-		counts = "no artifacts"
+	if total == 0 {
+		a.warnf("no artifacts were found in '%s' for the kinds of the profile(s): check the subfolders and formats "+
+			"above (they are linked as they appear, with 'aiplam update').", a.pretty(folder))
 	}
-	a.printf("Added %s with %s.\n", e.ID, counts)
-	if !profile.enabled {
-		a.printf("Nothing was linked: %s.\n", a.notEnabledNote(profile.name))
-	} else {
-		st.enabled = replaceProfile(st.enabled, final)
-		a.warnDoubleLoads(st.enabled)
+	for i, u := range updated {
+		if !u.enabled {
+			a.printf("Nothing was linked in profile '%s': %s.\n", u.name, a.notEnabledNote(u.name))
+		}
+		a.reportRenamedIDs(selected[i].entries, u.entries)
 	}
-	a.reportRenamedIDs(current, final.entries)
+	a.printf("Added %s.\n", name)
 	return nil
 }
 
-// countItems describes the artifacts a playbook provides for its profile's agent: "3 skill(s), 1 subagent(s)", or ""
-// when there are none.
-func (a *App) countItems(s *profileState, e playbook.Entry) string {
-	var counts []string
-	for _, f := range s.folders {
-		if items, _ := playbook.Items(s.entries, e, f); len(items) > 0 {
-			counts = append(counts, fmt.Sprintf("%d %s(s)", len(items), f.Kind.Singular()))
+// printSources prints, for each kind of a profile's targets, where a playbook's artifacts are and how many there are,
+// and returns how many there are in all.
+func (a *App) printSources(s *profileState, e playbook.Entry) int {
+	total := 0
+	for _, t := range s.targets {
+		dir := e.SourceDir(t.Kind)
+		what := "not found"
+		if fsutil.IsDir(dir) {
+			items, _ := playbook.Items(e, t.Kind)
+			what = fmt.Sprintf("%d artifact(s)", len(items))
+			total += len(items)
 		}
+		a.printf("    %s: %s, format '%s': %s\n", t.Kind, a.pretty(dir), e.Format(t.Kind), what)
 	}
-	return strings.Join(counts, ", ")
-}
-
-// replaceProfile returns profiles with the one named like s replaced by s.
-func replaceProfile(profiles []*profileState, s *profileState) []*profileState {
-	out := append([]*profileState{}, profiles...)
-	for i, p := range out {
-		if p.name == s.name {
-			out[i] = s
-		}
-	}
-	return out
+	return total
 }
 
 // reportRenamedIDs tells the user when registering or removing a playbook changed the ids of others.
@@ -429,7 +386,7 @@ func (a *App) reportRenamedIDs(before, after []playbook.Entry) {
 	for _, b := range before {
 		for _, f := range after {
 			if b.Name == f.Name && fsutil.SamePath(b.Dir, f.Dir) && b.ID != f.ID {
-				a.printf("Playbook %s is now identified as %s.\n", b.ID, f.ID)
+				a.printf("Playbook %s of profile '%s' is now identified as %s.\n", b.ID, f.Profile, f.ID)
 			}
 		}
 	}
@@ -437,95 +394,66 @@ func (a *App) reportRenamedIDs(before, after []playbook.Entry) {
 
 // --- update -------------------------------------------------------------------------------------------------------
 
-const updateUsage = `Usage: aiplam update [<name|id|playbookfolder>] [<playbookfolder>] [--profile PROFILE]
-       aiplam update --all [--profile PROFILE]
+const updateUsage = `Usage: aiplam update [<name|id|playbookfolder>] [<playbookfolder>] [--profile PROFILE...]
 
-Brings a playbook's links in line with its playbook folder, as currently checked out, for its profile's agent:
+Brings a playbook's links in line with its playbook folder, as currently checked out:
   - links its new artifacts;
   - removes the links of artifacts that no longer exist, and the folders this leaves empty.
 
-The playbook is chosen by:
+The playbook is chosen, in each profile, by:
   - nothing: the playbook registered for the current folder;
   - an id, a name or a playbook folder, when it designates a single playbook;
   - a name and a playbook folder.
 
 aiplam never fetches, pulls or switches a checkout: select the version in the playbook folder first. Only the
-playbooks of the enabled profiles are linked, so only they have anything to update. Nothing is changed for a
-playbook if something other than the right link is already where a link must go.
+playbooks of the enabled profiles are linked, so only they have anything to update. Nothing is changed if a link
+cannot be made ('aiplam add --help' explains why that can happen).
 
 Options:
-  --all                   update every playbook of the enabled profiles (or of the profile given with --profile)
-  -p, --profile PROFILE   look for the playbook in profile PROFILE (default: the enabled profiles)
+  -p, --profile PROFILE,...   the profiles to update the playbook in (default: the enabled profile, when only one is)
 
 Examples:
   cd ~/Workspace/arxila-ai-playbook
   git switch --detach v1.3.0
   aiplam update                # the playbook registered for the current folder
   aiplam update arxila
-  aiplam update --all
 `
 
 func (a *App) cmdUpdate(args []string) error {
-	p, err := parseArgs(args, nil, []string{"all"})
+	p, err := parseArgs(args, nil, nil)
 	if err != nil {
 		return err
 	}
-	if p.bools["all"] && len(p.positional) > 0 {
-		return usagef("--all takes no other arguments")
+	if len(p.positional) > 2 {
+		return usagef("too many arguments")
 	}
-	st, err := a.load()
+	st, err := a.load(p.positional, "update the playbook in")
 	if err != nil {
 		return err
 	}
-	selected := st.entries()
-	if !p.bools["all"] {
-		e, err := a.selectEntry(st, p.positional)
-		if err != nil {
+	scope := map[playbook.Key]bool{}
+	for _, sel := range st.selections {
+		if !sel.profile.enabled {
+			a.printf("Nothing to update for playbook %s: %s.\n", sel.entry.Label(), a.notEnabledNote(sel.profile.name))
+			continue
+		}
+		if err := a.checkPlaybookFolders(sel.entry, sel.profile.targets); err != nil {
 			return err
 		}
-		selected = []playbook.Entry{e}
-	} else if len(selected) == 0 {
-		a.printf("No playbooks are registered in %s.\n", st.where())
+		scope[sel.entry.Key()] = true
+		a.printf("Updating playbook %s of profile '%s' (%s) from %s\n", sel.entry.ID, sel.profile.name,
+			a.version(sel.entry.Dir), a.pretty(sel.entry.Dir))
+	}
+	if len(scope) == 0 {
 		return nil
 	}
-	if len(st.profiles) == 1 && !st.profiles[0].enabled {
-		a.printf("Nothing to update: %s.\n", a.notEnabledNote(st.profiles[0].name))
-		return nil
-	}
-
-	failed := false
-	for i, e := range selected {
-		if i > 0 {
-			a.printf("\n")
-		}
-		profile := st.profile(e.Profile)
-		a.useProfile(st, profile)
-		if err := a.updateOne(profile.group(), e, st.others(profile.name)); err != nil {
-			if !errors.Is(err, errSilent) {
-				a.errorf("%s", err)
-			}
-			failed = true
-		}
-	}
-	if failed {
-		return errSilent
-	}
-	return nil
-}
-
-func (a *App) updateOne(group playbook.Group, e playbook.Entry, others []playbook.Group) error {
-	if err := a.checkPlaybookFolders(e, group.Folders); err != nil {
-		return err
-	}
-	plan, err := playbook.Build(group, e, others)
+	plan, err := playbook.Transition(groups(st.enabled), groups(st.enabled), scope)
 	if err != nil {
 		return err
 	}
-	a.markAncestors(&plan)
-	a.printf("Updating playbook %s (%s) from %s\n", e.ID, a.version(e.Dir), a.pretty(e.Dir))
 	if len(plan.Conflicts()) > 0 {
 		a.printConflicts(plan)
-		a.errorf("update of playbook %s cancelled: %s.", e.ID, a.conflictAdvice(plan))
+		a.errorf("update cancelled, nothing was changed: %s.", a.conflictAdvice(plan))
 		return errSilent
 	}
 	if len(plan.Changes()) == 0 {
@@ -539,18 +467,51 @@ func (a *App) updateOne(group playbook.Group, e playbook.Entry, others []playboo
 	return nil
 }
 
+// selection is a playbook chosen in a profile.
+type selection struct {
+	profile *profileState
+	entry   playbook.Entry
+}
+
+// selectionState is a state with the playbooks chosen by update or remove.
+type selectionState struct {
+	*state
+	selections []selection
+}
+
+// load loads the state and chooses, in each profile acted on (see selectProfiles), the playbook args designate.
+func (a *App) load(args []string, verb string) (*selectionState, error) {
+	st, err := a.loadState(false)
+	if err != nil {
+		return nil, err
+	}
+	profiles, err := a.selectProfiles(st, verb)
+	if err != nil {
+		return nil, err
+	}
+	sst := &selectionState{state: st}
+	for _, s := range profiles {
+		e, err := a.selectEntry(s, args)
+		if err != nil {
+			return nil, err
+		}
+		sst.selections = append(sst.selections, selection{profile: s, entry: e})
+	}
+	return sst, nil
+}
+
 // --- remove -------------------------------------------------------------------------------------------------------
 
-const removeUsage = `Usage: aiplam remove <name|id|playbookfolder> [<playbookfolder>] [--profile PROFILE]
+const removeUsage = `Usage: aiplam remove <name|id|playbookfolder> [<playbookfolder>] [--profile PROFILE...]
 
-Unregisters a playbook and, if its profile is enabled, removes its links from the folders of its profile's agent, and
-the folders this leaves empty:
-  - the playbook is chosen by an id, a name or a playbook folder (when it designates a single playbook), or by a
-    name and a playbook folder;
+Unregisters a playbook and, in enabled profiles, removes its links from their target folders, and the folders this
+leaves empty (up to the managed folder):
+  - the playbook is chosen, in each profile, by an id, a name or a playbook folder (when it designates a single
+    playbook), or by a name and a playbook folder;
   - only links are removed: the playbook folder, and anything that is not a link into it, are left in place.
 
 Options:
-  -p, --profile PROFILE   look for the playbook in profile PROFILE (default: the enabled profiles)
+  -p, --profile PROFILE,...   the profiles to remove it from (default: the enabled profile, when only one is)
 
 Examples:
   aiplam remove arxila
@@ -566,52 +527,60 @@ func (a *App) cmdRemove(args []string) error {
 	if len(p.positional) == 0 {
 		return usagef("remove needs a name, id or playbook folder")
 	}
-	st, err := a.load()
+	if len(p.positional) > 2 {
+		return usagef("too many arguments")
+	}
+	st, err := a.load(p.positional, "remove the playbook from")
 	if err != nil {
 		return err
 	}
-	e, err := a.selectEntry(st, p.positional)
-	if err != nil {
-		return err
-	}
-	profile := st.profile(e.Profile)
-	a.useProfile(st, profile)
-	updated := &config.Profile{}
-	for _, pb := range profile.prof.Playbooks {
-		if !(pb.Name == e.Name && fsutil.SamePath(pb.Dir(a.Base), e.Dir)) {
-			updated.Playbooks = append(updated.Playbooks, pb)
+	var updated []*profileState
+	scope := map[playbook.Key]bool{}
+	for _, sel := range st.selections {
+		prof := *sel.profile.prof
+		prof.Playbooks = nil
+		for _, pb := range sel.profile.prof.Playbooks {
+			if !(pb.Name == sel.entry.Name && fsutil.SamePath(pb.Dir(a.Managed), sel.entry.Dir)) {
+				prof.Playbooks = append(prof.Playbooks, pb)
+			}
 		}
+		u, err := a.newProfileState(&prof, sel.profile.enabled)
+		if err != nil {
+			return err
+		}
+		updated = append(updated, u)
+		if u.enabled {
+			scope[sel.entry.Key()] = true
+		}
+		a.printf("Removing playbook %s of profile '%s' (%s)\n", sel.entry.ID, sel.profile.name, a.pretty(sel.entry.Dir))
 	}
-	updated.Agent = profile.prof.Agent
-	final := a.newProfileState(profile.name, updated, profile.enabled)
 	var plan playbook.Plan
-	if profile.enabled {
-		plan, err = playbook.Build(final.group(), e, st.others(profile.name))
+	if len(scope) > 0 {
+		plan, err = playbook.Transition(groups(st.enabled), groups(replaceProfiles(st.enabled, updated...)), scope)
 		if err != nil {
 			return err
 		}
 	}
-	a.printf("Removing playbook %s (%s) from profile '%s'\n", e.ID, a.pretty(e.Dir), profile.name)
 	if err := playbook.Apply(plan, a.printAction); err != nil {
 		return fmt.Errorf("%w; the playbook is still registered: fix the problem and remove it again", err)
 	}
-	if err := config.SaveProfile(a.Base, profile.name, updated); err != nil {
-		return a.undo(plan, err, "the playbook is still registered")
+	for i, u := range updated {
+		if err := config.SaveProfile(a.Managed, u.prof); err != nil {
+			for _, sel := range st.selections[:i] {
+				_ = config.SaveProfile(a.Managed, sel.profile.prof)
+			}
+			return a.undo(plan, err, "the playbook is still registered")
+		}
 	}
 	a.cleanup(plan)
-	a.printf("Removed %s.\n", e.ID)
-	a.reportRenamedIDs(profile.entries, final.entries)
+	for i, u := range updated {
+		a.reportRenamedIDs(st.selections[i].profile.entries, u.entries)
+	}
+	var ids []string
+	for _, sel := range st.selections {
+		ids = append(ids, sel.entry.Label())
+	}
+	sort.Strings(ids)
+	a.printf("Removed %s.\n", strings.Join(ids, ", "))
 	return nil
-}
-
-// undo reverts the link changes of an applied plan after saving the configuration failed.
-func (a *App) undo(plan playbook.Plan, saveErr error, state string) error {
-	if err := playbook.Revert(plan.Changes()); err != nil {
-		return fmt.Errorf("%w; undoing the link changes also failed (%v): run '%s' to see what is left", saveErr, err,
-			a.cmd("check"))
-	}
-	if len(plan.Changes()) == 0 {
-		return fmt.Errorf("%w; %s", saveErr, state)
-	}
-	return fmt.Errorf("%w; the link changes were undone and %s", saveErr, state)
 }

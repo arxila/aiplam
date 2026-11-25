@@ -19,6 +19,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,280 +29,330 @@ import (
 	"arxila.io/aiplam/internal/fsutil"
 )
 
-// TestAgentTable checks the invariants the rest of aiplam relies on.
-func TestAgentTable(t *testing.T) {
-	if _, ok := LookupAgent(DefaultAgent); !ok {
-		t.Fatalf("the default agent %q is not in the table", DefaultAgent)
-	}
-	if _, ok := LookupAgent("nope"); ok {
-		t.Fatal("an unknown agent was found")
+// TestTemplateTable checks the invariants the rest of aiplam relies on.
+func TestTemplateTable(t *testing.T) {
+	if TemplateTable[0].Name != "standard" {
+		t.Fatalf("the standard template must come first")
 	}
 	seen := map[string]bool{}
-	for _, ag := range AgentTable {
-		if ag.Name == "" || ag.Product == "" {
-			t.Errorf("agent %+v has no name or product", ag)
+	for _, tmpl := range TemplateTable {
+		if seen[tmpl.Name] || tmpl.Name == CustomAgent || strings.Contains(tmpl.Name, ":") {
+			t.Errorf("template name %q repeated, reserved or invalid", tmpl.Name)
 		}
-		if seen[ag.Name] {
-			t.Errorf("agent %s is listed twice", ag.Name)
+		seen[tmpl.Name] = true
+		if tmpl.Product == "" {
+			t.Errorf("%s: no product", tmpl.Name)
 		}
-		seen[ag.Name] = true
-		if _, ok := ag.Kinds[Skills]; !ok {
-			t.Errorf("agent %s does not read skills", ag.Name)
-		}
-		for k, s := range ag.Kinds {
-			known := false
-			for _, kind := range Kinds {
-				known = known || kind == k
-			}
-			switch {
-			case !known:
-				t.Errorf("agent %s: unknown kind %s", ag.Name, k)
-			case s.Project.IsZero():
-				t.Errorf("agent %s: %s are not read in projects", ag.Name, k)
-			case (s.Format.File == "") == (s.Format.Ext == ""):
-				t.Errorf("agent %s: %s need either a file or an extension", ag.Name, k)
-			case s.Format.Ext != "" && !strings.HasPrefix(s.Format.Ext, "."):
-				t.Errorf("agent %s: %s extension %q does not start with a dot", ag.Name, k, s.Format.Ext)
-			case (k == Skills) != (s.Format.File == "SKILL.md"):
-				t.Errorf("agent %s: %s have the wrong format %+v", ag.Name, k, s.Format)
-			}
-			for _, p := range []Place{s.Project, s.Home} {
-				if !p.IsZero() && (p.Sub == "" || strings.HasPrefix(p.Dir, "/") || strings.Contains(p.Dir, "..")) {
-					t.Errorf("agent %s: %s place %+v is not a relative folder", ag.Name, k, p)
+		for _, user := range []bool{false, true} {
+			for _, goos := range []string{"linux", "darwin", "windows"} {
+				for _, spec := range []string{tmpl.Name, tmpl.Name + StandardVariant} {
+					targets, ok := TemplateTargets(spec, user, goos)
+					if !ok {
+						if spec == tmpl.Name || tmpl.Standard {
+							t.Errorf("%s: not found", spec)
+						}
+						continue
+					}
+					if len(targets) == 0 {
+						t.Errorf("%s (user %v, %s): no targets", spec, user, goos)
+					}
+					if errs := CheckTargets(targets, user); len(errs) > 0 {
+						t.Errorf("%s (user %v, %s): %v", spec, user, goos, errs)
+					}
 				}
 			}
 		}
-		for _, k := range ag.ReadsStandard {
-			if _, ok := ag.Kinds[k]; !ok {
-				t.Errorf("agent %s reads standard %s but not its own", ag.Name, k)
-			}
-		}
-	}
-	if strings.Join(AgentNames(), ",") == "" || AgentNames()[0] != DefaultAgent {
-		t.Fatalf("agent names = %v", AgentNames())
 	}
 }
 
-func TestPlaces(t *testing.T) {
-	copilot, _ := LookupAgent("copilot")
+func TestTemplateTargets(t *testing.T) {
+	check := func(spec string, user bool, goos, want string) {
+		t.Helper()
+		targets, ok := TemplateTargets(spec, user, goos)
+		if !ok {
+			t.Fatalf("%s: not found", spec)
+		}
+		var got []string
+		for _, tt := range targets {
+			got = append(got, tt.Kind+"="+tt.Folder)
+		}
+		if strings.Join(got, " ") != want {
+			t.Errorf("%s (user %v, %s) = %s, want %s", spec, user, goos, strings.Join(got, " "), want)
+		}
+	}
+	check("claude", false, "linux", "skills=.claude/skills subagents=.claude/agents commands=.claude/commands "+
+		"rules=.claude/rules")
+	check("copilot", false, "linux", "skills=.github/skills subagents=.github/agents prompts=.github/prompts "+
+		"instructions=.github/instructions")
+	// In the user managed folder: other folders, and kinds that are only read in projects are left out.
+	check("copilot", true, "linux", "skills=.copilot/skills subagents=.copilot/agents "+
+		"instructions=.copilot/instructions")
+	check("copilot:standard", true, "linux", "skills=.agents/skills subagents=.copilot/agents "+
+		"instructions=.copilot/instructions")
+	check("junie:standard", false, "darwin", "skills=.agents/skills subagents=.junie/agents "+
+		"commands=.junie/commands rules=.junie/rules")
+	check("junie", true, "darwin", "skills=.junie/skills subagents=.junie/agents commands=.junie/commands")
+	check("codex", false, "linux", "skills=.agents/skills subagents=.codex/agents")
+	check("codex:standard", false, "linux", "skills=.agents/skills subagents=.codex/agents")
+	check("devin", true, "linux", "skills=.config/devin/skills subagents=.config/devin/agents rules=.devin/rules")
+	check("devin", true, "windows", "skills=%APPDATA%/devin/skills subagents=%APPDATA%/devin/agents "+
+		"rules=.devin/rules")
+	check("devin", false, "windows", "skills=.devin/skills subagents=.devin/agents rules=.devin/rules")
+	check("standard", true, "linux", "skills=.agents/skills")
+
+	for _, spec := range []string{"claude:standard", "standard:standard", "unknown", "", ":standard", "custom"} {
+		if _, ok := TemplateTargets(spec, false, "linux"); ok {
+			t.Errorf("%q should not be a template", spec)
+		}
+	}
+	names := TemplateList()
+	if !strings.HasPrefix(names, "standard, claude, copilot, copilot:standard, cursor") ||
+		strings.Contains(names, "claude:standard") {
+		t.Errorf("TemplateList() = %s", names)
+	}
+}
+
+func TestCleanTarget(t *testing.T) {
 	for _, c := range []struct {
-		agent string
-		kind  Kind
-		home  bool
-		want  string // "" when not read there
+		folder string
+		user   bool
+		want   string // "" for an error
 	}{
-		{"copilot", Skills, false, ".github/skills"},
-		{"copilot", Skills, true, ".copilot/skills"},
-		{"copilot", Prompts, false, ".github/prompts"},
-		{"copilot", Prompts, true, ""},
-		{"codex", Skills, true, ".agents/skills"},
-		{"codex", Subagents, false, ".codex/agents"},
-		{"devin", Skills, true, ".config/devin/skills"},
-		{"devin", Rules, true, ".devin/rules"},
-		{"opencode", Commands, true, ".config/opencode/commands"},
-		{"cursor", Rules, true, ""},
-		{"standard", Rules, false, ""},
+		{".claude/skills", false, ".claude/skills"},
+		{"./a//b/", false, "a/b"},
+		{"a/./b", false, "a/b"},
+		{"my folder/x", false, "my folder/x"},
+		{"../x", false, ""},
+		{"a/../b", false, ""},
+		{"/abs", false, ""},
+		{"~/x", false, ""},
+		{".", false, ""},
+		{"", false, ""},
+		{".aiplam/x", false, ""},
+		{".AIPLAM", false, ""},
+		{"%APPDATA%/devin/skills", false, ""},
+		{"%APPDATA%/devin/skills", true, "%APPDATA%/devin/skills"},
+		{"%APPDATA%/a/../b", true, ""},
+		{"%APPDATA%", true, ""},
+		{"%APPDATA%/", true, ""},
 	} {
-		ag, _ := LookupAgent(c.agent)
-		p, ok := ag.Place(c.kind, c.home)
-		got := ""
-		if ok {
-			got = p.Dir + "/" + p.Sub
-		}
-		if got != c.want {
-			t.Errorf("%s %s (home %v) = %q, want %q", c.agent, c.kind, c.home, got, c.want)
-		}
-	}
-
-	base := filepath.Join(string(filepath.Separator), "base")
-	folders := copilot.KindFolders(base, true)
-	if len(folders) != 2 || folders[0].Kind != Skills || folders[1].Kind != Subagents {
-		t.Fatalf("copilot home folders = %+v", folders)
-	}
-	f := folders[1]
-	if f.Agent != "copilot" || f.DefaultPath != "agents" || f.Format.Ext != ".agent.md" ||
-		f.Dir != filepath.Join(base, ".copilot", "agents") || f.AgentsConfigDir != filepath.Join(base, ".copilot") {
-		t.Fatalf("copilot subagents folder = %+v", f)
-	}
-	opencode, _ := LookupAgent("opencode")
-	if f := opencode.KindFolders(base, true)[0]; f.AgentsConfigDir != filepath.Join(base, ".config", "opencode") {
-		t.Fatalf("opencode home folder = %+v", f)
-	}
-	junie, _ := LookupAgent("junie")
-	if got := junie.SupportedKinds(); len(got) != 4 || got[3] != Rules {
-		t.Fatalf("junie kinds = %v", got)
-	}
-}
-
-func TestItemExt(t *testing.T) {
-	for name, want := range map[string]string{
-		"x-r.md":                 ".md",
-		"x-r.agent.md":           ".agent.md",
-		"x-p.prompt.md":          ".prompt.md",
-		"x-i.instructions.md":    ".instructions.md",
-		"x-c.toml":               ".toml",
-		"x-r.mdc":                ".mdc",
-		"x-readme":               "",
-		".agent.md":              ".md", // only an extension: not a compound one
-		"x-notes.agent.md.bak":   ".bak",
-		"x-agent.md":             ".md",
-		"x-r.other.instructions": ".instructions",
-	} {
-		if got := ItemExt(name); got != want {
-			t.Errorf("ItemExt(%q) = %q, want %q", name, got, want)
+		got, err := CleanTarget(c.folder, c.user)
+		if (err != nil) != (c.want == "") || got != c.want {
+			t.Errorf("CleanTarget(%q, %v) = %q, %v; want %q", c.folder, c.user, got, err, c.want)
 		}
 	}
 }
 
-func TestPlaybookPaths(t *testing.T) {
-	p := Playbook{Name: "x", Folder: "pb"}
-	if p.Path(Subagents, "agents") != "agents" || p.PathSet(Subagents) {
-		t.Fatal("an unset path should give the default")
+func TestCleanSubfolderAndFormat(t *testing.T) {
+	for folder, want := range map[string]string{".": ".", "./": ".", "skills": "skills", "ai//skills/": "ai/skills",
+		"..": "", "a/../b": "", "/x": "", "~/x": "", "": ""} {
+		got, err := CleanSubfolder(folder)
+		if (err != nil) != (want == "") || got != want {
+			t.Errorf("CleanSubfolder(%q) = %q, %v; want %q", folder, got, err, want)
+		}
 	}
-	for _, k := range Kinds {
-		p.Artifacts.Kind(k).Path = "ai/" + string(k)
+	for format, ok := range map[string]bool{"*": true, "x-*": true, "*.agent.md": true, "": false, "a/b": false,
+		`a\b`: false, ".x*": false} {
+		if err := CheckFormat(format); (err == nil) != ok {
+			t.Errorf("CheckFormat(%q) = %v", format, err)
+		}
 	}
-	if p.Artifacts.Subagents.Path != "ai/subagents" || p.Artifacts.Instructions.Path != "ai/instructions" ||
-		p.Artifacts.Skills.Path != "ai/skills" {
-		t.Fatalf("artifacts = %+v", p.Artifacts)
+}
+
+func TestMatchFormat(t *testing.T) {
+	for _, c := range []struct {
+		format, name string
+		want         bool
+	}{
+		{"*", "anything", true},
+		{"*", ".hidden", false},
+		{"x-*", ".x-a", false},
+		{"x-*", "x-a", true},
+		{"x-*", "x-", true},
+		{"x-*", "y-a", false},
+		{"*.md", "a.md", true},
+		{"*.md", "a.md.txt", false},
+		{"*.agent.md", "a.agent.md", true},
+		{"*.agent.md", "a.md", false},
+		{"a*b*c", "abc", true},
+		{"a*b*c", "aXbYc", true},
+		{"a*b*c", "ac", false},
+		{"a*b*b", "ab", false},
+		{"a*b*b", "abb", true},
+		{"ab*ba", "aba", false},
+		{"exact", "exact", true},
+		{"exact", "exactly", false},
+		{"**", "x", true},
+	} {
+		if got := MatchFormat(c.format, c.name); got != c.want {
+			t.Errorf("MatchFormat(%q, %q) = %v, want %v", c.format, c.name, got, c.want)
+		}
 	}
-	if p.Path(Rules, "rules") != "ai/rules" || !p.PathSet(Rules) {
-		t.Fatal("a set path should win over the default")
+}
+
+func TestCheckTargets(t *testing.T) {
+	errs := CheckTargets(Targets{{"skills", ".claude/skills"}, {"skills", ".x"}, {"a", ".claude/skills"},
+		{"b", ".claude"}, {"bad:kind", "y"}, {"c", "../z"}}, false)
+	want := []string{"kind 'skills' has more than one target folder", "same target folder",
+		"one inside the other", "invalid kind 'bad:kind'", "cannot contain '..'"}
+	text := fmt.Sprint(errs)
+	for _, w := range want {
+		if !strings.Contains(text, w) {
+			t.Errorf("missing %q in %s", w, text)
+		}
 	}
-	base := fsutil.Canonical(t.TempDir())
-	if got := p.PathDir(base, "ai/skills"); got != filepath.Join(base, "pb", "ai", "skills") {
-		t.Fatalf("PathDir = %s", got)
+	// ".claude" and ".claude-x" are not one inside the other.
+	if errs := CheckTargets(Targets{{"a", ".claude"}, {"b", ".claude-x"}}, false); len(errs) > 0 {
+		t.Errorf("unexpected errors: %v", errs)
+	}
+	for kind, ok := range map[string]bool{"skills": true, "my-prompts": true, "": false, ".x": false, "a b": false,
+		"a,b": false, "a/b": false, `a"b`: false} {
+		if ValidKind(kind) != ok {
+			t.Errorf("ValidKind(%q) != %v", kind, ok)
+		}
 	}
 }
 
 func TestProfileFiles(t *testing.T) {
-	base := fsutil.Canonical(t.TempDir())
-	prof := &Profile{Agent: "claude", Playbooks: []Playbook{{Name: "x", Folder: "../pb",
-		Artifacts: Artifacts{Subagents: KindSettings{Path: "ai/subagents"}}}}}
-	if err := SaveProfile(base, "work", prof); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(ProfileFile(base, "work"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := string(data)
-	if !strings.Contains(text, "agent: claude\n") || !strings.Contains(text, "subagents:\n") ||
-		strings.Contains(text, "skills:") || strings.Contains(text, "commands:") {
-		t.Fatalf("unexpected file:\n%s", text)
-	}
-	loaded, err := LoadProfile(base, "work")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if loaded.Agent != "claude" || len(loaded.Playbooks) != 1 ||
-		loaded.Playbooks[0].Artifacts.Subagents.Path != "ai/subagents" {
-		t.Fatalf("loaded = %+v", loaded)
-	}
-	if errs := loaded.Validate(base); len(errs) != 0 {
-		t.Fatalf("errors: %v", errs)
-	}
-
-	// No agent, or an empty file: the default agent.
-	for _, content := range []string{"", "playbooks: []\n"} {
-		if err := os.WriteFile(ProfileFile(base, "old"), []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if p, err := LoadProfile(base, "old"); err != nil || p.Agent != DefaultAgent {
-			t.Fatalf("%q: profile %+v, err %v", content, p, err)
-		}
-	}
-	if err := SaveProfile(base, "empty", &Profile{}); err != nil {
-		t.Fatal(err)
-	}
-	if p, err := LoadProfile(base, "empty"); err != nil || p.Agent != DefaultAgent || p.Playbooks == nil {
-		t.Fatalf("empty profile %+v, err %v", p, err)
-	}
-	if _, err := LoadProfile(base, "missing"); err != ErrNoProfile {
+	managed := fsutil.Canonical(t.TempDir())
+	if _, err := LoadProfile(managed, "default"); !errors.Is(err, ErrNoProfile) {
 		t.Fatalf("missing profile: %v", err)
 	}
-	if names, err := Profiles(base); err != nil || strings.Join(names, ",") != "empty,old,work" {
-		t.Fatalf("profiles = %v (%v)", names, err)
+	prof := &Profile{Name: "default", Agent: "claude",
+		Targets: Targets{{"skills", ".claude/skills"}, {"zeta", "z"}, {"alpha", "a"}},
+		Playbooks: []Playbook{{Name: "x", Folder: "../pb", Mappings: map[string]Mapping{
+			"skills": {Folder: ".", Format: "*"}, "alpha": {Folder: "a"}}}}}
+	if err := SaveProfile(managed, prof); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(ProfileFile(managed, "default"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The targets keep their order.
+	if !strings.Contains(string(data), "targets:\n  skills: .claude/skills\n  zeta: z\n  alpha: a\n") {
+		t.Fatalf("unexpected file:\n%s", data)
+	}
+	got, err := LoadProfile(managed, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != "default" || got.Agent != "claude" || len(got.Targets) != 3 || got.Targets[1].Kind != "zeta" ||
+		got.Playbooks[0].Mappings["skills"].Format != "*" || got.Playbooks[0].Mappings["alpha"].Folder != "a" {
+		t.Fatalf("round trip: %+v", got)
+	}
+	if errs := got.Validate(managed, "default", false); len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	folder, format := got.Playbooks[0].Source("skills")
+	if folder != "." || format != "*" {
+		t.Errorf("Source(skills) = %s, %s", folder, format)
+	}
+	if folder, format := got.Playbooks[0].Source("alpha"); folder != "a" || format != "x-*" {
+		t.Errorf("Source(alpha) = %s, %s", folder, format)
+	}
+	if folder, format := got.Playbooks[0].Source("zeta"); folder != "zeta" || format != "x-*" {
+		t.Errorf("Source(zeta) = %s, %s", folder, format)
+	}
+
+	// Unknown fields and targets that are not a mapping are rejected.
+	for _, content := range []string{"name: default\nfoo: 1\n", "name: default\ntargets: [a, b]\n",
+		"name: default\ntargets:\n  skills: [a]\n"} {
+		if err := os.WriteFile(ProfileFile(managed, "default"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadProfile(managed, "default"); err == nil {
+			t.Errorf("%q: want an error", content)
+		}
+	}
+	// An empty file is an empty profile, which is not valid.
+	if err := os.WriteFile(ProfileFile(managed, "default"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	empty, err := LoadProfile(managed, "default")
+	if err != nil || len(empty.Validate(managed, "default", false)) != 2 {
+		t.Fatalf("empty profile: %v, %v", err, empty.Validate(managed, "default", false))
 	}
 }
 
 func TestProfileValidate(t *testing.T) {
-	base := fsutil.Canonical(t.TempDir())
-	for _, c := range []struct {
-		prof Profile
-		want string
-	}{
-		{Profile{Agent: "nope"}, "unknown agent 'nope'"},
-		{Profile{Playbooks: []Playbook{{Folder: "pb"}}}, "has no name"},
-		{Profile{Playbooks: []Playbook{{Name: "x@y", Folder: "pb"}}}, "invalid name"},
-		{Profile{Playbooks: []Playbook{{Name: "x"}}}, "has no folder"},
-		{Profile{Playbooks: []Playbook{{Name: "x", Folder: "/abs"}}}, "must be a path relative"},
-		{Profile{Playbooks: []Playbook{{Name: "x", Folder: "pb",
-			Artifacts: Artifacts{Rules: KindSettings{Path: "../out"}}}}}, "artifacts.rules.path '../out'"},
-		{Profile{Playbooks: []Playbook{{Name: "x", Folder: "pb"}, {Name: "x", Folder: "pb"}}}, "more than once"},
-		{Profile{Playbooks: []Playbook{{Name: "x", Folder: "a/pb"}, {Name: "x", Folder: "b/pb"}}}, "ids collide"},
-	} {
-		var msgs []string
-		for _, err := range c.prof.Validate(base) {
-			msgs = append(msgs, err.Error())
-		}
-		if !strings.Contains(strings.Join(msgs, "\n"), c.want) {
-			t.Errorf("%+v: errors %q, want %q", c.prof, msgs, c.want)
+	managed := fsutil.Canonical(t.TempDir())
+	prof := &Profile{Name: "other", Agent: "nope", Targets: Targets{{"skills", "%APPDATA%/x"}},
+		Playbooks: []Playbook{
+			{Name: "", Folder: ""},
+			{Name: "x", Folder: "/abs", Mappings: map[string]Mapping{"rules": {Folder: "r"},
+				"skills": {Folder: "../out", Format: ".x"}}},
+			{Name: "y", Folder: "pb"},
+			{Name: "y", Folder: "pb"},
+			{Name: "y", Folder: "other/pb"},
+		}}
+	text := fmt.Sprint(prof.Validate(managed, "default", false))
+	for _, want := range []string{"name 'other' does not match", "unknown agent 'nope'", "can only be used in the user",
+		"playbooks[0] has no name", "playbooks[0] has no folder", "must be a path relative", "'rules' is not a kind",
+		"cannot contain '..'", "only match hidden", "registered more than once", "ids collide"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %q in %s", want, text)
 		}
 	}
-	ok := Profile{Agent: "junie", Playbooks: []Playbook{{Name: "x", Folder: "a/pb"}, {Name: "x", Folder: "b/other"}}}
-	if errs := ok.Validate(base); len(errs) != 0 {
-		t.Fatalf("errors: %v", errs)
+	// The name must be the file's, exactly (even on file systems that ignore case, so that the profile is saved back
+	// to the same file everywhere); custom is a valid agent.
+	ok := &Profile{Name: "default", Agent: CustomAgent, Targets: Targets{{"skills", "%APPDATA%/x"}}}
+	if errs := ok.Validate(managed, "default", true); len(errs) > 0 {
+		t.Errorf("unexpected errors: %v", errs)
+	}
+	ok.Name = "Default"
+	if errs := ok.Validate(managed, "default", true); len(errs) != 1 ||
+		!strings.Contains(errs[0].Error(), "it must be 'default'") {
+		t.Errorf("case mismatch: %v", errs)
+	}
+	// ProfileName finds the file's name.
+	if err := SaveProfile(managed, &Profile{Name: "work"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := ProfileName(managed, "work"); got != "work" {
+		t.Errorf("ProfileName(work) = %s", got)
+	}
+	want := "Work" // a file system that distinguishes case has no file for Work
+	if ProfileExists(managed, "Work") {
+		want = "work"
+	}
+	if got := ProfileName(managed, "Work"); got != want {
+		t.Errorf("ProfileName(Work) = %s, want %s", got, want)
 	}
 }
 
-func TestBaseConfigFiles(t *testing.T) {
-	base := fsutil.Canonical(t.TempDir())
-	if _, err := LoadBaseConfig(base); err != ErrNotInitialized {
+func TestConfigFiles(t *testing.T) {
+	managed := fsutil.Canonical(t.TempDir())
+	if _, err := LoadConfig(managed); !errors.Is(err, ErrNotInitialized) {
 		t.Fatalf("missing configuration: %v", err)
 	}
-	if err := SaveBaseConfig(base, &BaseConfig{}); err != nil {
+	if err := SaveConfig(managed, &Config{}); err != nil {
 		t.Fatal(err)
 	}
-	conf, err := LoadBaseConfig(base)
-	if err != nil || conf.Enabled == nil || len(conf.Enabled) != 0 {
-		t.Fatalf("configuration %+v, err %v", conf, err)
+	data, _ := os.ReadFile(ConfigFile(managed))
+	if !strings.Contains(string(data), "enabled: []") {
+		t.Fatalf("unexpected file:\n%s", data)
 	}
-	// A temporary file left by a crashed process whose id this one reuses is replaced.
-	stale := fmt.Sprintf("%s.%d.tmp", BaseConfigFile(base), os.Getpid())
-	if err := os.WriteFile(stale, []byte("stale"), 0o644); err != nil {
+	if err := SaveConfig(managed, &Config{Enabled: []string{"a", "b"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := SaveBaseConfig(base, &BaseConfig{}); err != nil {
-		t.Fatalf("saving over a stale temporary file: %v", err)
+	conf, err := LoadConfig(managed)
+	if err != nil || strings.Join(conf.Enabled, ",") != "a,b" || !conf.IsEnabled(managed, "a") ||
+		conf.IsEnabled(managed, "c") {
+		t.Fatalf("round trip: %+v, %v", conf, err)
 	}
-	// Saved files have the permissions of any new file (not os.CreateTemp's 0600), and no temporary file is left.
-	if entries, _ := os.ReadDir(filepath.Dir(BaseConfigFile(base))); len(entries) != 1 {
-		t.Fatalf("files left in the configuration folder: %v", entries)
-	}
-	reference := filepath.Join(base, "reference")
-	if err := os.WriteFile(reference, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	saved, err1 := os.Stat(BaseConfigFile(base))
-	ref, err2 := os.Stat(reference)
-	if err1 != nil || err2 != nil || saved.Mode().Perm() != ref.Mode().Perm() {
-		t.Fatalf("saved file: %v (a new file: %v), %v %v", saved.Mode(), ref.Mode(), err1, err2)
-	}
-	for content, want := range map[string]string{
-		"types: [agents]\nenabled: [x]\n": "invalid file format",
-		"":                                "empty",
-	} {
-		if err := os.WriteFile(BaseConfigFile(base), []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := LoadBaseConfig(base); err == nil || !strings.Contains(err.Error(), want) {
-			t.Errorf("%q: err %v, want %q", content, err, want)
-		}
-	}
-	bad := &BaseConfig{Enabled: []string{"a", "A", "../x"}}
+	bad := &Config{Enabled: []string{"a", "A", "../x"}}
 	if errs := bad.Validate(); len(errs) != 2 {
 		t.Fatalf("errors: %v", errs)
+	}
+	if err := SaveProfile(managed, &Profile{Name: "b"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(Dir(managed), "x.yml"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if profiles, err := Profiles(managed); err != nil || strings.Join(profiles, ",") != "b" {
+		t.Fatalf("Profiles = %v, %v", profiles, err)
 	}
 }
 
@@ -312,7 +363,7 @@ func TestNames(t *testing.T) {
 			t.Errorf("ValidName(%q) != %v", name, want)
 		}
 	}
-	for name, want := range map[string]bool{"work": true, "a_b-1": true, "a.b": false, BaseConfigName: false,
+	for name, want := range map[string]bool{"work": true, "a_b-1": true, "a.b": false, ConfigName: false,
 		"AIPLAM-CONFIG": false} {
 		if ValidProfileName(name) != want {
 			t.Errorf("ValidProfileName(%q) != %v", name, want)
@@ -323,46 +374,71 @@ func TestNames(t *testing.T) {
 			t.Errorf("ValidFolder(%q) != %v", folder, want)
 		}
 	}
-	for path, want := range map[string]bool{".": true, "ai/skills": true, "../x": false, "": false, "/x": false} {
-		if ValidArtifactPath(path) != want {
-			t.Errorf("ValidArtifactPath(%q) != %v", path, want)
-		}
-	}
 }
 
-func TestFindBaseAndAncestors(t *testing.T) {
+func TestFindManaged(t *testing.T) {
 	root := fsutil.Canonical(t.TempDir())
 	home := filepath.Join(root, "home")
-	project := filepath.Join(home, "ws", "project")
-	module := filepath.Join(project, "module")
-	outside := filepath.Join(root, "outside")
-	for _, dir := range []string{Dir(home), Dir(project), module, Dir(outside)} {
+	project := filepath.Join(home, "w", "project")
+	outside := filepath.Join(root, "outside", "deep")
+	for _, dir := range []string{filepath.Join(project, "a", "b"), outside} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if got := FindBase(module, home); got != project {
-		t.Fatalf("FindBase(module) = %s", got)
+	mkManaged := func(dir string) {
+		t.Helper()
+		if err := os.MkdirAll(Dir(dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if got := FindBase(filepath.Join(home, "ws"), home); got != home {
-		t.Fatalf("FindBase(ws) = %s", got)
+	check := func(start, want string) {
+		t.Helper()
+		got, ok := FindManaged(start, home)
+		if (want == "") == ok || (ok && got != want) {
+			t.Errorf("FindManaged(%s) = %s, %v; want %q", start, got, ok, want)
+		}
 	}
-	if got := FindBase(root, home); got != home {
-		t.Fatalf("FindBase(root) = %s, want the home folder", got)
+	// Nothing managed.
+	check(filepath.Join(project, "a"), "")
+	check(outside, "")
+	// Above home is never considered from inside it: the walk stops at home.
+	mkManaged(root)
+	check(filepath.Join(project, "a"), "")
+	// Outside home, the walk goes up to the root of the file system.
+	check(outside, root)
+	// A managed home applies from inside it, and from outside when nothing else is managed.
+	mkManaged(home)
+	check(filepath.Join(project, "a"), home)
+	check(home, home)
+	if err := os.Remove(Dir(root)); err != nil {
+		t.Fatal(err)
 	}
-	if got := Ancestors(project, home); len(got) != 1 || got[0] != home {
-		t.Fatalf("Ancestors(project) = %v", got)
+	check(outside, home)
+	// The nearest managed folder wins.
+	mkManaged(project)
+	check(filepath.Join(project, "a", "b"), project)
+	check(project, project)
+	mkManaged(filepath.Join(project, "a"))
+	check(filepath.Join(project, "a", "b"), filepath.Join(project, "a"))
+}
+
+func TestTargetDir(t *testing.T) {
+	dir, stop, err := TargetDir("/m", ".claude/skills", "")
+	if err != nil || dir != filepath.Join("/m", ".claude", "skills") || stop != "/m" {
+		t.Errorf("TargetDir = %s, %s, %v", dir, stop, err)
 	}
-	if got := Ancestors(outside, home); len(got) != 1 || got[0] != home {
-		t.Fatalf("Ancestors(outside) = %v, want the home folder", got)
+	dir, stop, err = TargetDir("/m", "%APPDATA%/devin/skills", "/appdata")
+	if err != nil || dir != filepath.Join("/appdata", "devin", "skills") || stop != "/appdata" {
+		t.Errorf("TargetDir = %s, %s, %v", dir, stop, err)
 	}
-	if got := Ancestors(home, home); len(got) != 0 {
-		t.Fatalf("Ancestors(home) = %v", got)
+	if _, _, err := TargetDir("/m", "%APPDATA%/devin/skills", ""); err == nil {
+		t.Errorf("want an error without APPDATA")
 	}
 }
 
-// TestReadmeAgents checks that the README lists every agent, in the order of the table.
-func TestReadmeAgents(t *testing.T) {
+// TestReadmeTemplates checks that the README lists every agent template, in the order of the table.
+func TestReadmeTemplates(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
 	if err != nil {
 		t.Fatal(err)
@@ -370,14 +446,18 @@ func TestReadmeAgents(t *testing.T) {
 	var listed []string
 	for _, line := range strings.Split(string(data), "\n") {
 		if name, ok := strings.CutPrefix(line, "- `"); ok {
-			if name, _, ok := strings.Cut(name, "`, "); ok {
-				if _, known := LookupAgent(name); known {
+			if name, _, ok := strings.Cut(name, "`"); ok {
+				if _, _, known := LookupTemplate(name); known && !strings.Contains(name, ":") {
 					listed = append(listed, name)
 				}
 			}
 		}
 	}
-	if got, want := strings.Join(listed, ","), strings.Join(AgentNames(), ","); got != want {
-		t.Fatalf("README lists the agents as %s, want %s", got, want)
+	var want []string
+	for _, tmpl := range TemplateTable {
+		want = append(want, tmpl.Name)
+	}
+	if got := strings.Join(listed, ","); got != strings.Join(want, ",") {
+		t.Fatalf("README lists the templates as %s, want %s", got, strings.Join(want, ","))
 	}
 }

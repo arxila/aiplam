@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -29,23 +30,24 @@ import (
 	"arxila.io/aiplam/internal/fsutil"
 )
 
-// sandbox is a base folder with a playbook folder "pb" in it.
+// sandbox is a managed folder with a playbook folder "pb" next to it.
 type sandbox struct {
-	t    *testing.T
-	base string
-	pb   string
+	t       *testing.T
+	root    string
+	managed string
+	pb      string
 }
 
 func newSandbox(t *testing.T) *sandbox {
 	t.Helper()
-	base := fsutil.Canonical(t.TempDir())
-	return &sandbox{t: t, base: base, pb: filepath.Join(base, "pb")}
+	root := fsutil.Canonical(t.TempDir())
+	return &sandbox{t: t, root: root, managed: filepath.Join(root, "m"), pb: filepath.Join(root, "pb")}
 }
 
-// file creates a file (and its folders) at a path relative to the playbook folder.
+// file creates a file (and its folders) at a path relative to the root.
 func (s *sandbox) file(rel string) string {
 	s.t.Helper()
-	path := filepath.Join(s.pb, filepath.FromSlash(rel))
+	path := filepath.Join(s.root, filepath.FromSlash(rel))
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		s.t.Fatal(err)
 	}
@@ -58,395 +60,327 @@ func (s *sandbox) file(rel string) string {
 // skill creates a skill folder in the playbook's skills/ folder.
 func (s *sandbox) skill(name string) string {
 	s.t.Helper()
-	return filepath.Dir(s.file("skills/" + name + "/SKILL.md"))
+	return filepath.Dir(s.file("pb/skills/" + name + "/SKILL.md"))
 }
 
-// group returns the group of a profile for agent with the given playbooks, all in "pb".
-func (s *sandbox) group(profile, agent string, names ...string) Group {
-	s.t.Helper()
-	ag, ok := config.LookupAgent(agent)
-	if !ok {
-		s.t.Fatalf("unknown agent %s", agent)
+// group builds a profile's group, with targets skills (in .agents/skills) and subagents (in .claude/agents), and the
+// given playbooks.
+func (s *sandbox) group(profile string, playbooks ...config.Playbook) Group {
+	g := Group{Profile: profile, Entries: Entries(profile, playbooks, s.managed)}
+	for _, t := range []config.Target{{Kind: "skills", Folder: ".agents/skills"},
+		{Kind: "subagents", Folder: ".claude/agents"}} {
+		dir, stop, _ := config.TargetDir(s.managed, t.Folder, "")
+		g.Targets = append(g.Targets, Target{Kind: t.Kind, Folder: t.Folder, Dir: dir, Stop: stop})
 	}
-	var playbooks []config.Playbook
-	for _, n := range names {
-		playbooks = append(playbooks, config.Playbook{Name: n, Folder: "pb"})
-	}
-	return Group{Profile: profile, Entries: Entries(profile, playbooks, s.base), Folders: ag.KindFolders(s.base, false)}
+	return g
 }
 
-func folder(g Group, kind config.Kind) config.KindFolder {
-	for _, f := range g.Folders {
-		if f.Kind == kind {
-			return f
+// pb returns a playbook registered for the sandbox's playbook folder.
+func pb(name string, mappings map[string]config.Mapping) config.Playbook {
+	return config.Playbook{Name: name, Folder: "../pb", Mappings: mappings}
+}
+
+// scopeOf returns the scope of every playbook of groups.
+func scopeOf(groups ...Group) map[Key]bool {
+	scope := map[Key]bool{}
+	for _, g := range groups {
+		for _, e := range g.Entries {
+			scope[e.Key()] = true
 		}
 	}
-	panic("no folder for " + string(kind))
+	return scope
 }
 
-func names(items []Item) string {
-	var n []string
-	for _, it := range items {
-		n = append(n, it.Name)
+// actions describes the actions of a plan of a kind: "name,name".
+func actions(plan Plan, kind ActionKind) string {
+	var names []string
+	for _, a := range plan.Actions {
+		if a.Kind == kind {
+			names = append(names, a.Name)
+		}
 	}
-	return strings.Join(n, ",")
+	sort.Strings(names)
+	return strings.Join(names, ",")
 }
 
-func kinds(plan Plan, kind ActionKind) string {
-	var n []string
-	for _, a := range plan.filter(kind) {
-		n = append(n, a.Name)
+func (s *sandbox) link(rel string) string { return filepath.Join(s.managed, filepath.FromSlash(rel)) }
+
+func (s *sandbox) transition(from, to []Group, scope map[Key]bool) Plan {
+	s.t.Helper()
+	plan, err := Transition(from, to, scope)
+	if err != nil {
+		s.t.Fatal(err)
 	}
-	return strings.Join(n, ",")
+	return plan
+}
+
+func (s *sandbox) apply(plan Plan) {
+	s.t.Helper()
+	if err := Apply(plan, nil); err != nil {
+		s.t.Fatal(err)
+	}
 }
 
 func TestEntriesIDs(t *testing.T) {
-	s := newSandbox(t)
 	entries := Entries("p", []config.Playbook{{Name: "x", Folder: "a/pb"}, {Name: "x", Folder: "b/other"},
-		{Name: "y", Folder: "a/pb"}}, s.base)
-	if entries[0].ID != "x@pb" || entries[1].ID != "x@other" || entries[2].ID != "y" || entries[2].Profile != "p" {
-		t.Fatalf("entries = %+v", entries)
+		{Name: "y", Folder: "a/pb"}}, "/m")
+	if entries[0].ID != "x@pb" || entries[1].ID != "x@other" || entries[2].ID != "y" {
+		t.Fatalf("ids: %s %s %s", entries[0].ID, entries[1].ID, entries[2].ID)
+	}
+	if entries[2].Label() != "y (profile p)" {
+		t.Fatalf("label: %s", entries[2].Label())
 	}
 }
 
-func TestItemsFormatsAndOwnership(t *testing.T) {
+func TestItemsFormats(t *testing.T) {
 	s := newSandbox(t)
 	s.skill("x-a")
-	s.skill("x-y-b")
-	s.file("skills/x-notes/README.md") // no SKILL.md
-	s.file("skills/x-file")            // not a folder
-	s.skill("other")
-	s.file("agents/x-r.md")
-	s.file("agents/x-r.agent.md")
-	s.file("agents/x-r.toml")
-	s.file("agents/y-r.md")
-	s.file("agents/x-.md") // nothing after the prefix: still named "x-..."
-
-	claude := s.group("p", "claude", "x", "x-y")
-	x, xy := claude.Entries[0], claude.Entries[1]
-	for _, c := range []struct {
-		g    Group
-		e    Entry
-		kind config.Kind
-		want string
-	}{
-		{claude, x, config.Skills, "x-a"},
-		{claude, xy, config.Skills, "x-y-b"},
-		{claude, x, config.Subagents, "x-.md,x-r.md"},
-		{s.group("p", "copilot", "x"), x, config.Subagents, "x-r.agent.md"},
-		{s.group("p", "codex", "x"), x, config.Subagents, "x-r.toml"},
-		{claude, x, config.Commands, ""}, // no commands/ folder
-	} {
-		items, err := Items(c.g.Entries, c.e, folder(c.g, c.kind))
+	s.skill("x-b")
+	s.skill("y-c")
+	s.file("pb/skills/.x-hidden/SKILL.md")
+	s.file("pb/skills/x-notes.txt") // a file matching the format: an artifact as well
+	s.file("pb/agents/x-r.md")
+	s.file("pb/agents/x-r.agent.md")
+	s.file("pb/outside/x-out/SKILL.md")
+	inside := filepath.Join(s.root, "pb", "outside", "x-out")
+	if err := os.Symlink(inside, filepath.Join(s.pb, "skills", "x-in")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(s.root, "elsewhere", "x-far"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(s.root, "elsewhere", "x-far"),
+		filepath.Join(s.pb, "skills", "x-far")); err != nil {
+		t.Fatal(err)
+	}
+	names := func(e Entry, kind string) string {
+		t.Helper()
+		items, err := Items(e, kind)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := names(items); got != c.want {
-			t.Errorf("%s of %s for %s = %q, want %q", c.kind, c.e.ID, folder(c.g, c.kind).Agent, got, c.want)
+		var n []string
+		for _, it := range items {
+			n = append(n, it.Name)
+		}
+		return strings.Join(n, ",")
+	}
+	g := s.group("p", pb("x", nil), pb("all", map[string]config.Mapping{"skills": {Folder: "skills", Format: "*"},
+		"subagents": {Folder: "agents", Format: "*.agent.md"}}))
+	x, all := g.Entries[0], g.Entries[1]
+	// Hidden entries and links leading outside the playbook folder are never artifacts; links inside it are.
+	if got := names(x, "skills"); got != "x-a,x-b,x-in,x-notes.txt" {
+		t.Errorf("x skills: %s", got)
+	}
+	if got := names(x, "subagents"); got != "" { // the default subfolder, subagents/, does not exist
+		t.Errorf("x subagents: %s", got)
+	}
+	if got := names(all, "skills"); got != "x-a,x-b,x-in,x-notes.txt,y-c" {
+		t.Errorf("all skills: %s", got)
+	}
+	if got := names(all, "subagents"); got != "x-r.agent.md" {
+		t.Errorf("all subagents: %s", got)
+	}
+	// Ownership: the link's name matches the format and it points into the playbook's folder for the kind.
+	src := filepath.Join(s.pb, "skills", "x-a")
+	if !x.Owns("skills", "x-a", src) || x.Owns("subagents", "x-a", src) || x.Owns("skills", "x-b", src) {
+		t.Errorf("ownership")
+	}
+	if o := Owner(g.Entries, "skills", "y-c", filepath.Join(s.pb, "skills", "y-c")); o == nil || o.Name != "all" {
+		t.Errorf("owner of y-c: %v", o)
+	}
+}
+
+func TestTransitionAddUpdateRemove(t *testing.T) {
+	s := newSandbox(t)
+	s.skill("x-a")
+	s.skill("x-b")
+	s.file("pb/subagents/x-r.md")
+	none := s.group("p")
+	with := s.group("p", pb("x", nil))
+	scope := scopeOf(with)
+
+	// Adding links everything; adding again is a no-op.
+	plan := s.transition([]Group{none}, []Group{with}, scope)
+	if got := actions(plan, Create); got != "x-a,x-b,x-r.md" || len(plan.Conflicts()) > 0 {
+		t.Fatalf("add: %+v", plan)
+	}
+	s.apply(plan)
+	plan = s.transition([]Group{with}, []Group{with}, scope)
+	if actions(plan, Keep) != "x-a,x-b,x-r.md" || len(plan.Changes()) > 0 {
+		t.Fatalf("update with no change: %+v", plan)
+	}
+
+	// Update: a new artifact, one gone and a hand-added file next to the links.
+	s.skill("x-c")
+	if err := os.RemoveAll(filepath.Join(s.pb, "skills", "x-b")); err != nil {
+		t.Fatal(err)
+	}
+	s.file("m/.agents/skills/x-mine")
+	plan = s.transition([]Group{with}, []Group{with}, scope)
+	if actions(plan, Create) != "x-c" || actions(plan, Remove) != "x-b" {
+		t.Fatalf("update: %+v", plan)
+	}
+	for _, a := range plan.Actions {
+		if a.Kind == Remove && a.Reason != "broken link: its artifact no longer exists" {
+			t.Errorf("reason: %s", a.Reason)
 		}
 	}
-	if o := Owner(claude.Entries, folder(claude, config.Skills), filepath.Join(s.pb, "skills"), "x-y-b"); o == nil ||
-		o.ID != "x-y" {
-		t.Fatalf("owner = %+v", o)
-	}
-	if o := Owner(claude.Entries, folder(claude, config.Skills), filepath.Join(s.pb, "skills"), "z-a"); o != nil {
-		t.Fatalf("owner = %+v", o)
-	}
-}
+	s.apply(plan)
 
-func TestItemsFollowExplicitPaths(t *testing.T) {
-	s := newSandbox(t)
-	s.file("subagents/x-r.md")
-	s.file("agents/x-old.md")
-	g := s.group("p", "claude", "x")
-	f := folder(g, config.Subagents)
-	if items, _ := Items(g.Entries, g.Entries[0], f); names(items) != "x-old.md" {
-		t.Fatalf("default folder: %s", names(items))
+	// Removing the playbook removes its links only, and the folders left empty up to the managed folder.
+	plan = s.transition([]Group{with}, []Group{none}, scope)
+	if actions(plan, Remove) != "x-a,x-c,x-r.md" || plan.Actions[0].Reason != "playbook removed" {
+		t.Fatalf("remove: %+v", plan)
 	}
-	g.Entries[0].Artifacts.Subagents.Path = "subagents"
-	if items, _ := Items(g.Entries, g.Entries[0], f); names(items) != "x-r.md" {
-		t.Fatalf("explicit folder: %s", names(items))
-	}
-	// An item that is a link leading outside the playbook folder is not an artifact.
-	outside := filepath.Join(s.base, "outside.md")
-	if err := os.WriteFile(outside, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(outside, filepath.Join(s.pb, "subagents", "x-escape.md")); err != nil {
-		t.Skip("symbolic links are not available:", err)
-	}
-	if items, _ := Items(g.Entries, g.Entries[0], f); names(items) != "x-r.md" {
-		t.Fatalf("with an escaping link: %s", names(items))
-	}
-}
-
-func TestBuildApplyAndUpdate(t *testing.T) {
-	s := newSandbox(t)
-	skill := s.skill("x-a")
-	s.skill("x-b")
-	agent := s.file("agents/x-r.md")
-	g := s.group("p", "claude", "x")
-	plan, err := Build(g, g.Entries[0], nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := kinds(plan, Create); got != "x-a,x-b,x-r.md" {
-		t.Fatalf("creations = %s", got)
-	}
-	if err := Apply(plan, nil); err != nil {
-		t.Fatal(err)
-	}
-	link := filepath.Join(s.base, ".claude", "agents", "x-r.md")
-	if state, current, _ := fsutil.Inspect(link); state != fsutil.Link || !fsutil.SamePath(current, agent) {
-		t.Fatalf("link %s -> %s", link, current)
-	}
-
-	// Nothing to do the second time.
-	plan, _ = Build(g, g.Entries[0], nil)
-	if len(plan.Changes()) != 0 || kinds(plan, Keep) != "x-a,x-b,x-r.md" {
-		t.Fatalf("changes = %+v", plan.Changes())
-	}
-
-	// A removed artifact is unlinked (its link is broken), and the folder it leaves empty is removed.
-	if err := os.Remove(agent); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.RemoveAll(skill); err != nil {
-		t.Fatal(err)
-	}
-	plan, _ = Build(g, g.Entries[0], nil)
-	if got := kinds(plan, Remove); got != "x-a,x-r.md" || !strings.Contains(plan.filter(Remove)[0].Reason, "broken") {
-		t.Fatalf("removals = %+v", plan.filter(Remove))
-	}
-	if err := Apply(plan, nil); err != nil {
-		t.Fatal(err)
-	}
+	s.apply(plan)
 	var removed []string
 	Cleanup(plan, func(dir string) { removed = append(removed, dir) })
-	if len(removed) != 1 || removed[0] != filepath.Join(s.base, ".claude", "agents") {
-		t.Fatalf("removed folders = %v", removed)
+	if strings.Join(removed, " ") != s.link(".claude/agents")+" "+s.link(".claude") {
+		t.Fatalf("cleanup removed %v", removed)
 	}
-	if !fsutil.IsDir(filepath.Join(s.base, ".claude", "skills")) {
-		t.Fatal("a folder still holding links was removed")
+	if _, err := os.Stat(s.link(".agents/skills/x-mine")); err != nil {
+		t.Fatal("hand-added file removed")
 	}
-
-	// Removing the playbook removes every link, then the folders and the agents configuration folder.
-	plan, _ = Build(Group{Profile: "p", Folders: g.Folders}, g.Entries[0], nil)
-	if got := kinds(plan, Remove); got != "x-b" || plan.filter(Remove)[0].Reason != "playbook removed" {
-		t.Fatalf("removals = %+v", plan.filter(Remove))
-	}
-	if err := Apply(plan, nil); err != nil {
-		t.Fatal(err)
-	}
-	Cleanup(plan, nil)
-	if _, err := os.Lstat(filepath.Join(s.base, ".claude")); !os.IsNotExist(err) {
-		t.Fatal(".claude should have been removed")
+	if _, err := os.Stat(s.managed); err != nil {
+		t.Fatal("the managed folder must never be removed")
 	}
 }
 
-func TestBuildConflicts(t *testing.T) {
+func TestTransitionConflicts(t *testing.T) {
 	s := newSandbox(t)
 	s.skill("x-a")
 	s.skill("x-b")
 	s.skill("x-c")
-	g := s.group("p", "standard", "x")
-	dir := filepath.Join(s.base, ".agents", "skills")
-	if err := os.MkdirAll(filepath.Join(dir, "x-a"), 0o755); err != nil { // a real folder
+	s.skill("x-data-d")
+	before := s.group("p")
+
+	// Something in the way: a file, a link to something else, and a link to the same artifact made by hand.
+	s.file("m/.agents/skills/x-a")
+	if err := os.Symlink(filepath.Join(s.root, "elsewhere"), s.link(".agents/skills/x-b")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(s.base, filepath.Join(dir, "x-b")); err != nil { // a link elsewhere
-		t.Skip("symbolic links are not available:", err)
-	}
-	plan, err := Build(g, g.Entries[0], nil)
-	if err != nil {
+	if err := os.Symlink(filepath.Join(s.pb, "skills", "x-c"), s.link(".agents/skills/x-c")); err != nil {
 		t.Fatal(err)
 	}
+	after := s.group("p", pb("x", nil))
+	plan := s.transition([]Group{before}, []Group{after}, scopeOf(after))
 	causes := map[string]ConflictCause{}
 	for _, c := range plan.Conflicts() {
 		causes[c.Name] = c.Cause
 	}
-	if causes["x-a"] != NotLink || causes["x-b"] != OtherLink || len(causes) != 2 {
-		t.Fatalf("conflicts = %+v", plan.Conflicts())
+	if causes["x-a"] != NotLink || causes["x-b"] != OtherLink || causes["x-c"] != Exists || len(causes) != 3 {
+		t.Fatalf("conflicts: %+v", plan.Conflicts())
 	}
 	if err := Apply(plan, nil); err == nil {
-		t.Fatal("a plan with conflicts was applied")
+		t.Fatal("a plan with conflicts must not be applied")
 	}
-
-	// Codex links skills from the same folder as the standard agent: two profiles collide there, not elsewhere.
-	if err := os.RemoveAll(dir); err != nil {
-		t.Fatal(err)
-	}
-	codex := s.group("q", "codex", "x")
-	plan, _ = Build(g, g.Entries[0], []Group{codex})
-	if len(plan.Conflicts()) != 3 || plan.Conflicts()[0].Cause != OtherProvider ||
-		plan.Conflicts()[0].Others[0] != "x of profile q" {
-		t.Fatalf("conflicts = %+v", plan.Conflicts())
-	}
-	claude := s.group("q", "claude", "x")
-	if plan, _ = Build(g, g.Entries[0], []Group{claude}); len(plan.Conflicts()) != 0 {
-		t.Fatalf("conflicts = %+v", plan.Conflicts())
-	}
-}
-
-func TestOverlaps(t *testing.T) {
-	s := newSandbox(t)
-	s.skill("x-a")
-	other := filepath.Join(s.base, "other")
-	if err := os.MkdirAll(filepath.Join(other, "skills", "x-a"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(other, "skills", "x-a", "SKILL.md"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	ag, _ := config.LookupAgent("claude")
-	g := Group{Profile: "p", Folders: ag.KindFolders(s.base, false), Entries: Entries("p", []config.Playbook{
-		{Name: "x", Folder: "pb"}, {Name: "x", Folder: "other"}}, s.base)}
-	conflicts, err := Overlaps(g, g.Entries[1])
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(conflicts) != 1 || conflicts[0].Name != "x-a" || conflicts[0].Others[0] != "x@pb" {
-		t.Fatalf("conflicts = %+v", conflicts)
-	}
-}
-
-func TestSwitchBetweenAgents(t *testing.T) {
-	s := newSandbox(t)
-	s.skill("x-a")
-	s.file("agents/x-r.toml")
-	s.file("agents/x-r.md")
-	standard, codex, claude := s.group("p", "standard", "x"), s.group("p", "codex", "x"), s.group("p", "claude", "x")
-	plan, _ := Build(standard, standard.Entries[0], nil)
-	if err := Apply(plan, nil); err != nil {
-		t.Fatal(err)
-	}
-
-	// standard -> codex: the skill's link is the same, so it is left alone; codex's subagent is linked.
-	plan, err := Switch([]Group{standard}, []Group{codex}, nil, "agent changed", "agent changed", false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if kinds(plan, Remove) != "" || kinds(plan, Create) != "x-r.toml" {
-		t.Fatalf("plan = %+v", plan.Actions)
-	}
-	if err := Apply(plan, nil); err != nil {
-		t.Fatal(err)
-	}
-
-	// codex -> claude: everything moves, and the old folders go once empty.
-	plan, _ = Switch([]Group{codex}, []Group{claude}, nil, "agent changed", "agent changed", false)
-	if kinds(plan, Remove) != "x-a,x-r.toml" || kinds(plan, Create) != "x-a,x-r.md" {
-		t.Fatalf("plan = %+v", plan.Actions)
-	}
-	if err := Apply(plan, nil); err != nil {
-		t.Fatal(err)
-	}
-	Cleanup(plan, nil)
-	for _, gone := range []string{".agents", ".codex"} {
-		if _, err := os.Lstat(filepath.Join(s.base, gone)); !os.IsNotExist(err) {
-			t.Fatalf("%s should have been removed", gone)
+	for _, name := range []string{"x-a", "x-b", "x-c"} {
+		if err := os.Remove(s.link(".agents/skills/" + name)); err != nil {
+			t.Fatal(err)
 		}
 	}
 
-	// Enabling (strict) fails when a link already exists, even a right one.
-	plan, _ = Switch(nil, []Group{claude}, nil, "", "", true)
-	if len(plan.Conflicts()) != 2 || plan.Conflicts()[0].Cause != Exists {
-		t.Fatalf("plan = %+v", plan.Actions)
+	// Two playbooks of the same profile linking the same artifact (overlapping formats on the same folder).
+	both := s.group("p", pb("x", nil), pb("x-data", nil))
+	plan = s.transition([]Group{before}, []Group{both}, scopeOf(both))
+	if len(plan.Conflicts()) != 1 || plan.Conflicts()[0].Name != "x-data-d" || plan.Conflicts()[0].Cause != Duplicate {
+		t.Fatalf("duplicate: %+v", plan.Conflicts())
+	}
+
+	// The same link from two profiles, from different playbook names: a duplicate as well.
+	p1 := s.group("p1", pb("x", nil))
+	p2 := s.group("p2", pb("y", map[string]config.Mapping{"skills": {Folder: "skills", Format: "x-a"}}))
+	plan = s.transition([]Group{p1}, []Group{p1, p2}, scopeOf(p2))
+	if len(plan.Conflicts()) != 1 || plan.Conflicts()[0].Cause != Duplicate ||
+		plan.Conflicts()[0].Others[0] != "x (profile p1)" {
+		t.Fatalf("duplicate across profiles: %+v", plan.Conflicts())
+	}
+
+	// The same playbook in two profiles enabled together: one conflict, not one per artifact.
+	q1, q2 := s.group("q1", pb("x", nil)), s.group("q2", pb("x", nil))
+	plan = s.transition(nil, []Group{q1, q2}, scopeOf(q2))
+	if len(plan.Conflicts()) != 1 || plan.Conflicts()[0].Cause != SamePlaybook || len(plan.Changes()) > 0 {
+		t.Fatalf("same playbook: %+v", plan)
+	}
+	// Different formats do not help: the same playbook cannot be in two enabled profiles.
+	q3 := s.group("q3", pb("x", map[string]config.Mapping{"skills": {Folder: "skills", Format: "nothing-*"}}))
+	plan = s.transition(nil, []Group{q1, q3}, scopeOf(q3))
+	if len(plan.Conflicts()) != 1 || plan.Conflicts()[0].Cause != SamePlaybook {
+		t.Fatalf("same playbook, other format: %+v", plan)
 	}
 }
 
-func TestMarkAncestors(t *testing.T) {
+func TestTransitionSwitch(t *testing.T) {
 	s := newSandbox(t)
 	s.skill("x-a")
-	home := filepath.Join(s.base, "home")
-	// Copilot reads ~/.copilot/skills in the home folder, but .github/skills in a project.
-	if err := os.MkdirAll(filepath.Join(home, ".copilot", "skills", "x-a"), 0o755); err != nil {
-		t.Fatal(err)
+	s.skill("x-b")
+	s.skill("y-c")
+	a := s.group("a", pb("x", nil))
+	b := s.group("b", pb("x", map[string]config.Mapping{"skills": {Folder: "skills", Format: "x-a"}}),
+		pb("y", nil))
+	s.apply(s.transition(nil, []Group{a}, scopeOf(a)))
+
+	// Enabling b besides a: the same playbook in both.
+	plan := s.transition([]Group{a}, []Group{a, b}, scopeOf(b))
+	if len(plan.Conflicts()) == 0 {
+		t.Fatalf("enable: want a conflict")
 	}
-	if err := os.MkdirAll(filepath.Join(home, ".github", "skills", "x-a"), 0o755); err != nil {
-		t.Fatal(err)
+	// Switching from a to b: x-a moves from a to b (kept), x-b goes, y-c comes.
+	plan = s.transition([]Group{a}, []Group{b}, scopeOf(a, b))
+	if len(plan.Conflicts()) > 0 || actions(plan, Keep) != "x-a" || actions(plan, Remove) != "x-b" ||
+		actions(plan, Create) != "y-c" {
+		t.Fatalf("switch: %+v", plan)
 	}
-	copilot := s.group("p", "copilot", "x")
-	plan, _ := Build(copilot, copilot.Entries[0], nil)
-	MarkAncestors(&plan, []string{home}, home)
-	if len(plan.Conflicts()) != 1 || plan.Conflicts()[0].Cause != Ancestor ||
-		plan.Conflicts()[0].Current != filepath.Join(home, ".copilot", "skills", "x-a") {
-		t.Fatalf("plan = %+v", plan.Actions)
+	for _, act := range plan.Actions {
+		if act.Kind == Remove && act.Reason != "profile disabled" {
+			t.Errorf("reason: %s", act.Reason)
+		}
 	}
-	// As a project base folder (not the home folder), it is .github that counts.
-	plan, _ = Build(copilot, copilot.Entries[0], nil)
-	MarkAncestors(&plan, []string{home}, filepath.Join(s.base, "elsewhere"))
-	if len(plan.Conflicts()) != 1 || plan.Conflicts()[0].Current != filepath.Join(home, ".github", "skills", "x-a") {
-		t.Fatalf("plan = %+v", plan.Actions)
-	}
-	// Another agent is not concerned.
-	claude := s.group("p", "claude", "x")
-	plan, _ = Build(claude, claude.Entries[0], nil)
-	MarkAncestors(&plan, []string{home}, home)
-	if len(plan.Conflicts()) != 0 {
-		t.Fatalf("plan = %+v", plan.Actions)
+	s.apply(plan)
+	// Disabling b removes everything; playbooks out of scope are not touched (z's x-b is not linked).
+	other := s.group("c", pb("z", map[string]config.Mapping{"skills": {Folder: "skills", Format: "x-b"}}))
+	plan = s.transition([]Group{b, other}, []Group{other}, scopeOf(b))
+	if actions(plan, Remove) != "x-a,y-c" || len(plan.Changes()) != 2 || len(plan.Conflicts()) > 0 {
+		t.Fatalf("disable: %+v", plan)
 	}
 }
 
-func TestCleanupKeepsWhatIsNotEmpty(t *testing.T) {
+func TestCleanupStops(t *testing.T) {
 	s := newSandbox(t)
-	s.skill("x-a")
-	s.file("agents/x-r.md")
-	g := s.group("p", "claude", "x")
-	plan, _ := Build(g, g.Entries[0], nil)
-	if err := Apply(plan, nil); err != nil {
+	appData := filepath.Join(s.root, "appdata")
+	link := filepath.Join(appData, "devin", "skills", "x-a")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	mine := filepath.Join(s.base, ".claude", "agents", "mine.md")
-	if err := os.WriteFile(mine, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	plan, _ = Build(Group{Profile: "p", Folders: g.Folders}, g.Entries[0], nil)
-	if err := Apply(plan, nil); err != nil {
-		t.Fatal(err)
-	}
-	Cleanup(plan, nil)
-	if !fsutil.IsFile(mine) {
-		t.Fatal("a file added by hand was removed")
-	}
-	if _, err := os.Lstat(filepath.Join(s.base, ".claude", "skills")); !os.IsNotExist(err) {
-		t.Fatal("the empty skills folder should have been removed")
-	}
-
-	// A folder that is a link (for example, a .claude kept elsewhere) is never removed.
-	real := filepath.Join(s.base, "dotfiles-claude")
-	if err := os.MkdirAll(real, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.RemoveAll(filepath.Join(s.base, ".claude")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(real, filepath.Join(s.base, ".claude")); err != nil {
-		t.Skip("symbolic links are not available:", err)
-	}
-	plan, _ = Build(g, g.Entries[0], nil)
-	if err := Apply(plan, nil); err != nil {
-		t.Fatal(err)
-	}
-	plan, _ = Build(Group{Profile: "p", Folders: g.Folders}, g.Entries[0], nil)
-	if err := Apply(plan, nil); err != nil {
+	keep := s.file("m/.claude/keep.txt")
+	plan := Plan{Actions: []Action{
+		{Kind: Remove, Link: link, Stop: appData},
+		{Kind: Remove, Link: s.link(".claude/skills/x-a"), Stop: s.managed},
+	}}
+	if err := os.MkdirAll(s.link(".claude/skills"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	Cleanup(plan, nil)
-	if state, _, _ := fsutil.Inspect(filepath.Join(s.base, ".claude")); state != fsutil.Link {
-		t.Fatal("a linked agents configuration folder was removed")
+	for _, gone := range []string{filepath.Join(appData, "devin"), s.link(".claude/skills")} {
+		if _, err := os.Stat(gone); !os.IsNotExist(err) {
+			t.Errorf("%s should have been removed", gone)
+		}
+	}
+	for _, kept := range []string{appData, keep} {
+		if _, err := os.Stat(kept); err != nil {
+			t.Errorf("%s should have been kept", kept)
+		}
 	}
 }
 
 func TestRevert(t *testing.T) {
 	s := newSandbox(t)
 	s.skill("x-a")
-	g := s.group("p", "standard", "x")
-	plan, _ := Build(g, g.Entries[0], nil)
-	if err := Apply(plan, nil); err != nil {
-		t.Fatal(err)
-	}
-	link := filepath.Join(s.base, ".agents", "skills", "x-a")
+	g := s.group("p", pb("x", nil))
+	plan := s.transition(nil, []Group{g}, scopeOf(g))
+	s.apply(plan)
+	link := s.link(".agents/skills/x-a")
 	if err := Revert(plan.Changes()); err != nil {
 		t.Fatal(err)
 	}
@@ -488,5 +422,17 @@ func TestMetadataVersion(t *testing.T) {
 	}
 	if got := MetadataVersion(filepath.Join(dir, "missing.md")); got != "" {
 		t.Errorf("missing file: %q", got)
+	}
+}
+
+// TestSamePlaybookReportedOnce checks that the same playbook in two profiles is one conflict, even when both
+// registrations are in scope (as when status plans every playbook at once).
+func TestSamePlaybookReportedOnce(t *testing.T) {
+	s := newSandbox(t)
+	s.skill("x-a")
+	a, b := s.group("a", pb("x", nil)), s.group("b", pb("x", nil))
+	plan := s.transition(nil, []Group{a, b}, scopeOf(a, b))
+	if len(plan.Conflicts()) != 1 || plan.Conflicts()[0].Cause != SamePlaybook || len(plan.Changes()) > 0 {
+		t.Fatalf("plan: %+v", plan)
 	}
 }

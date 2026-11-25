@@ -16,9 +16,9 @@
 //
 // =========================================================================
 
-// Package playbook computes playbook ids, discovers the artifacts of each registered playbook (skills, subagents,
-// commands, ...), and plans the link changes needed to add, update or remove playbooks in the folders where agents
-// read their artifacts.
+// Package playbook computes playbook ids, discovers the artifacts each registered playbook provides for each kind of
+// its profile's targets, and plans the link changes needed to add, update or remove playbooks, or to change the
+// enabled profiles, in the target folders.
 package playbook
 
 import (
@@ -27,7 +27,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 
 	"arxila.io/aiplam/internal/config"
 	"arxila.io/aiplam/internal/fsutil"
@@ -40,20 +39,35 @@ type Entry struct {
 	ID string
 	// Profile is the profile the playbook is registered in.
 	Profile string
-	// Dir is the playbook folder, resolved against the base folder, with links resolved.
+	// Dir is the playbook folder, resolved against the managed folder, with links resolved.
 	Dir string
 }
 
+// Key identifies a registered playbook: its profile, name and playbook folder.
+type Key struct {
+	Profile, Name, Dir string
+}
+
+// Key returns the entry's key.
+func (e Entry) Key() Key {
+	return Key{Profile: e.Profile, Name: e.Name, Dir: e.Dir}
+}
+
+// Label describes the entry in messages: "<id> (profile <profile>)".
+func (e Entry) Label() string {
+	return fmt.Sprintf("%s (profile %s)", e.ID, e.Profile)
+}
+
 // Entries builds the entries of the playbooks of a profile, computing their ids and resolving their folders against the
-// base folder.
-func Entries(profile string, playbooks []config.Playbook, base string) []Entry {
+// managed folder.
+func Entries(profile string, playbooks []config.Playbook, managed string) []Entry {
 	count := map[string]int{}
 	for _, p := range playbooks {
 		count[p.Name]++
 	}
 	entries := make([]Entry, len(playbooks))
 	for i, p := range playbooks {
-		id, dir := p.Name, p.Dir(base)
+		id, dir := p.Name, p.Dir(managed)
 		if count[p.Name] > 1 {
 			id = p.Name + "@" + filepath.Base(dir)
 		}
@@ -62,94 +76,81 @@ func Entries(profile string, playbooks []config.Playbook, base string) []Entry {
 	return entries
 }
 
-// KindDir returns the folder holding the playbook's artifacts for a kind folder (the path set for its kind, or else
-// the default of the folder's agent), with links resolved.
-func (e Entry) KindDir(folder config.KindFolder) string {
-	return e.PathDir(e.Path(folder.Kind, folder.DefaultPath))
+// SourceDir returns the folder holding the playbook's artifacts of kind, with links resolved.
+func (e Entry) SourceDir(kind string) string {
+	folder, _ := e.Source(kind)
+	return fsutil.Canonical(filepath.Join(e.Dir, filepath.FromSlash(folder)))
 }
 
-// PathDir returns a folder of the playbook, given relative to its playbook folder, with links resolved.
-func (e Entry) PathDir(path string) string {
-	return fsutil.Canonical(filepath.Join(e.Dir, filepath.FromSlash(path)))
+// Format returns the format of the playbook's artifacts of kind.
+func (e Entry) Format(kind string) string {
+	_, format := e.Source(kind)
+	return format
 }
 
-// Group is the playbooks of a profile, and the folders where their artifacts are linked: those of the profile's
-// agent in the base folder.
+// Owns reports whether a link named name in the target folder of kind, pointing to current, belongs to the playbook:
+// it points to an entry of the same name in the playbook's folder for the kind, and the name matches its format.
+func (e Entry) Owns(kind, name, current string) bool {
+	return config.MatchFormat(e.Format(kind), name) && fsutil.SameName(filepath.Base(current), name) &&
+		fsutil.SamePath(fsutil.Canonical(filepath.Dir(current)), e.SourceDir(kind))
+}
+
+// Owner returns the entry, among entries, that a link in the target folder of kind belongs to (see Owns), or nil.
+func Owner(entries []Entry, kind, name, current string) *Entry {
+	for i := range entries {
+		if entries[i].Owns(kind, name, current) {
+			return &entries[i]
+		}
+	}
+	return nil
+}
+
+// Target is a profile's target folder for a kind, resolved.
+type Target struct {
+	Kind string
+	// Folder is the target folder as configured.
+	Folder string
+	// Dir is the folder where the artifacts are linked.
+	Dir string
+	// Stop is the folder at which removing the folders that unlinking leaves empty stops (it is never removed): the
+	// managed folder, or the %APPDATA% folder.
+	Stop string
+}
+
+// Group is the playbooks of a profile and its targets.
 type Group struct {
 	Profile string
 	Entries []Entry
-	Folders []config.KindFolder
+	Targets []Target
 }
 
 // Item is an artifact provided by a playbook.
 type Item struct {
-	Name   string `json:"name"`
-	Source string `json:"source"`
+	Name   string
+	Source string
 }
 
-// candidates lists the artifacts of a format in dir whose name starts with prefix + "-": folders holding the format's
-// file, or files with the format's extension.
-func candidates(dir, prefix string, format config.Format) ([]Item, error) {
+// Items returns the artifacts that e provides for kind: the entries of its folder for the kind (files and folders
+// alike) whose names match its format, except hidden ones and links leading outside the playbook folder, sorted by
+// name. A playbook without a folder for the kind provides none.
+func Items(e Entry, kind string) ([]Item, error) {
+	dir := e.SourceDir(kind)
 	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
+	format := e.Format(kind)
 	var items []Item
 	for _, entry := range entries {
 		name := entry.Name()
-		if !strings.HasPrefix(name, prefix+"-") || len(name) == len(prefix)+1 {
-			continue
-		}
 		src := filepath.Join(dir, name)
-		if format.File != "" {
-			if fsutil.IsDir(src) && fsutil.IsFile(filepath.Join(src, format.File)) {
-				items = append(items, Item{Name: name, Source: src})
-			}
-		} else if fsutil.IsFile(src) && config.ItemExt(name) == format.Ext {
-			items = append(items, Item{Name: name, Source: src})
-		}
-	}
-	return items, nil
-}
-
-// Owner returns the entry, among entries, that owns an artifact named name found in kindDir, for a kind folder: the
-// entry with that folder for the kind whose name is the longest prefix of the artifact's name (followed by '-'). It
-// returns nil when no entry matches.
-func Owner(entries []Entry, folder config.KindFolder, kindDir, name string) *Entry {
-	var owner *Entry
-	for i := range entries {
-		e := &entries[i]
-		if !strings.HasPrefix(name, e.Name+"-") || !fsutil.SamePath(e.KindDir(folder), kindDir) {
+		if !config.MatchFormat(format, name) || !fsutil.Within(fsutil.Canonical(src), e.Dir) {
 			continue
 		}
-		if owner == nil || len(e.Name) > len(owner.Name) {
-			owner = e
-		}
-	}
-	return owner
-}
-
-// Items returns the artifacts that e provides for a kind folder when entries (which must include e) are registered:
-// the items of its folder for the kind, in the folder's format, named "<name>-...", except those claimed by an entry
-// with a longer matching name on the same folder, and those that are links leading outside the playbook folder. A
-// playbook without a folder for the kind provides none.
-func Items(entries []Entry, e Entry, folder config.KindFolder) ([]Item, error) {
-	dir := e.KindDir(folder)
-	if !fsutil.IsDir(dir) {
-		return nil, nil
-	}
-	candidates, err := candidates(dir, e.Name, folder.Format)
-	if err != nil {
-		return nil, err
-	}
-	var items []Item
-	for _, it := range candidates {
-		if !fsutil.Within(fsutil.Canonical(it.Source), e.Dir) {
-			continue
-		}
-		if owner := Owner(entries, folder, dir, it.Name); owner != nil && owner.ID == e.ID {
-			items = append(items, it)
-		}
+		items = append(items, Item{Name: name, Source: src})
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].Name < items[j].Name })
 	return items, nil
@@ -163,9 +164,9 @@ const (
 	Keep ActionKind = iota
 	// Create: the link is missing and will be created.
 	Create
-	// Remove: the link points into the playbook but its artifact no longer exists or belongs to it; it will be removed.
+	// Remove: the link belongs to the playbook but must go; it will be removed.
 	Remove
-	// Conflict: something else exists where the link must go; the operation must be cancelled.
+	// Conflict: the link cannot be created; the operation must be cancelled.
 	Conflict
 )
 
@@ -177,53 +178,53 @@ const (
 	NotLink ConflictCause = iota + 1
 	// OtherLink: a link to another artifact (Action.Current) exists where the link must go.
 	OtherLink
-	// OtherProvider: other registered playbooks (Action.Others) want a link at the same place.
-	OtherProvider
-	// Exists: the link already exists, even if it is right; enabling a profile requires every one of its links to be new.
+	// Exists: a link to the same artifact exists where the link must go, but it does not belong to the playbook (it
+	// was made by another playbook or profile, or by hand).
 	Exists
-	// Ancestor: an artifact with the same name exists where the same agent reads the same kind in a higher-level base
-	// folder (Action.Current), which agents may read too.
-	Ancestor
+	// Duplicate: other playbooks (Action.Others) would link an artifact at the same place.
+	Duplicate
+	// SamePlaybook: the same playbook (same name and playbook folder) is registered in other profiles that would be
+	// enabled together (Action.Others).
+	SamePlaybook
 )
 
-// Action is one planned change for one artifact in one kind folder.
+// Action is one planned change for one artifact in one target folder.
 type Action struct {
 	Kind ActionKind
 	// Artifact is the kind of artifact.
-	Artifact config.Kind
-	// Agent is the agent the artifact is linked for.
-	Agent string
-	// Name of the artifact.
+	Artifact string
+	// Name of the artifact (or of the playbook, for a SamePlaybook conflict).
 	Name string
 	// Link is the path of the link.
 	Link string
 	// Source is the artifact the link points (or must point) to.
 	Source string
-	// AgentsConfigDir is the agents configuration folder holding the link's folder.
-	AgentsConfigDir string
+	// Stop is the folder at which removing the folders left empty stops (see Target.Stop).
+	Stop string
+	// Playbook describes the playbook the link belongs to (see Entry.Label); ID and Profile are its id and profile.
+	Playbook    string
+	ID, Profile string
 	// Reason explains a Remove.
 	Reason string
 	// Cause explains a Conflict.
 	Cause ConflictCause
-	// Current is the target of the link found in the way, for an OtherLink conflict, or the artifact found in a
-	// higher-level base folder, for an Ancestor conflict.
+	// Current is the target of the link found in the way, for an OtherLink conflict.
 	Current string
-	// Others are the ids of the other playbooks providing the artifact, for an OtherProvider conflict.
+	// Others describe the other playbooks of a Duplicate or SamePlaybook conflict.
 	Others []string
 }
 
-// Plan is the set of actions for one playbook.
+// Plan is a set of link changes.
 type Plan struct {
-	Entry   Entry
 	Actions []Action
 }
 
 // Conflicts returns the conflicting actions.
 func (p Plan) Conflicts() []Action { return p.filter(Conflict) }
 
-// Changes returns the actions that would change something (creations and removals).
+// Changes returns the actions that would change something (removals, then creations).
 func (p Plan) Changes() []Action {
-	return append(p.filter(Create), p.filter(Remove)...)
+	return append(p.filter(Remove), p.filter(Create)...)
 }
 
 func (p Plan) filter(kind ActionKind) []Action {
@@ -236,300 +237,206 @@ func (p Plan) filter(kind ActionKind) []Action {
 	return out
 }
 
-// Build plans the changes for playbook e in the kind folders of final, for the state in which final is e's profile
-// and others are the other enabled profiles. When e is in final (by name and folder), its artifacts must be linked
-// (add or update); otherwise e is being removed and all of its links go. Links that point into e's folders and are
-// named after e are removed unless some playbook of final or others wants exactly that link. A desired link whose path
-// holds anything other than a link to the same artifact is a conflict, as is a link that another playbook of final or
-// others also wants.
-func Build(final Group, e Entry, others []Group) (Plan, error) {
-	return build(final, e, others, nil, false)
-}
-
-// wanted is a link that a playbook wants.
-type wanted struct {
+// want is a link that a playbook wants.
+type want struct {
 	source string
-	label  string // the playbook's id ("<id> of profile <profile>" for other profiles)
+	entry  Entry
 }
 
-// build is Build for a state in which the links in gone have already been removed. With strict, a desired link that
-// already exists is a conflict even when it is right.
-func build(final Group, e Entry, others []Group, gone map[string]bool, strict bool) (Plan, error) {
-	plan := Plan{Entry: e}
-	inspect := func(link string) (fsutil.LinkState, string, error) {
-		if gone[link] {
-			return fsutil.Missing, "", nil
+// Transition plans the link changes of the playbooks in scope when the linked state goes from the groups in from (the
+// enabled profiles now) to those in to (the enabled profiles afterwards). The links of playbooks out of scope are
+// never touched. For the playbooks in scope:
+//   - their links in from that to does not want any more (with the same artifact) are removed;
+//   - their links in to are created, or kept when they already belong to them in from (a link that a playbook
+//     leaving wants to keep for a playbook arriving, with the same artifact, is kept too);
+//   - every link belongs to exactly one playbook of one profile, so a link that to wants more than once, or that
+//     already exists without belonging to the playbook (whatever it points to), is a conflict, as is the same playbook
+//     in two profiles of to.
+func Transition(from, to []Group, scope map[Key]bool) (Plan, error) {
+	var plan Plan
+	type entryKind struct {
+		key  Key
+		kind string
+	}
+	cache := map[entryKind][]Item{}
+	items := func(e Entry, kind string) ([]Item, error) {
+		k := entryKind{e.Key(), kind}
+		if its, ok := cache[k]; ok {
+			return its, nil
 		}
-		return fsutil.Inspect(link)
+		its, err := Items(e, kind)
+		cache[k] = its
+		return its, err
 	}
 
-	present := false
-	for _, f := range final.Entries {
-		if f.Name == e.Name && fsutil.SamePath(f.Dir, e.Dir) {
-			present = true
-			e = f
-			break
-		}
-	}
-
-	// What every playbook in the final state (of e's profile and of the other enabled profiles) wants linked, by link.
-	want := map[string][]wanted{}
-	for i, g := range append([]Group{final}, others...) {
-		for _, f := range g.Entries {
-			label := f.ID
-			if i > 0 {
-				label = fmt.Sprintf("%s of profile %s", f.ID, f.Profile)
-			}
-			for _, folder := range g.Folders {
-				items, err := Items(g.Entries, f, folder)
+	// What every playbook of to wants linked, by link.
+	wants := map[string][]want{}
+	for _, g := range to {
+		for _, e := range g.Entries {
+			for _, t := range g.Targets {
+				its, err := items(e, t.Kind)
 				if err != nil {
 					return plan, err
 				}
-				for _, it := range items {
-					link := filepath.Join(folder.Dir, it.Name)
-					want[link] = append(want[link], wanted{source: it.Source, label: label})
+				for _, it := range its {
+					link := filepath.Join(t.Dir, it.Name)
+					wants[link] = append(wants[link], want{source: it.Source, entry: e})
 				}
 			}
 		}
 	}
 
-	for _, folder := range final.Folders {
-		var mine []Item
-		if present {
-			if dir := e.KindDir(folder); fsutil.IsDir(dir) && !fsutil.Within(dir, e.Dir) {
-				return plan, fmt.Errorf("playbook %s: %s folder '%s' is outside the playbook folder '%s'", e.ID,
-					folder.Kind, dir, e.Dir)
-			}
-			items, err := Items(final.Entries, e, folder)
-			if err != nil {
-				return plan, err
-			}
-			mine = items
-		}
-		mineByName := map[string]bool{}
-		for _, it := range mine {
-			mineByName[it.Name] = true
-			link := filepath.Join(folder.Dir, it.Name)
-			action := Action{Artifact: folder.Kind, Agent: folder.Agent, Name: it.Name, Link: link, Source: it.Source,
-				AgentsConfigDir: folder.AgentsConfigDir}
-			if others := otherProviders(want[link], e.ID); len(others) > 0 {
-				action.Kind, action.Cause, action.Others = Conflict, OtherProvider, others
-				plan.Actions = append(plan.Actions, action)
-				continue
-			}
-			state, current, err := inspect(link)
-			if err != nil {
-				return plan, err
-			}
-			switch {
-			case state == fsutil.Missing:
-				action.Kind = Create
-			case state == fsutil.Link && sameFolder(current, it.Source) && strict:
-				action.Kind, action.Cause = Conflict, Exists
-			case state == fsutil.Link && sameFolder(current, it.Source):
-				action.Kind = Keep
-			case state == fsutil.Link:
-				action.Kind, action.Cause, action.Current = Conflict, OtherLink, current
-			default:
-				action.Kind, action.Cause = Conflict, NotLink
-			}
-			plan.Actions = append(plan.Actions, action)
-		}
-
-		entries, err := os.ReadDir(folder.Dir)
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			return plan, err
-		}
-		kindDir := e.KindDir(folder)
-		for _, entry := range entries {
-			name := entry.Name()
-			link := filepath.Join(folder.Dir, name)
-			if mineByName[name] || gone[link] || !strings.HasPrefix(name, e.Name+"-") {
-				continue
-			}
-			state, current, err := fsutil.Inspect(link)
-			if err != nil || state != fsutil.Link ||
-				!fsutil.SamePath(fsutil.Canonical(filepath.Dir(current)), kindDir) {
-				continue
-			}
-			if wantedExactly(want[link], current) {
-				continue // Another registered playbook (for example, one with a longer name) owns it.
-			}
-			reason := "no longer in the playbook"
-			if !present {
-				reason = "playbook removed"
-			} else if _, err := os.Stat(current); err != nil {
-				reason = "broken link: its artifact no longer exists"
-			}
-			plan.Actions = append(plan.Actions, Action{Kind: Remove, Artifact: folder.Kind, Agent: folder.Agent,
-				Name: name, Link: link, Source: current, AgentsConfigDir: folder.AgentsConfigDir, Reason: reason})
-		}
-	}
-	return plan, nil
-}
-
-// Overlaps returns, as OtherProvider conflicts, the artifacts of e that other playbooks of final would link at the
-// same place.
-func Overlaps(final Group, e Entry) ([]Action, error) {
-	var conflicts []Action
-	for _, folder := range final.Folders {
-		providers := map[string][]wanted{}
-		for _, f := range final.Entries {
-			items, err := Items(final.Entries, f, folder)
-			if err != nil {
-				return nil, err
-			}
-			for _, it := range items {
-				providers[it.Name] = append(providers[it.Name], wanted{source: it.Source, label: f.ID})
-			}
-		}
-		var names []string
-		for name := range providers {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		for _, name := range names {
-			ws := providers[name]
-			if others := otherProviders(ws, e.ID); len(others) > 0 && len(others) < len(ws) {
-				conflicts = append(conflicts, Action{Kind: Conflict, Artifact: folder.Kind, Agent: folder.Agent,
-					Name: name, Link: filepath.Join(folder.Dir, name), Cause: OtherProvider, Others: others})
-			}
-		}
-	}
-	return conflicts, nil
-}
-
-// Switch plans the move from one linked state to another: the links of the profiles in from are removed, the profiles
-// in to are linked, and the profiles in stay remain linked (their links are neither removed nor shared). Links that
-// from and to both want (same path, same artifact) are left alone. Conflicts are planned as in Build, except that
-// links being removed are not in the way; with strict, any other link already in place of a link to create is a
-// conflict. dropReason explains the removals of links in folders that the profiles in to do not use; reason explains
-// the others.
-func Switch(from, to, stay []Group, reason, dropReason string, strict bool) (Plan, error) {
-	var plan Plan
-	inNewFolder := func(link string) bool {
-		for _, g := range to {
-			for _, f := range g.Folders {
-				if fsutil.SamePath(f.Dir, filepath.Dir(link)) {
-					return true
-				}
-			}
-		}
-		return false
-	}
-	removed := map[string]Action{}
-	var removals []Action
-	for _, g := range from {
-		for _, e := range g.Entries {
-			p, err := build(Group{Profile: g.Profile, Folders: g.Folders}, e, stay, nil, false)
-			if err != nil {
-				return plan, err
-			}
-			for _, a := range p.Actions {
-				if _, dup := removed[a.Link]; a.Kind == Remove && !dup {
-					a.Reason = reason
-					if !inNewFolder(a.Link) {
-						a.Reason = dropReason
-					}
-					removed[a.Link] = a
-					removals = append(removals, a)
-				}
-			}
-		}
-	}
-	gone := map[string]bool{}
-	for link := range removed {
-		gone[link] = true
-	}
-	var creations []Action
-	kept := map[string]bool{}
+	// The same playbook in two profiles of to: its artifacts are not planned (they would only repeat the conflict), and
+	// the conflict is reported once, even when several of its registrations are in scope.
+	samePlaybook := map[Key]bool{}
+	reported := map[Key]bool{}
 	for i, g := range to {
-		others := append([]Group{}, stay...)
-		for j, o := range to {
-			if j != i {
-				others = append(others, o)
-			}
-		}
 		for _, e := range g.Entries {
-			p, err := build(g, e, others, gone, strict)
-			if err != nil {
-				return plan, err
+			if !scope[e.Key()] {
+				continue
 			}
-			for _, a := range p.Actions {
-				if r, ok := removed[a.Link]; ok && a.Kind == Create && sameFolder(r.Source, a.Source) {
-					kept[a.Link] = true // wanted by both states: leave it
+			var others []string
+			for j, o := range to {
+				if j == i {
 					continue
 				}
-				if a.Kind == Remove {
-					// Playbooks of one folder with overlapping names (x, x-y) can both plan removing a link.
-					if _, dup := removed[a.Link]; dup {
-						continue
+				for _, f := range o.Entries {
+					if f.Name == e.Name && fsutil.SamePath(f.Dir, e.Dir) {
+						others = append(others, f.Label())
 					}
-					removed[a.Link] = a
-					gone[a.Link] = true
 				}
-				if a.Kind != Keep {
-					creations = append(creations, a)
+			}
+			if len(others) > 0 {
+				samePlaybook[e.Key()] = true
+				if pair := (Key{Name: e.Name, Dir: e.Dir}); !reported[pair] {
+					reported[pair] = true
+					plan.Actions = append(plan.Actions, Action{Kind: Conflict, Cause: SamePlaybook, Name: e.Name,
+						Playbook: e.Label(), ID: e.ID, Profile: e.Profile, Source: e.Dir, Others: others})
 				}
 			}
 		}
 	}
-	for _, r := range removals {
-		if !kept[r.Link] {
-			plan.Actions = append(plan.Actions, r)
+
+	// Removals.
+	removed := map[string]bool{}
+	transferred := map[string]bool{}
+	inTo := map[Key]bool{}
+	profilesTo := map[string]bool{}
+	for _, g := range to {
+		profilesTo[g.Profile] = true
+		for _, e := range g.Entries {
+			inTo[e.Key()] = true
 		}
 	}
-	plan.Actions = append(plan.Actions, creations...)
-	return plan, nil
-}
-
-func otherProviders(ws []wanted, self string) []string {
-	var others []string
-	for _, w := range ws {
-		if w.label != self {
-			others = append(others, w.label)
-		}
-	}
-	return others
-}
-
-func wantedExactly(ws []wanted, source string) bool {
-	for _, w := range ws {
-		if sameFolder(w.source, source) {
-			return true
-		}
-	}
-	return false
-}
-
-// MarkAncestors turns into Ancestor conflicts the creations of a plan whose artifact already exists where the same
-// agent reads the same kind of artifact in a higher-level base folder (one of ancestors; home is the home folder,
-// whose folders can differ from those of other base folders), so that agents reading several levels never see an
-// artifact twice.
-func MarkAncestors(plan *Plan, ancestors []string, home string) {
-	for i, act := range plan.Actions {
-		if act.Kind != Create {
-			continue
-		}
-		agent, ok := config.LookupAgent(act.Agent)
-		if !ok {
-			continue
-		}
-		for _, base := range ancestors {
-			place, ok := agent.Place(act.Artifact, fsutil.SamePath(base, home))
-			if !ok {
+	for _, g := range from {
+		for _, e := range g.Entries {
+			if !scope[e.Key()] {
 				continue
 			}
-			path := filepath.Join(base, filepath.FromSlash(place.Dir), filepath.FromSlash(place.Sub), act.Name)
-			if _, err := os.Lstat(path); err == nil {
-				plan.Actions[i].Kind, plan.Actions[i].Cause, plan.Actions[i].Current = Conflict, Ancestor, path
-				break
+			for _, t := range g.Targets {
+				dirEntries, err := os.ReadDir(t.Dir)
+				if errors.Is(err, os.ErrNotExist) {
+					continue
+				}
+				if err != nil {
+					return plan, err
+				}
+				for _, de := range dirEntries {
+					name := de.Name()
+					link := filepath.Join(t.Dir, name)
+					if removed[link] || transferred[link] {
+						continue
+					}
+					state, current, err := fsutil.Inspect(link)
+					if err != nil || state != fsutil.Link || !e.Owns(t.Kind, name, current) {
+						continue
+					}
+					keep := false
+					for _, w := range wants[link] {
+						if sameFolder(w.source, current) {
+							keep = true
+							if scope[w.entry.Key()] {
+								transferred[link] = true
+							}
+						}
+					}
+					if keep {
+						continue
+					}
+					reason := "no longer in the playbook"
+					switch {
+					case !profilesTo[g.Profile]:
+						reason = "profile disabled"
+					case !inTo[e.Key()]:
+						reason = "playbook removed"
+					default:
+						if _, err := os.Stat(current); err != nil {
+							reason = "broken link: its artifact no longer exists"
+						}
+					}
+					removed[link] = true
+					plan.Actions = append(plan.Actions, Action{Kind: Remove, Artifact: t.Kind, Name: name, Link: link,
+						Source: current, Stop: t.Stop, Playbook: e.Label(), ID: e.ID, Profile: e.Profile, Reason: reason})
+				}
 			}
 		}
 	}
+
+	// Creations.
+	duplicates := map[string]bool{}
+	for _, g := range to {
+		for _, e := range g.Entries {
+			if !scope[e.Key()] || samePlaybook[e.Key()] {
+				continue
+			}
+			for _, t := range g.Targets {
+				its, _ := items(e, t.Kind)
+				for _, it := range its {
+					link := filepath.Join(t.Dir, it.Name)
+					act := Action{Artifact: t.Kind, Name: it.Name, Link: link, Source: it.Source, Stop: t.Stop,
+						Playbook: e.Label(), ID: e.ID, Profile: e.Profile}
+					var others []string
+					for _, w := range wants[link] {
+						if w.entry.Key() != e.Key() {
+							others = append(others, w.entry.Label())
+						}
+					}
+					if len(others) > 0 {
+						if !duplicates[link] {
+							duplicates[link] = true
+							act.Kind, act.Cause, act.Others = Conflict, Duplicate, others
+							plan.Actions = append(plan.Actions, act)
+						}
+						continue
+					}
+					if transferred[link] {
+						act.Kind = Keep
+						plan.Actions = append(plan.Actions, act)
+						continue
+					}
+					state, current := fsutil.Missing, ""
+					if !removed[link] {
+						var err error
+						if state, current, err = fsutil.Inspect(link); err != nil {
+							return plan, err
+						}
+					}
+					switch {
+					case state == fsutil.Missing:
+						act.Kind = Create
+					case state == fsutil.Link && sameFolder(current, it.Source):
+						act.Kind, act.Cause = Conflict, Exists
+					case state == fsutil.Link:
+						act.Kind, act.Cause, act.Current = Conflict, OtherLink, current
+					default:
+						act.Kind, act.Cause = Conflict, NotLink
+					}
+					plan.Actions = append(plan.Actions, act)
+				}
+			}
+		}
+	}
+	return plan, nil
 }
 
 // sameFolder reports whether two paths lead to the same place once links are resolved, so that a link made through
@@ -538,15 +445,15 @@ func sameFolder(a, b string) bool {
 	return fsutil.SamePath(fsutil.Canonical(a), fsutil.Canonical(b))
 }
 
-// Apply performs the creations and removals of a plan that has no conflicts, creating the folders of the links when
-// needed. It is all-or-nothing: when a change fails, the changes already made are undone (and report has been called
-// for them) before returning the error.
+// Apply performs the removals and then the creations of a plan that has no conflicts, creating the folders of the
+// links when needed. It is all-or-nothing: when a change fails, the changes already made are undone (and report has
+// been called for them) before returning the error.
 func Apply(plan Plan, report func(Action)) error {
 	if len(plan.Conflicts()) > 0 {
 		return errors.New("the plan has conflicts")
 	}
 	var done []Action
-	for _, a := range plan.Actions {
+	for _, a := range plan.Changes() {
 		var err error
 		switch a.Kind {
 		case Create:
@@ -555,8 +462,6 @@ func Apply(plan Plan, report func(Action)) error {
 			}
 		case Remove:
 			err = fsutil.RemoveLink(a.Link)
-		default:
-			continue
 		}
 		if err != nil {
 			if rerr := Revert(done); rerr != nil {
@@ -606,30 +511,30 @@ func Revert(actions []Action) error {
 	return first
 }
 
-// Cleanup removes the folders that the removals of an applied plan left empty: the folders the links were in and, when
-// they become empty too, their agents configuration folders. Folders holding anything else (such as artifacts added by
-// hand) are kept, and so are links to folders. It reports each folder removed.
+// Cleanup removes the folders that the removals of an applied plan left empty: the folder of each removed link and,
+// as they become empty too, its parents, up to (and never including) the action's Stop folder. Folders holding
+// anything else (such as artifacts added by hand) are kept, and so are links to folders. It reports each folder
+// removed.
 func Cleanup(plan Plan, report func(dir string)) {
-	removeEmpty := func(dir string) {
-		info, err := os.Lstat(dir)
-		if err != nil || !info.IsDir() {
-			return
-		}
-		if entries, err := os.ReadDir(dir); err != nil || len(entries) > 0 {
-			return
-		}
-		if os.Remove(dir) == nil && report != nil {
-			report(dir)
-		}
-	}
 	for _, a := range plan.Actions {
-		if a.Kind != Remove {
+		if a.Kind != Remove || a.Stop == "" {
 			continue
 		}
-		dir := filepath.Dir(a.Link)
-		removeEmpty(dir)
-		if a.AgentsConfigDir != "" && !fsutil.SamePath(a.AgentsConfigDir, dir) {
-			removeEmpty(a.AgentsConfigDir)
+		for dir := filepath.Dir(a.Link); !fsutil.SamePath(dir, a.Stop) && fsutil.Within(dir, a.Stop); {
+			info, err := os.Lstat(dir)
+			if err != nil || !info.IsDir() {
+				break
+			}
+			if entries, err := os.ReadDir(dir); err != nil || len(entries) > 0 {
+				break
+			}
+			if os.Remove(dir) != nil {
+				break
+			}
+			if report != nil {
+				report(dir)
+			}
+			dir = filepath.Dir(dir)
 		}
 	}
 }

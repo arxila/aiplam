@@ -19,8 +19,8 @@
 #
 # Opens a shell to try aiplam by hand, with HOME set to a new temporary folder, the aiplam built from this repository
 # first in the PATH, and copies of the test playbooks in testdata/playbooks under $HOME/playbooks. The real ~/.aiplam
-# and agents configuration folders, such as ~/.agents or ~/.claude, are never touched: AIPLAM_SANDBOX makes aiplam
-# refuse any base folder outside the sandbox, even when run from a folder outside it (where it would otherwise find
+# and target folders, such as ~/.agents or ~/.claude, are never touched: AIPLAM_SANDBOX makes aiplam
+# refuse any managed folder outside the sandbox, even when run from a folder outside it (where it would otherwise find
 # the real ~/.aiplam walking up) or given one. Two of the playbooks are made git repositories:
 #
 #   aiplam-lettuce-playbook  tags v1.0.0 (without aiplam-lettuce-data-report) and v1.1.0 (everything),
@@ -77,7 +77,7 @@ cat <<MSG
 
 aiplam sandbox: $sandbox
 HOME is the sandbox and 'aiplam' is $bin. Playbooks are in ~/playbooks (see testdata/README.md for scenarios).
-aiplam refuses base folders outside the sandbox, so run it from folders inside it.
+aiplam refuses managed folders outside the sandbox, so run it from folders inside it.
 Type 'exit' to leave; then delete the sandbox with: rm -rf $sandbox
 
 MSG

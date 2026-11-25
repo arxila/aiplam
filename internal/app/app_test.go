@@ -20,7 +20,6 @@ package app
 
 import (
 	"bytes"
-	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -48,7 +47,8 @@ func newEnv(t *testing.T) *env {
 	if err := os.MkdirAll(home, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	return &env{t: t, root: root, home: home, app: &App{Home: home, Cwd: root, Git: gitinfo.NewReader()}}
+	return &env{t: t, root: root, home: home,
+		app: &App{Home: home, Cwd: root, Git: gitinfo.NewReader(), GOOS: "linux"}}
 }
 
 // run runs aiplam with args and returns the exit code, stdout and stderr.
@@ -70,6 +70,30 @@ func (e *env) mustRun(want int, args ...string) (string, string) {
 			errOut)
 	}
 	return out, errOut
+}
+
+// mustFail runs aiplam, expects exit code want and a message containing each of msgs (in stdout or stderr).
+func (e *env) mustFail(want int, msgs []string, args ...string) {
+	e.t.Helper()
+	out, errOut := e.mustRun(want, args...)
+	for _, msg := range msgs {
+		if !strings.Contains(out+errOut, msg) {
+			e.t.Fatalf("aiplam %s: missing %q in:\n%s%s", strings.Join(args, " "), msg, out, errOut)
+		}
+	}
+}
+
+// file creates a file (and its folders) at a path relative to the root.
+func (e *env) file(rel string) string {
+	e.t.Helper()
+	path := filepath.Join(e.root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		e.t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("x\n"), 0o644); err != nil {
+		e.t.Fatal(err)
+	}
+	return path
 }
 
 // skill creates a skill folder (with a SKILL.md) under dir.
@@ -98,17 +122,15 @@ func (e *env) playbook(rel string, skills ...string) string {
 	return dir
 }
 
-// skillItems returns the skills of a listed playbook.
-func skillItems(p listPlaybook) []listItem {
-	for _, k := range p.Artifacts {
-		if k.Kind == "skills" {
-			return k.Items
-		}
+func (e *env) mkdir(dir string) string {
+	e.t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		e.t.Fatal(err)
 	}
-	return nil
+	return dir
 }
 
-func (e *env) agentsSkills() string { return filepath.Join(e.home, ".agents", "skills") }
+func (e *env) homeSkills() string { return filepath.Join(e.home, ".agents", "skills") }
 
 // assertLink checks that path is a link to target.
 func (e *env) assertLink(path, target string) {
@@ -126,980 +148,677 @@ func (e *env) assertMissing(path string) {
 	}
 }
 
-// config returns the first enabled profile.
-func (e *env) config() *config.Profile {
+// profile loads a profile of a managed folder.
+func (e *env) profile(managed, name string) *config.Profile {
 	e.t.Helper()
-	prof, err := config.LoadProfile(e.home, e.baseConfig().Enabled[0])
+	prof, err := config.LoadProfile(managed, name)
 	if err != nil {
 		e.t.Fatal(err)
 	}
 	return prof
 }
 
-func (e *env) baseConfig() *config.BaseConfig {
+func (e *env) enabled(managed string) string {
 	e.t.Helper()
-	conf, err := config.LoadBaseConfig(e.home)
+	conf, err := config.LoadConfig(managed)
 	if err != nil {
 		e.t.Fatal(err)
 	}
-	return conf
+	return strings.Join(conf.Enabled, ",")
 }
 
 // writeProfile replaces the content of a profile's file.
-func (e *env) writeProfile(profile, content string) {
+func (e *env) writeProfile(managed, profile, content string) {
 	e.t.Helper()
-	if err := os.WriteFile(config.ProfileFile(e.home, profile), []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(config.ProfileFile(managed, profile), []byte(content), 0o644); err != nil {
 		e.t.Fatal(err)
 	}
 }
 
-func TestCommandsNeedInit(t *testing.T) {
+func TestCommandsNeedManagedFolder(t *testing.T) {
 	e := newEnv(t)
-	for _, args := range [][]string{{"list"}, {"check"}, {"update", "--all"}, {"add", "x", "."}, {"remove", "x"}} {
-		_, errOut := e.mustRun(ExitFailure, args...)
-		if !strings.Contains(errOut, "aiplam init") {
-			t.Errorf("%v: want a hint to run aiplam init, got %q", args, errOut)
-		}
+	for _, args := range [][]string{{"status"}, {"list"}, {"update", "x"}, {"add", "x", "."}, {"remove", "x"},
+		{"profile", "list"}, {"list", "--user"}} {
+		e.mustFail(ExitFailure, []string{"aiplam init"}, args...)
 	}
+	// A .aiplam folder without configuration.
+	e.mkdir(filepath.Join(e.home, ".aiplam"))
+	e.mustFail(ExitFailure, []string{"has a .aiplam folder but no aiplam-config.yaml", "aiplam init --user"},
+		"status", "--user")
 }
 
 func TestOneCommandAtATime(t *testing.T) {
 	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "standard")
+	e.mustRun(ExitOK, "init", "-u", "-a", "standard")
 	dir := config.Dir(e.home)
 	if ignore, err := os.ReadFile(filepath.Join(dir, ".gitignore")); err != nil ||
 		!strings.Contains(string(ignore), "/.lock\n") {
 		t.Fatalf(".aiplam/.gitignore: %q, %v", ignore, err)
 	}
-
-	// While another command holds the lock, commands that change the base folder fail; list and check still run.
+	// While another command holds the lock, commands that change the managed folder fail; status and list still run.
 	unlock, err := fsutil.Lock(filepath.Join(dir, ".lock"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	pb := e.playbook("p", "x-a")
-	for _, args := range [][]string{{"add", "x", pb}, {"update", "--all"}, {"profile", "add", "other", "standard"}} {
-		if _, errOut := e.mustRun(ExitFailure, args...); !strings.Contains(errOut, "another aiplam command") {
-			t.Errorf("%v: %q", args, errOut)
+	for _, args := range [][]string{{"add", "x", pb}, {"update", "x"}, {"profile", "add", "o", "-a", "standard"}} {
+		e.mustFail(ExitFailure, []string{"another aiplam command"}, args...)
+	}
+	e.mustRun(ExitOK, "list", "-u")
+	e.mustRun(ExitOK, "status", "-u")
+	unlock()
+	e.mustRun(ExitOK, "add", "x", pb, "-u")
+}
+
+func TestInitUsage(t *testing.T) {
+	e := newEnv(t)
+	project := e.mkdir(filepath.Join(e.root, "project"))
+	for _, c := range []struct {
+		args []string
+		msg  string
+	}{
+		{[]string{"init"}, "init needs the folder"},
+		{[]string{"init", project}, "init needs the target folders: an agent template with --agent (standard, claude"},
+		{[]string{"init", project, "-u", "-a", "claude"}, "give either a folder or --user"},
+		{[]string{"init", project, "x", "-a", "claude"}, "unexpected argument: x"},
+		{[]string{"init", project, "-a", "claude", "-f", "skills:x"}, "give either --agent or --folder"},
+		{[]string{"init", project, "-a", "claude", "-a", "junie"}, "--agent can be given only once"},
+		{[]string{"init", project, "-a", "nope"}, "unknown agent template 'nope'"},
+		{[]string{"init", project, "-a", "claude:standard"}, "unknown agent template 'claude:standard'"},
+		{[]string{"init", project, "-f", "skills"}, "must be <kind>:<targetfolder>"},
+		{[]string{"init", project, "-f", "skills:../x"}, "cannot contain '..'"},
+		{[]string{"init", project, "-f", "skills:%APPDATA%/x"}, "only exists on Windows"},
+		{[]string{"init", "-u", "-f", "skills:%APPDATA%/x"}, "only exists on Windows"},
+		{[]string{"init", project, "-f", "skills:a,rules:a"}, "the same target folder"},
+		{[]string{"init", project, "-f", "skills:\"a"}, "unterminated quote"},
+		{[]string{"init", project, "-a", "claude", "-p", "aiplam-config"}, "invalid profile name"},
+		{[]string{"init", project, "--base", "x"}, "unknown option: --base"},
+		{[]string{"init", project, "-g"}, "unknown option: -g"},
+	} {
+		code, _, errOut := e.run(c.args...)
+		if code != ExitUsage || !strings.Contains(errOut, c.msg) {
+			t.Errorf("%v: exit %d, %q; want a usage error with %q", c.args, code, errOut, c.msg)
+		}
+		// Usage errors show the synopsis only.
+		if code == ExitUsage && (!strings.Contains(errOut, "--help' for") || strings.Contains(errOut, "Examples:")) {
+			t.Errorf("%v: unexpected usage text: %s", c.args, errOut)
 		}
 	}
-	e.mustRun(ExitOK, "list")
-	e.mustRun(ExitOK, "check")
-	unlock()
-	e.mustRun(ExitOK, "add", "x", pb)
+	e.assertMissing(filepath.Join(project, ".aiplam"))
+	e.mustFail(ExitFailure, []string{"does not exist"}, "init", filepath.Join(e.root, "nope"), "-a", "claude")
 }
 
 func TestInit(t *testing.T) {
 	e := newEnv(t)
+	out, _ := e.mustRun(ExitOK, "init", "--user", "--agent", "copilot")
+	for _, want := range []string{"Managed folder: ~ (user managed folder)", "Created profile 'default'",
+		"skills: .copilot/skills", "instructions: .copilot/instructions"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+	prof := e.profile(e.home, "default")
+	if prof.Name != "default" || prof.Agent != "copilot" || len(prof.Targets) != 3 || e.enabled(e.home) != "default" {
+		t.Fatalf("profile: %+v", prof)
+	}
+	e.mustFail(ExitFailure, []string{"is already a managed folder"}, "init", "-u", "-a", "claude")
+	// The home folder given as a folder is the user managed folder: its targets are the user ones.
+	e2 := newEnv(t)
+	e2.mustRun(ExitOK, "init", e2.home, "-a", "opencode")
+	if f, _ := e2.profile(e2.home, "default").Targets.Folder("skills"); f != ".config/opencode/skills" {
+		t.Fatalf("home given as a folder: %s", f)
+	}
+
+	// Several profiles, all enabled, with targets given by hand (quoted, with commas and spaces).
+	project := e.mkdir(filepath.Join(e.home, "w", "project"))
+	out, _ = e.mustRun(ExitOK, "init", project, "-f", `skills:.agents/skills,rules:"my rules, all"`, "-f",
+		"notes:docs/notes", "-p", "a,b", "-p", "c")
+	if e.enabled(project) != "a,b,c" {
+		t.Fatalf("enabled: %s", e.enabled(project))
+	}
+	prof = e.profile(project, "b")
+	if prof.Agent != config.CustomAgent || len(prof.Targets) != 3 || prof.Targets[1].Folder != "my rules, all" ||
+		prof.Targets[2].Kind != "notes" {
+		t.Fatalf("profile b: %+v", prof)
+	}
+	if !strings.Contains(out, "is inside managed folder '~'") || strings.Contains(out, "git repository") {
+		t.Fatalf("unexpected notes:\n%s", out)
+	}
+	// A leftover profile file without configuration is not overwritten.
+	leftover := e.mkdir(filepath.Join(e.root, "leftover"))
+	e.mustRun(ExitOK, "init", leftover, "-a", "claude")
+	if err := os.Remove(config.ConfigFile(leftover)); err != nil {
+		t.Fatal(err)
+	}
+	e.mustFail(ExitFailure, []string{"already exists, from an earlier setup"}, "init", leftover, "-a", "claude")
+
+	// In a git repository, init says what to ignore.
+	if _, err := exec.LookPath("git"); err == nil {
+		repo := e.mkdir(filepath.Join(e.root, "repo"))
+		e.mkdir(filepath.Join(repo, ".git"))
+		out, _ = e.mustRun(ExitOK, "init", repo, "-a", "junie:standard")
+		if !strings.Contains(out, "'/.agents/skills/<name>-*', '/.junie/agents/<name>-*'") {
+			t.Fatalf("unexpected git note:\n%s", out)
+		}
+	}
+}
+
+func TestAddAndMappings(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init", "-u", "-a", "claude")
+	pb := e.playbook("pb", "x-a", "x-b", "y-c")
+	e.file("pb/skills/.x-hidden/SKILL.md")
+	e.file("pb/agents/x-r.md")
+	e.file("pb/subagents/x-s.md")
+	e.file("pb/rules/x-style.md")
+	claude := filepath.Join(e.home, ".claude")
+
+	// Defaults: the subfolder named like the kind, and the format '<name>-*'.
+	out, _ := e.mustRun(ExitOK, "add", "x", pb)
+	for _, want := range []string{"skills: " + filepath.Join(pb, "skills") + ", format 'x-*': 2 artifact(s)",
+		"commands: " + filepath.Join(pb, "commands") + ", format 'x-*': not found", "Added x."} {
+		if !strings.Contains(out, strings.ReplaceAll(want, e.home, "~")) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+	e.assertLink(filepath.Join(claude, "skills", "x-a"), filepath.Join(pb, "skills", "x-a"))
+	e.assertLink(filepath.Join(claude, "agents", "x-s.md"), filepath.Join(pb, "subagents", "x-s.md"))
+	e.assertLink(filepath.Join(claude, "rules", "x-style.md"), filepath.Join(pb, "rules", "x-style.md"))
+	e.assertMissing(filepath.Join(claude, "skills", ".x-hidden"))
+	e.assertMissing(filepath.Join(claude, "commands"))
+	e.mustFail(ExitFailure, []string{"already registered", "aiplam update x"}, "add", "x", pb)
+	e.mustRun(ExitOK, "remove", "x")
+	e.assertMissing(claude)
+
+	// Mappings: another subfolder, a format, the playbook root; stored in the profile.
+	e.mustRun(ExitOK, "add", "team", pb, "-f", "subagents:agents:*.md", "--folder", "skills:skills:*")
+	e.assertLink(filepath.Join(claude, "agents", "x-r.md"), filepath.Join(pb, "agents", "x-r.md"))
+	e.assertLink(filepath.Join(claude, "skills", "y-c"), filepath.Join(pb, "skills", "y-c"))
+	e.assertMissing(filepath.Join(claude, "skills", ".x-hidden")) // never, whatever the format
+	m := e.profile(e.home, "default").Playbooks[0].Mappings
+	if m["subagents"].Folder != "agents" || m["subagents"].Format != "*.md" || m["skills"].Format != "*" ||
+		len(m) != 2 {
+		t.Fatalf("mappings: %+v", m)
+	}
+	e.mustRun(ExitOK, "remove", "team")
+
 	for _, c := range []struct {
 		args []string
 		msg  string
 	}{
-		{nil, "init needs the base folder to set up, or --global for the home folder, and then the agent to link " +
-			"playbooks for (standard, claude,"},
-		{[]string{"-g"}, "init needs the base folder to set up, or --global"},
-		{[]string{"."}, "init needs the agent after the base folder: 'aiplam init . <agent>', with <agent> one of"},
-		{[]string{"claude"}, "init needs the base folder to set up before the agent (for example 'aiplam init . " +
-			"claude'), or --global for the home folder ('aiplam init --global claude')"},
-		{[]string{"claude", "."}, "init takes the base folder first, then the agent: 'aiplam init . claude'"},
-		{[]string{"-g", "x"}, "unknown agent 'x': use standard, claude,"},
-		{[]string{".", "x"}, "unknown agent 'x'"},
-		{[]string{".", "claude", "-g"}, "give either a base folder or --global, not both"},
-		{[]string{".", "claude", "x"}, "unexpected argument: x"},
-		{[]string{".", "claude", "-b", e.home}, "the base folder to set up as an argument, not with --base"},
-		{[]string{".", "--agent", "claude"}, "init takes the agent as an argument after the base folder, not with --agent"},
-		{[]string{"-g", "claude", "-a", "claude"}, "not with --agent"},
+		{[]string{"-f", "prompts:p"}, "'prompts' is not a kind of profile 'default' (its kinds: skills, subagents"},
+		{[]string{"-f", "skills:../x"}, "cannot contain '..'"},
+		{[]string{"-f", "skills:" + pb}, "must be a relative path"},
+		{[]string{"-f", "skills"}, "must be <kind>:<subfolder>[:<format>]"},
+		{[]string{"-f", "skills::*"}, "the playbook subfolder is empty"},
+		{[]string{"-f", "skills:.:a/b"}, "cannot contain path separators"},
+		{[]string{"-f", "skills:.:.x*"}, "would only match hidden entries"},
+		{[]string{"-f", "skills:a,skills:b"}, "kind 'skills' is given more than once"},
+		{[]string{"-f", "skills:a:b:c"}, "must be <kind>:<subfolder>[:<format>]"},
 	} {
-		_, errOut := e.mustRun(ExitUsage, append([]string{"init"}, c.args...)...)
-		if !strings.Contains(errOut, c.msg) {
-			t.Fatalf("init %v: unexpected message: %s", c.args, errOut)
+		code, _, errOut := e.run(append([]string{"add", "x", pb}, c.args...)...)
+		if code != ExitUsage || !strings.Contains(errOut, c.msg) {
+			t.Errorf("%v: exit %d, %q; want %q", c.args, code, errOut, c.msg)
 		}
 	}
-	e.mustRun(ExitFailure, "init", filepath.Join(e.root, "missing"), "claude")
-	if fsutil.IsDir(filepath.Join(e.home, ".aiplam")) {
-		t.Fatal("a failed init should create nothing")
+	if n := len(e.profile(e.home, "default").Playbooks); n != 0 {
+		t.Fatalf("%d playbooks registered", n)
 	}
-	e.mustRun(ExitOK, "init", "-g", "standard")
-	if fsutil.IsDir(filepath.Join(e.home, ".agents")) {
-		t.Fatal("~/.agents created before anything is linked")
+	// Subfolders that do not exist yet are fine: what appears is linked by update.
+	empty := e.mkdir(filepath.Join(e.root, "empty"))
+	_, errOut := e.mustRun(ExitOK, "add", "z", empty)
+	if !strings.Contains(errOut, "no artifacts were found") {
+		t.Fatalf("want a warning: %s", errOut)
 	}
-	if conf := e.baseConfig(); strings.Join(conf.Enabled, ",") != "default" {
-		t.Fatalf("base config = %+v", conf)
-	}
-	if prof := e.config(); len(prof.Playbooks) != 0 || prof.Agent != "standard" {
-		t.Fatalf("profile = %+v", prof)
-	}
-	_, errOut := e.mustRun(ExitFailure, "init", "~", "claude")
-	if !strings.Contains(errOut, "is already set up as a base folder") || !strings.Contains(errOut, "aiplam profile") {
-		t.Fatalf("unexpected message: %s", errOut)
-	}
-
-	e2 := newEnv(t)
-	out, _ := e2.mustRun(ExitOK, "init", "-g", "claude", "-p", "work")
-	if conf := e2.baseConfig(); strings.Join(conf.Enabled, ",") != "work" {
-		t.Fatalf("base config = %+v", conf)
-	}
-	if !strings.Contains(out, "agent claude") || !strings.Contains(out, "~/.claude/skills") {
-		t.Fatalf("unexpected output: %s", out)
-	}
-	if prof, err := config.LoadProfile(e2.home, "work"); err != nil || prof.Agent != "claude" {
-		t.Fatalf("profile = %+v (%v)", prof, err)
-	}
-	if config.ProfileExists(e2.home, "default") {
-		t.Fatal("the default profile should not be created")
-	}
-	e2.mustRun(ExitUsage, "init", "-g", "standard", "-p", config.BaseConfigName)
+	e.skill(filepath.Join(empty, "skills"), "z-new")
+	e.mustRun(ExitOK, "update", "z")
+	e.assertLink(filepath.Join(claude, "skills", "z-new"), filepath.Join(empty, "skills", "z-new"))
 }
 
-func TestAddLinksPrefixedSkillsOnly(t *testing.T) {
+func TestProfilesToActOn(t *testing.T) {
 	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "standard")
-	e.mustRun(ExitOK, "profile", "add", "claude", "claude")
-	e.mustRun(ExitOK, "profile", "enable", "claude")
-	pb := e.playbook("ws/arxila-ai-playbook", "arxila-one", "arxila-two", "other-skill")
-	if err := os.MkdirAll(filepath.Join(pb, "skills", "arxila-noskill"), 0o755); err != nil {
+	e.mustRun(ExitOK, "init", "-u", "-a", "standard", "-p", "a,b")
+	e.mustRun(ExitOK, "profile", "add", "off", "-f", "skills:off/skills")
+	pb := e.playbook("pb", "x-a", "y-b")
+
+	// With two enabled profiles, --profile is needed.
+	e.mustFail(ExitFailure, []string{"2 profiles are enabled (a, b): choose the profile to register the playbook in"},
+		"add", "x", pb)
+	e.mustRun(ExitOK, "add", "x", pb, "-p", "a")
+	// Several profiles at once, enabled or not: registered in each, linked in the enabled ones.
+	out, _ := e.mustRun(ExitOK, "add", "y", pb, "-p", "b,off")
+	if !strings.Contains(out, "Nothing was linked in profile 'off'") {
+		t.Fatalf("unexpected output:\n%s", out)
+	}
+	e.assertLink(filepath.Join(e.homeSkills(), "y-b"), filepath.Join(pb, "skills", "y-b"))
+	e.assertMissing(filepath.Join(e.home, "off"))
+	if len(e.profile(e.home, "off").Playbooks) != 1 || len(e.profile(e.home, "b").Playbooks) != 1 {
+		t.Fatal("not registered in both profiles")
+	}
+	e.mustFail(ExitFailure, []string{"profile 'nope' does not exist"}, "add", "z", pb, "-p", "nope")
+	e.mustFail(ExitFailure, []string{"choose the profile to update the playbook in"}, "update", "x")
+	e.mustFail(ExitFailure, []string{"no playbook of profile 'b' is registered with name, id or playbook folder 'x'"},
+		"update", "x", "-p", "a,b")
+	out, _ = e.mustRun(ExitOK, "update", "y", "-p", "b,off")
+	if !strings.Contains(out, "Nothing to update for playbook y (profile off)") {
+		t.Fatalf("unexpected output:\n%s", out)
+	}
+	e.mustRun(ExitOK, "remove", "y", "-p", "b,off")
+	e.assertMissing(filepath.Join(e.homeSkills(), "y-b"))
+	if len(e.profile(e.home, "off").Playbooks) != 0 {
+		t.Fatal("not removed from profile off")
+	}
+	e.mustFail(ExitUsage, []string{"'aiplam profile' does not take --profile"}, "profile", "list", "-p", "a")
+	e.mustFail(ExitUsage, []string{"'aiplam status' does not take --profile"}, "status", "-p", "a")
+}
+
+func TestCollisions(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init", "-u", "-a", "standard")
+	pb := e.playbook("pb", "x-a", "x-data-b")
+	other := e.playbook("other", "x-a")
+	e.mustRun(ExitOK, "add", "x", pb)
+
+	// Another playbook of the same profile linking the same name: from another folder, or from the same folder with
+	// an overlapping format.
+	e.mustFail(ExitFailure, []string{"skills x-a of playbook x@other (profile default)", "would also be linked by x@pb",
+		"was not added"}, "add", "x", other)
+	e.mustFail(ExitFailure, []string{"skills x-data-b of playbook x-data (profile default)", "would also be linked by x"},
+		"add", "x-data", pb)
+	if n := len(e.profile(e.home, "default").Playbooks); n != 1 {
+		t.Fatalf("%d playbooks registered", n)
+	}
+	// A format that does not overlap is fine.
+	e.mustRun(ExitOK, "add", "y", other, "-f", "skills:skills:nothing-*")
+
+	// Something already where a link must go, even a link to the same artifact made by hand.
+	third := e.playbook("third", "t-a", "t-b")
+	if err := os.Symlink(filepath.Join(third, "skills", "t-a"), filepath.Join(e.homeSkills(), "t-a")); err != nil {
 		t.Fatal(err)
 	}
-	e.app.Cwd = pb
-	e.mustRun(ExitOK, "add", "arxila", ".", "-p", "default")
-	e.mustRun(ExitOK, "add", "arxila", ".", "-p", "claude")
+	e.mustFail(ExitFailure, []string{"'~/.agents/skills/t-a' already exists, linking to the same artifact, but it " +
+		"does not belong to this playbook"}, "add", "t", third)
+	e.assertMissing(filepath.Join(e.homeSkills(), "t-b"))
 
-	for _, folder := range []string{".agents", ".claude"} {
-		dir := filepath.Join(e.home, folder, "skills")
-		e.assertLink(filepath.Join(dir, "arxila-one"), filepath.Join(pb, "skills", "arxila-one"))
-		e.assertLink(filepath.Join(dir, "arxila-two"), filepath.Join(pb, "skills", "arxila-two"))
-		e.assertMissing(filepath.Join(dir, "other-skill"))
-		e.assertMissing(filepath.Join(dir, "arxila-noskill"))
+	// The same playbook in a second profile: it cannot be enabled besides the first one, but it can replace it.
+	e.mustRun(ExitOK, "profile", "add", "second", "-a", "standard")
+	e.mustRun(ExitOK, "add", "x", pb, "-p", "second")
+	e.mustFail(ExitFailure, []string{"the same playbook (name 'x', playbook folder '" + strings.ReplaceAll(pb, e.home,
+		"~") + "') is registered in x (profile default)", "nothing was changed"}, "profile", "enable", "second")
+	if e.enabled(e.home) != "default" {
+		t.Fatal("the enabled profiles changed")
 	}
-	prof := e.config()
-	if len(prof.Playbooks) != 1 || prof.Playbooks[0].Name != "arxila" || prof.Playbooks[0].Dir(e.home) != pb ||
-		prof.Playbooks[0].Artifacts.Skills.Path != "" { // the default is not stored
-		t.Fatalf("unexpected config: %+v", prof.Playbooks)
+	out, _ := e.mustRun(ExitOK, "profile", "switch", "second")
+	if strings.Contains(out, "x-a") { // kept, moved from default to second
+		t.Fatalf("unexpected changes:\n%s", out)
 	}
+	e.assertLink(filepath.Join(e.homeSkills(), "x-a"), filepath.Join(pb, "skills", "x-a"))
+	e.mustRun(ExitOK, "status", "-u")
 
-	_, errOut := e.mustRun(ExitFailure, "add", "arxila", pb, "-p", "default")
-	if !strings.Contains(errOut, "already registered") {
-		t.Fatalf("unexpected message: %s", errOut)
+	// Enabling several profiles at once is all-or-nothing.
+	e.mustRun(ExitOK, "profile", "add", "third", "-a", "standard")
+	e.mustRun(ExitOK, "add", "z", e.playbook("zpb", "z-a"), "-p", "third")
+	e.mustFail(ExitFailure, []string{"nothing was changed"}, "profile", "enable", "third,default")
+	e.assertMissing(filepath.Join(e.homeSkills(), "z-a"))
+	if e.enabled(e.home) != "second" {
+		t.Fatal("the enabled profiles changed")
+	}
+	e.mustRun(ExitOK, "profile", "enable", "third")
+	e.assertLink(filepath.Join(e.homeSkills(), "z-a"), filepath.Join(e.root, "zpb", "skills", "z-a"))
+}
+
+func TestUpdateAndRemove(t *testing.T) {
+	e := newEnv(t)
+	project := e.mkdir(filepath.Join(e.home, "project"))
+	e.mustRun(ExitOK, "init", project, "-f", "skills:ai/agents/skills,notes:ai/notes")
+	e.app.Cwd = project
+	pb := e.playbook("home/project/pb", "x-a", "x-b") // inside the project: its managed folder applies there
+	e.file("home/project/pb/notes/x-n.txt")
+	e.mustRun(ExitOK, "add", "x", pb)
+	skills := filepath.Join(project, "ai", "agents", "skills")
+
+	e.skill(filepath.Join(pb, "skills"), "x-c")
+	if err := os.RemoveAll(filepath.Join(pb, "skills", "x-b")); err != nil {
+		t.Fatal(err)
+	}
+	e.file("home/project/ai/agents/skills/mine.txt") // added by hand
+	e.app.Cwd = pb                                   // the playbook registered for the current folder
+	out, _ := e.mustRun(ExitOK, "update")
+	for _, want := range []string{"Updating playbook x of profile 'default'", "+ ~/project/ai/agents/skills/x-c",
+		"- ~/project/ai/agents/skills/x-b (broken link: its artifact no longer exists)", "Managed folder: ~/project"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+	e.app.Cwd = project
+	out, _ = e.mustRun(ExitOK, "update", "x")
+	if !strings.Contains(out, "up to date") {
+		t.Fatalf("unexpected output:\n%s", out)
+	}
+	// Removing unlinks, and removes the folders left empty up to the managed folder; hand-added files stay.
+	out, _ = e.mustRun(ExitOK, "remove", pb)
+	if !strings.Contains(out, "~/project/ai/notes (empty folder removed)") || !strings.Contains(out, "Removed x") {
+		t.Fatalf("unexpected output:\n%s", out)
+	}
+	e.assertMissing(filepath.Join(project, "ai", "notes"))
+	if _, err := os.Stat(filepath.Join(skills, "mine.txt")); err != nil {
+		t.Fatal("hand-added file removed")
+	}
+	e.mustFail(ExitUsage, []string{"remove needs a name"}, "remove")
+	e.mustFail(ExitFailure, []string{"no playbook of profile 'default' is registered with name, id or playbook folder"},
+		"remove", "x")
+}
+
+func TestStatus(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init", "-u", "-a", "claude")
+	pb := e.playbook("pb", "x-a")
+	e.mustRun(ExitOK, "add", "x", pb)
+	out, _ := e.mustRun(ExitOK, "status")
+	for _, want := range []string{"Managed folder: ~\n", "user managed folder (the home folder): yes",
+		"git repository: none", "default: agent claude (~/.aiplam/default.yaml)", "Everything is up to date."} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+	// Pending changes, broken links that belong to no playbook, and template mismatches (warned, not counted).
+	e.skill(filepath.Join(pb, "skills"), "x-new")
+	if err := os.Symlink(filepath.Join(e.root, "gone"), filepath.Join(e.home, ".claude", "skills", "stray")); err != nil {
+		t.Fatal(err)
+	}
+	prof := e.profile(e.home, "default")
+	prof.Targets = append(prof.Targets, config.Target{Kind: "extra", Folder: "extra"})
+	if err := config.SaveProfile(e.home, prof); err != nil {
+		t.Fatal(err)
+	}
+	e.mustFail(ExitFailure, []string{"'aiplam update x' would link ~/.claude/skills/x-new",
+		"broken link ~/.claude/skills/stray", "its targets no longer match those of agent template 'claude'",
+		"2 item(s) need attention"}, "status")
+	// A missing playbook folder.
+	if err := os.Rename(pb, pb+".moved"); err != nil {
+		t.Fatal(err)
+	}
+	e.mustFail(ExitFailure, []string{"playbook folder '" + strings.ReplaceAll(pb, e.home, "~") + "' does not exist"},
+		"status")
+	// Invalid and missing profiles.
+	e.writeProfile(e.home, "default", "name: other\nagent: claude\ntargets: {}\nplaybooks: []\n")
+	e.mustFail(ExitFailure, []string{"name 'other' does not match", "nothing else was checked"}, "status")
+	e.mustFail(ExitFailure, []string{"name 'other' does not match"}, "list")
+	if err := os.Remove(config.ProfileFile(e.home, "default")); err != nil {
+		t.Fatal(err)
+	}
+	e.mustFail(ExitFailure, []string{"the enabled profile 'default' does not exist"}, "status")
+	_, errOut := e.mustRun(ExitOK, "list")
+	if !strings.Contains(errOut, "the enabled profile 'default' does not exist") {
+		t.Fatalf("want a warning: %s", errOut)
 	}
 }
 
-func TestAddSkillsPathRoot(t *testing.T) {
+func TestList(t *testing.T) {
 	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "standard")
-	repo := filepath.Join(e.root, "repo")
-	e.skill(repo, "x-a")
-	e.skill(repo, "y-b")
-	e.mustRun(ExitOK, "add", "x", repo, "--skills-path", ".")
-	e.mustRun(ExitOK, "add", "y", repo, "--skills-path=.")
-	e.assertLink(filepath.Join(e.agentsSkills(), "x-a"), filepath.Join(repo, "x-a"))
-	e.assertLink(filepath.Join(e.agentsSkills(), "y-b"), filepath.Join(repo, "y-b"))
-
-	_, errOut := e.mustRun(ExitFailure, "add", "z", repo)
-	if !strings.Contains(errOut, "--skills-path") {
-		t.Fatalf("want a hint about --skills-path: %s", errOut)
+	e.mustRun(ExitOK, "init", "-u", "-a", "standard")
+	pb := e.playbook("pb", "x-a", "x-b")
+	if err := os.WriteFile(filepath.Join(pb, "skills", "x-a", "SKILL.md"),
+		[]byte("---\nname: x-a\nmetadata:\n  version: \"2.0\"\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestAddConflictCancelsEverything(t *testing.T) {
-	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "standard")
-	pb := e.playbook("p", "x-a", "x-b")
-	// A real folder (an old copy) where x-b must be linked.
-	e.skill(e.agentsSkills(), "x-b")
-	_, errOut := e.mustRun(ExitFailure, "add", "x", pb)
-	if !strings.Contains(errOut, "not a link") || !strings.Contains(errOut, "was not added") {
-		t.Fatalf("unexpected message: %s", errOut)
+	out, _ := e.mustRun(ExitOK, "list")
+	if !strings.Contains(out, "no playbooks are registered") {
+		t.Fatalf("unexpected list:\n%s", out)
 	}
-	e.assertMissing(filepath.Join(e.agentsSkills(), "x-a"))
-	if len(e.config().Playbooks) != 0 {
-		t.Fatal("playbook registered despite the conflict")
+	e.mustRun(ExitOK, "add", "x", pb)
+	e.file("home/.agents/skills/mine")                                                 // not a link: not listed
+	if err := os.Symlink(e.root, filepath.Join(e.homeSkills(), "other")); err != nil { // not a playbook's
+		t.Fatal(err)
 	}
-}
-
-func TestSameNameInSeveralFolders(t *testing.T) {
-	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "standard")
-	a := e.playbook("one/pb-a", "x-a")
-	b := e.playbook("two/pb-b", "x-b")
-	collide := e.playbook("three/pb-a", "x-c")
-	e.mustRun(ExitOK, "add", "x", a)
-	out, _ := e.mustRun(ExitOK, "add", "x", b)
-	if !strings.Contains(out, "x is now identified as x@pb-a") {
-		t.Fatalf("missing id change notice: %s", out)
+	if err := os.RemoveAll(filepath.Join(pb, "skills", "x-b")); err != nil {
+		t.Fatal(err)
 	}
-	_, errOut := e.mustRun(ExitFailure, "add", "x", collide)
-	if !strings.Contains(errOut, "ids would collide") {
-		t.Fatalf("unexpected message: %s", errOut)
-	}
-
 	out, _ = e.mustRun(ExitOK, "list")
-	if !strings.Contains(out, "x@pb-a\n") || !strings.Contains(out, "x@pb-b\n") {
-		t.Fatalf("unexpected list: %s", out)
+	for _, want := range []string{"Profile default (agent standard)", "skills (~/.agents/skills):",
+		"x-a  playbook x (unknown), skill version 2.0", "x-b  playbook x (unknown)  BROKEN LINK"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
 	}
-	_, errOut = e.mustRun(ExitFailure, "update", "x")
-	if !strings.Contains(errOut, "several playbooks match 'x' (x@pb-a, x@pb-b)") {
-		t.Fatalf("unexpected message: %s", errOut)
-	}
-	e.mustRun(ExitOK, "update", "x", b)
-	e.mustRun(ExitOK, "update", "x@pb-a")
-
-	// The same skill name in both folders: the second playbook cannot be added.
-	e.skill(filepath.Join(a, "skills"), "x-dup")
-	e.skill(filepath.Join(b, "skills"), "x-dup")
-	_, errOut = e.mustRun(ExitFailure, "update", "x@pb-a")
-	if !strings.Contains(errOut, "also provided by playbook x@pb-b") ||
-		!strings.Contains(errOut, "unregister one of the playbooks that provide the same artifact") ||
-		strings.Contains(errOut, "what is in the way") {
-		t.Fatalf("unexpected message: %s", errOut)
+	if strings.Contains(out, "mine") || strings.Contains(out, "other") {
+		t.Fatalf("unexpected entries:\n%s", out)
 	}
 
-	out, _ = e.mustRun(ExitOK, "remove", "x@pb-b")
-	if !strings.Contains(out, "x@pb-a is now identified as x") {
-		t.Fatalf("missing id change notice: %s", out)
+	// From a folder given as an argument, and with --user from another managed folder.
+	project := e.mkdir(filepath.Join(e.root, "project", "sub"))
+	e.mustRun(ExitOK, "init", filepath.Dir(project), "-f", "skills:s")
+	e.app.Cwd = e.root
+	out, _ = e.mustRun(ExitOK, "list", project)
+	if !strings.Contains(out, "Managed folder: "+filepath.Dir(project)) || !strings.Contains(out, "nothing is linked") &&
+		!strings.Contains(out, "no playbooks are registered") {
+		t.Fatalf("unexpected list:\n%s", out)
 	}
-	e.assertMissing(filepath.Join(e.agentsSkills(), "x-b"))
-	e.mustRun(ExitOK, "update", "x")
-	e.assertLink(filepath.Join(e.agentsSkills(), "x-dup"), filepath.Join(a, "skills", "x-dup"))
+	e.app.Cwd = project
+	out, _ = e.mustRun(ExitOK, "list", "--user")
+	if !strings.Contains(out, "Managed folder: ~\n") {
+		t.Fatalf("unexpected list:\n%s", out)
+	}
+	e.mustFail(ExitUsage, []string{"give either a folder or --user"}, "list", project, "--user")
+	e.mustFail(ExitFailure, []string{"folder 'nope' does not exist"}, "status", "nope")
+	e.mustRun(ExitOK, "profile", "disable", "default", "-u")
+	out, _ = e.mustRun(ExitOK, "list", "-u")
+	if !strings.Contains(out, "No profile is enabled") {
+		t.Fatalf("unexpected list:\n%s", out)
+	}
 }
 
-func TestAddFailsWhenSkillProvidedByAnotherFolder(t *testing.T) {
+func TestManagedFolderDiscovery(t *testing.T) {
 	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "standard")
-	a := e.playbook("pb-a", "x-same")
-	b := e.playbook("pb-b", "x-same", "x-other")
-	e.mustRun(ExitOK, "add", "x", a)
-	_, errOut := e.mustRun(ExitFailure, "add", "x", b)
-	if !strings.Contains(errOut, "was not added") {
-		t.Fatalf("unexpected message: %s", errOut)
+	project := e.mkdir(filepath.Join(e.home, "w", "project"))
+	deep := e.mkdir(filepath.Join(project, "a", "b"))
+	outside := e.mkdir(filepath.Join(e.root, "outside", "x"))
+	e.mustRun(ExitOK, "init", "-u", "-a", "standard")
+	e.mustRun(ExitOK, "init", project, "-a", "claude")
+
+	e.app.Cwd = deep
+	out, _ := e.mustRun(ExitOK, "status")
+	if !strings.Contains(out, "Managed folder: ~/w/project\n") {
+		t.Fatalf("unexpected status:\n%s", out)
 	}
-	e.assertMissing(filepath.Join(e.agentsSkills(), "x-other"))
-	if n := len(e.config().Playbooks); n != 1 {
+	// Outside home, with nothing managed up to the root: the home folder.
+	e.app.Cwd = outside
+	out, _ = e.mustRun(ExitOK, "status")
+	if !strings.Contains(out, "Managed folder: ~\n") {
+		t.Fatalf("unexpected status:\n%s", out)
+	}
+	// A managed folder above the home folder is never used from inside it.
+	e.mustRun(ExitOK, "init", e.root, "-a", "claude")
+	e.app.Cwd = filepath.Join(e.home, "w")
+	out, _ = e.mustRun(ExitOK, "status")
+	if !strings.Contains(out, "Managed folder: ~\n") {
+		t.Fatalf("unexpected status:\n%s", out)
+	}
+	e.app.Cwd = outside
+	out, _ = e.mustRun(ExitOK, "status")
+	if !strings.Contains(out, "Managed folder: "+e.root+"\n") {
+		t.Fatalf("unexpected status:\n%s", out)
+	}
+	// A git repository whose root is above the managed folder.
+	e.mkdir(filepath.Join(e.home, "w", ".git"))
+	e.app.Cwd = deep
+	out, _ = e.mustRun(ExitOK, "status")
+	if !strings.Contains(out, "git repository: yes, with its root at ~/w") {
+		t.Fatalf("unexpected status:\n%s", out)
+	}
+}
+
+func TestProfileCommands(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init", "-u", "-a", "standard")
+	pb := e.playbook("pb", "x-a", "y-b")
+	e.mustRun(ExitOK, "add", "x", pb)
+
+	e.mustFail(ExitUsage, []string{"profile add needs one profile name"}, "profile", "add")
+	e.mustFail(ExitUsage, []string{"profile add needs the target folders"}, "profile", "add", "p")
+	e.mustFail(ExitUsage, []string{"only 'profile add' takes --agent and --folder"}, "profile", "enable", "x", "-a",
+		"claude")
+	e.mustFail(ExitUsage, []string{"unknown profile subcommand: agent"}, "profile", "agent", "default", "claude")
+	out, _ := e.mustRun(ExitOK, "profile", "add", "work", "-a", "devin")
+	if !strings.Contains(out, "skills: .config/devin/skills") || !strings.Contains(out, "not enabled") {
+		t.Fatalf("unexpected output:\n%s", out)
+	}
+	e.mustFail(ExitFailure, []string{"profile 'work' already exists"}, "profile", "add", "work", "-a", "devin")
+	e.mustRun(ExitOK, "add", "y", pb, "-p", "work")
+	out, _ = e.mustRun(ExitOK, "profile", "list")
+	if !strings.Contains(out, "* default") || !strings.Contains(out, "  work                 devin") {
+		t.Fatalf("unexpected list:\n%s", out)
+	}
+	e.mustRun(ExitOK, "profile", "enable", "work")
+	e.assertLink(filepath.Join(e.home, ".config", "devin", "skills", "y-b"), filepath.Join(pb, "skills", "y-b"))
+	out, _ = e.mustRun(ExitOK, "profile", "switch", "default,work")
+	if !strings.Contains(out, "unchanged") {
+		t.Fatalf("unexpected output:\n%s", out)
+	}
+	e.mustFail(ExitFailure, []string{"not enabled: nope"}, "profile", "disable", "nope")
+	e.mustFail(ExitFailure, []string{"profile 'nope' does not exist"}, "profile", "enable", "nope")
+
+	// Removing an enabled profile removes its links first, and the folders left empty, up to the home folder.
+	out, _ = e.mustRun(ExitOK, "profile", "remove", "work")
+	if !strings.Contains(out, "Removed profile 'work' and its 1 playbook registration(s)") {
+		t.Fatalf("unexpected output:\n%s", out)
+	}
+	e.assertMissing(filepath.Join(e.home, ".config"))
+	if e.enabled(e.home) != "default" || config.ProfileExists(e.home, "work") {
+		t.Fatal("the profile was not removed")
+	}
+	e.mustRun(ExitOK, "profile", "disable", "default")
+	e.assertMissing(filepath.Join(e.home, ".agents"))
+	out, _ = e.mustRun(ExitOK, "profile", "list")
+	if !strings.Contains(out, "No profile is enabled") {
+		t.Fatalf("unexpected list:\n%s", out)
+	}
+}
+
+func TestAppData(t *testing.T) {
+	e := newEnv(t)
+	e.app.GOOS = "windows"
+	appData := e.mkdir(filepath.Join(e.root, "appdata"))
+	e.mustRun(ExitOK, "init", "-u", "-a", "devin")
+	if f, _ := e.profile(e.home, "default").Targets.Folder("skills"); f != "%APPDATA%/devin/skills" {
+		t.Fatalf("skills target: %s", f)
+	}
+	pb := e.playbook("pb", "x-a")
+	e.mustFail(ExitFailure, []string{"needs the APPDATA environment variable"}, "add", "x", pb)
+	e.app.AppData = appData
+	e.mustRun(ExitOK, "add", "x", pb)
+	e.assertLink(filepath.Join(appData, "devin", "skills", "x-a"), filepath.Join(pb, "skills", "x-a"))
+	e.mustRun(ExitOK, "remove", "x")
+	e.assertMissing(filepath.Join(appData, "devin"))
+	if !fsutil.IsDir(appData) {
+		t.Fatal("%APPDATA% itself must never be removed")
+	}
+	// Only in the user managed folder.
+	project := e.mkdir(filepath.Join(e.home, "project"))
+	e.mustFail(ExitUsage, []string{"can only be used in the user managed folder"}, "init", project, "-f",
+		"skills:%APPDATA%/x")
+}
+
+func TestArtifactsStayInsidePlaybook(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init", "-u", "-a", "standard")
+	pb := e.playbook("p", "x-a")
+	other := e.playbook("other", "x-b")
+	// A subfolder that leads outside the playbook through a link is refused; an artifact that does is not linked.
+	if err := os.Symlink(filepath.Join(other, "skills"), filepath.Join(pb, "linked")); err != nil {
+		t.Skipf("cannot create symbolic links: %v", err)
+	}
+	e.mustFail(ExitFailure, []string{"outside the playbook folder"}, "add", "x", pb, "-f", "skills:linked")
+	if err := os.Symlink(filepath.Join(other, "skills", "x-b"), filepath.Join(pb, "skills", "x-b")); err != nil {
+		t.Fatal(err)
+	}
+	e.mustRun(ExitOK, "add", "x", pb)
+	e.assertLink(filepath.Join(e.homeSkills(), "x-a"), filepath.Join(pb, "skills", "x-a"))
+	e.assertMissing(filepath.Join(e.homeSkills(), "x-b"))
+}
+
+func TestPlaybookBehindSymlink(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init", "-u", "-a", "standard")
+	pb := e.playbook("p", "x-a")
+	e.mustRun(ExitOK, "add", "x", pb)
+	// Move the playbook and leave a link at its old path: its links still lead to its skills.
+	moved := filepath.Join(e.root, "moved")
+	if err := os.Rename(pb, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(moved, pb); err != nil {
+		t.Skipf("cannot create symbolic links: %v", err)
+	}
+	out, _ := e.mustRun(ExitOK, "update", "x")
+	if !strings.Contains(out, "up to date") {
+		t.Fatalf("unexpected output: %s", out)
+	}
+	e.mustRun(ExitOK, "status")
+	e.app.Cwd = moved // the real folder selects the playbook registered through the link
+	e.mustRun(ExitOK, "update")
+	e.mustRun(ExitOK, "remove", "x")
+	e.assertMissing(filepath.Join(e.homeSkills(), "x-a"))
+}
+
+func TestProfileNameCase(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init", "-u", "-a", "standard", "-p", "work")
+	if !config.ProfileExists(e.home, "Work") {
+		t.Skip("the file system distinguishes case: Work and work are different profiles")
+	}
+	pb := e.playbook("p", "x-a")
+	out, _ := e.mustRun(ExitOK, "add", "x", pb, "-p", "Work")
+	if strings.Contains(out, "not enabled") {
+		t.Fatalf("Work is the enabled profile work: %s", out)
+	}
+	e.assertLink(filepath.Join(e.homeSkills(), "x-a"), filepath.Join(pb, "skills", "x-a"))
+	e.mustRun(ExitOK, "status")
+}
+
+func TestFailedAddIsUndone(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a folder the current user cannot write to")
+	}
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init", "-u", "-a", "claude")
+	pb := e.playbook("p", "x-a")
+	e.file("p/subagents/x-r.md")
+	locked := e.mkdir(filepath.Join(e.home, ".claude", "agents"))
+	if err := os.Chmod(locked, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(locked, 0o755)
+	e.mustFail(ExitFailure, []string{"undone", "not registered"}, "add", "x", pb)
+	e.assertMissing(filepath.Join(e.home, ".claude", "skills", "x-a"))
+	if n := len(e.profile(e.home, "default").Playbooks); n != 0 {
 		t.Fatalf("%d playbooks registered", n)
 	}
 }
 
-func TestUpdate(t *testing.T) {
+func TestSandbox(t *testing.T) {
 	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "standard")
-	pb := e.playbook("p", "x-a", "x-b")
-	e.mustRun(ExitOK, "add", "x", pb)
-	unrelated := filepath.Join(e.agentsSkills(), "personal")
-	if err := fsutil.CreateLink(unrelated, e.root); err != nil {
-		t.Fatal(err)
-	}
-
-	e.skill(filepath.Join(pb, "skills"), "x-c")
-	if err := os.RemoveAll(filepath.Join(pb, "skills", "x-a")); err != nil {
-		t.Fatal(err)
-	}
-	e.app.Cwd = filepath.Join(pb) // update with no arguments: the playbook of the current folder
-	out, _ := e.mustRun(ExitOK, "update")
-	if !strings.Contains(out, "+ ") || !strings.Contains(out, "- ") {
-		t.Fatalf("unexpected output: %s", out)
-	}
-	e.assertMissing(filepath.Join(e.agentsSkills(), "x-a"))
-	e.assertLink(filepath.Join(e.agentsSkills(), "x-c"), filepath.Join(pb, "skills", "x-c"))
-	e.assertLink(unrelated, e.root)
-
-	out, _ = e.mustRun(ExitOK, "update", "--all")
-	if !strings.Contains(out, "up to date") {
-		t.Fatalf("unexpected output: %s", out)
-	}
-
-	// A conflict cancels the whole update.
-	e.skill(filepath.Join(pb, "skills"), "x-d")
-	e.skill(filepath.Join(pb, "skills"), "x-e")
-	if err := fsutil.CreateLink(filepath.Join(e.agentsSkills(), "x-e"), e.root); err != nil {
-		t.Fatal(err)
-	}
-	_, errOut := e.mustRun(ExitFailure, "update", "x")
-	if !strings.Contains(errOut, "cancelled") {
-		t.Fatalf("unexpected message: %s", errOut)
-	}
-	e.assertMissing(filepath.Join(e.agentsSkills(), "x-d"))
-
-	e.app.Cwd = e.root
-	_, errOut = e.mustRun(ExitFailure, "update")
-	if !strings.Contains(errOut, "is registered for the current folder") {
-		t.Fatalf("unexpected message: %s", errOut)
-	}
-}
-
-func TestLongestPrefixWins(t *testing.T) {
-	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "standard")
-	pb := e.playbook("p", "x-a", "x-y-b")
-	skills := filepath.Join(pb, "skills")
-	e.mustRun(ExitOK, "add", "x", pb)
-	e.assertLink(filepath.Join(e.agentsSkills(), "x-y-b"), filepath.Join(skills, "x-y-b"))
-
-	// x-y takes over x-y-b, whose link stays in place.
-	e.mustRun(ExitOK, "add", "x-y", pb)
-	out, _ := e.mustRun(ExitOK, "list", "--json")
-	var list listOutput
-	if err := json.Unmarshal([]byte(out), &list); err != nil {
-		t.Fatal(err)
-	}
-	names := map[string][]string{}
-	for _, p := range list.Profiles[0].Playbooks {
-		for _, s := range skillItems(p) {
-			names[p.ID] = append(names[p.ID], s.Name)
-		}
-	}
-	if strings.Join(names["x"], ",") != "x-a" || strings.Join(names["x-y"], ",") != "x-y-b" {
-		t.Fatalf("unexpected ownership: %v", names)
-	}
-	e.mustRun(ExitOK, "check")
-
-	// Removing x leaves x-y's links alone.
-	e.mustRun(ExitOK, "remove", "x")
-	e.assertMissing(filepath.Join(e.agentsSkills(), "x-a"))
-	e.assertLink(filepath.Join(e.agentsSkills(), "x-y-b"), filepath.Join(skills, "x-y-b"))
-
-	// Removing x-y while x is registered leaves the link to x, which owns it again.
-	e.mustRun(ExitOK, "add", "x", pb)
-	e.mustRun(ExitOK, "remove", "x-y")
-	e.assertLink(filepath.Join(e.agentsSkills(), "x-y-b"), filepath.Join(skills, "x-y-b"))
-	e.mustRun(ExitOK, "check")
-
-	e.mustRun(ExitOK, "remove", pb)
-	e.assertMissing(filepath.Join(e.agentsSkills(), "x-y-b"))
-	e.assertMissing(filepath.Join(e.agentsSkills(), "x-a"))
-	if n := len(e.config().Playbooks); n != 0 {
-		t.Fatalf("%d playbooks still registered", n)
-	}
-	if !fsutil.IsDir(filepath.Join(skills, "x-a")) {
-		t.Fatal("remove deleted playbook content")
-	}
-}
-
-func TestRemoveKeepsRealFolders(t *testing.T) {
-	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "standard")
-	pb := e.playbook("p", "x-a")
-	e.mustRun(ExitOK, "add", "x", pb)
-	copyDir := e.skill(e.agentsSkills(), "x-copy")
-	e.mustRun(ExitOK, "remove", "x")
-	if !fsutil.IsDir(copyDir) {
-		t.Fatal("a real folder was removed")
-	}
-	_, errOut := e.mustRun(ExitFailure, "remove", "x")
-	if !strings.Contains(errOut, "no playbook of profile 'default' is registered") {
-		t.Fatalf("unexpected message: %s", errOut)
-	}
-}
-
-func TestCheck(t *testing.T) {
-	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "standard")
-	pb := e.playbook("p", "x-a")
-	e.mustRun(ExitOK, "add", "x", pb)
-	out, _ := e.mustRun(ExitOK, "check")
-	if !strings.Contains(out, "Everything is up to date") {
-		t.Fatalf("unexpected output: %s", out)
-	}
-
-	e.skill(filepath.Join(pb, "skills"), "x-new")
-	if err := fsutil.CreateLink(filepath.Join(e.agentsSkills(), "dangling"), filepath.Join(e.root, "gone")); err != nil {
-		t.Fatal(err)
-	}
-	_, errOut := e.mustRun(ExitFailure, "check")
-	if !strings.Contains(errOut, "would link") || !strings.Contains(errOut, "broken link") {
-		t.Fatalf("unexpected warnings: %s", errOut)
-	}
-	e.assertMissing(filepath.Join(e.agentsSkills(), "x-new")) // check changes nothing
-
-	// A broken link into the playbook is removed by update.
-	if err := os.RemoveAll(filepath.Join(pb, "skills", "x-a")); err != nil {
-		t.Fatal(err)
-	}
-	_, errOut = e.mustRun(ExitFailure, "check")
-	if !strings.Contains(errOut, "would remove") {
-		t.Fatalf("unexpected warnings: %s", errOut)
-	}
-	e.mustRun(ExitOK, "update", "x")
-	e.assertMissing(filepath.Join(e.agentsSkills(), "x-a"))
-}
-
-func TestCheckInvalidConfig(t *testing.T) {
-	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "standard")
-	for _, content := range []string{
-		"playbooks: []\nunknown: 1\n",
-		"targets: [~/.agents]\n",
-		"playbooks:\n  - name: x\n    folder: /absolute\n    artifacts:\n      skills:\n        path: skills\n",
-		"playbooks:\n  - name: x\n    folder: ~/p\n    artifacts:\n      skills:\n        path: skills\n",
-		"playbooks:\n  - name: 'x@y'\n    folder: relative\n    artifacts:\n      skills:\n        path: skills\n",
-		"playbooks: [\n",
+	outside := e.mkdir(filepath.Join(e.root, "outside"))
+	e.mustRun(ExitOK, "init", outside, "-a", "claude") // the real configuration, set up before the sandbox
+	e.app.Sandbox = e.home
+	for _, args := range [][]string{
+		{"init", e.root, "-a", "claude"}, // init outside the sandbox
+		{"status"},                       // the managed folder found from a current folder outside the sandbox
+		{"list", outside},                // a folder given outside the sandbox
+		{"profile", "list"},
 	} {
-		e.writeProfile("default", content)
-		e.mustRun(ExitFailure, "check")
-		_, errOut := e.mustRun(ExitFailure, "list")
-		if !strings.Contains(errOut, "default.yaml") {
-			t.Fatalf("list should point to the profile's file for %q: %s", content, errOut)
-		}
+		e.app.Cwd = outside
+		e.mustFail(ExitFailure, []string{"is outside the aiplam sandbox ('" + e.home + "')"}, args...)
 	}
-	e.writeProfile("default", "")
-	e.mustRun(ExitOK, "check") // an empty file is an empty profile (for the standard agent)
-	e.writeProfile("default", "agent: nope\nplaybooks: []\n")
-	_, errOut := e.mustRun(ExitFailure, "check")
-	if !strings.Contains(errOut, "unknown agent 'nope'") {
-		t.Fatalf("unexpected message: %s", errOut)
+	if fsutil.IsDir(filepath.Join(e.root, ".aiplam")) {
+		t.Fatal("init outside the sandbox should create nothing")
 	}
-	e.writeProfile("default", "")
-
-	file := config.BaseConfigFile(e.home)
-	for _, content := range []string{
-		"types: [agents]\nenabled: [default]\n",
-		"targets: [~/.agents]\nenabled: [default]\n",
-		"enabled: [default]\nplaybooks: []\n",
-		"enabled: ['../x']\n",
-		"enabled: [default, Default]\n",
-		"enabled: default\n",
-		"",
-	} {
-		if err := os.WriteFile(file, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		e.mustRun(ExitFailure, "check")
-		_, errOut := e.mustRun(ExitFailure, "list")
-		if !strings.Contains(errOut, config.BaseConfigName+".yaml") {
-			t.Fatalf("list should point to the base config file for %q: %s", content, errOut)
-		}
-	}
+	e.app.Cwd = e.home
+	e.mustRun(ExitOK, "init", "-u", "-a", "claude")
+	e.mustRun(ExitOK, "list")
 }
 
-func TestListJSONAndVersions(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
-	}
-	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "standard")
-	pb := e.playbook("p", "x-a", "x-b")
-	// x-b declares its own version, which wins over the playbook's tags.
-	if err := os.WriteFile(filepath.Join(pb, "skills", "x-b", "SKILL.md"),
-		[]byte("---\nname: x-b\nmetadata:\n  version: \"1.0\"\n---\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	git := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", append([]string{"-C", pb, "-c", "user.name=t", "-c", "user.email=t@example.com",
-			"-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"}, args...)...)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	git("init", "-q", "-b", "main")
-	git("add", ".")
-	git("commit", "-q", "-m", "first")
-	e.mustRun(ExitOK, "add", "x", pb)
-
-	readList := func() listOutput {
-		out, _ := e.mustRun(ExitOK, "list", "--json")
-		var list listOutput
-		if err := json.Unmarshal([]byte(out), &list); err != nil {
-			t.Fatalf("invalid JSON: %v\n%s", err, out)
-		}
-		return list
-	}
-	list := readList()
-	if len(list.Profiles) != 1 || len(list.Profiles[0].Playbooks) != 1 || !list.Profiles[0].Enabled {
-		t.Fatalf("unexpected list: %+v", list)
-	}
-	p := list.Profiles[0].Playbooks[0]
-	if p.ID != "x" || p.Name != "x" || p.Folder != pb || p.Label != "branch: main" || !p.Version.Known ||
-		len(skillItems(p)) != 2 || !skillItems(p)[0].Linked {
-		t.Fatalf("unexpected playbook: %+v", p)
-	}
-	skillVersions := func(p listPlaybook) string {
-		var vs []string
-		for _, it := range skillItems(p) {
-			vs = append(vs, it.Name+"="+it.Version)
-		}
-		return strings.Join(vs, " ")
-	}
-	// Only the skill declaring a version of its own has one, with or without tags.
-	if got := skillVersions(p); got != "x-a= x-b=1.0" {
-		t.Fatalf("skill versions = %q", got)
-	}
-
-	git("tag", "v1.0.0")
-	git("tag", "x-1.0.0")
-	git("checkout", "-q", "--detach", "v1.0.0")
-	p = readList().Profiles[0].Playbooks[0]
-	if p.Label != "v1.0.0, x-1.0.0" {
-		t.Fatalf("label = %q", p.Label)
-	}
-	if got := skillVersions(p); got != "x-a= x-b=1.0" {
-		t.Fatalf("skill versions = %q", got)
-	}
-	out, _ := e.mustRun(ExitOK, "list")
-	if !strings.Contains(out, "version: v1.0.0, x-1.0.0\n") || !strings.Contains(out, "    x-a\n") ||
-		!strings.Contains(out, "    x-b  1.0\n") {
-		t.Fatalf("unexpected list: %s", out)
-	}
-
-	e.app.Git = &gitinfo.Reader{}
-	code, out, errOut := e.run("list")
-	if code != ExitOK || !strings.Contains(out, "version: unknown") || !strings.Contains(errOut, "git was not found") {
-		t.Fatalf("unexpected output without git: %s / %s", out, errOut)
-	}
-}
-
-func TestUsageErrors(t *testing.T) {
-	e := newEnv(t)
-	e.mustRun(ExitUsage)
-	e.mustRun(ExitUsage, "frobnicate")
-	e.mustRun(ExitUsage, "init", "--bogus")
-	e.mustRun(ExitOK, "init", "-g", "standard")
-	e.mustRun(ExitUsage, "add", "x")
-	e.mustRun(ExitUsage, "add", "x@y", ".")
-	e.mustRun(ExitUsage, "update", "--all", "x")
-	e.mustRun(ExitUsage, "remove")
-	out, _ := e.mustRun(ExitOK, "add", "--help")
-	if !strings.Contains(out, "Usage: aiplam add") {
-		t.Fatalf("unexpected help: %s", out)
-	}
-	out, _ = e.mustRun(ExitOK, "--version")
-	if !strings.HasPrefix(out, "aiplam ") {
-		t.Fatalf("unexpected version: %s", out)
-	}
-}
-
-func TestProfiles(t *testing.T) {
-	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "standard")
-	pbA := e.playbook("pa", "x-a")
-	pbB := e.playbook("pb", "y-b")
-	pbC := e.playbook("pc", "z-c")
-	e.mustRun(ExitOK, "add", "x", pbA)
-	e.assertLink(filepath.Join(e.agentsSkills(), "x-a"), filepath.Join(pbA, "skills", "x-a"))
-
-	// --profile needs an existing profile.
-	_, errOut := e.mustRun(ExitFailure, "list", "--profile", "work")
-	if !strings.Contains(errOut, "profile 'work' does not exist") || !strings.Contains(errOut, "aiplam profile add work") {
-		t.Fatalf("unexpected message: %s", errOut)
-	}
-	e.mustRun(ExitOK, "profile", "add", "work", "standard")
-	e.mustRun(ExitFailure, "profile", "add", "work", "standard")
-	e.mustRun(ExitUsage, "profile", "add", config.BaseConfigName, "standard")
-
-	// A profile that is not enabled is only recorded: nothing is linked or unlinked.
-	out, _ := e.mustRun(ExitOK, "add", "y", pbB, "-p", "work")
-	if !strings.Contains(out, "not enabled") {
-		t.Fatalf("unexpected output: %s", out)
-	}
-	e.assertMissing(filepath.Join(e.agentsSkills(), "y-b"))
-	out, _ = e.mustRun(ExitOK, "update", "--all", "-p", "work")
-	if !strings.Contains(out, "Nothing to update") {
-		t.Fatalf("unexpected output: %s", out)
-	}
-	e.mustRun(ExitOK, "check", "-p", "work")
-	var list listOutput
-	out, _ = e.mustRun(ExitOK, "list", "--json", "--profile=work")
-	if err := json.Unmarshal([]byte(out), &list); err != nil || len(list.Profiles) != 1 ||
-		list.Profiles[0].Name != "work" ||
-		list.Profiles[0].Enabled || skillItems(list.Profiles[0].Playbooks[0])[0].Linked {
-		t.Fatalf("unexpected list: %v %s", err, out)
-	}
-
-	// Enabling a profile adds it to the enabled ones.
-	e.mustRun(ExitOK, "profile", "enable", "work")
-	e.assertLink(filepath.Join(e.agentsSkills(), "x-a"), filepath.Join(pbA, "skills", "x-a"))
-	e.assertLink(filepath.Join(e.agentsSkills(), "y-b"), filepath.Join(pbB, "skills", "y-b"))
-	if got := strings.Join(e.baseConfig().Enabled, ","); got != "default,work" {
-		t.Fatalf("enabled = %s", got)
-	}
-	out, _ = e.mustRun(ExitOK, "profile", "list")
-	if !strings.Contains(out, "* default") || !strings.Contains(out, "* work") {
-		t.Fatalf("unexpected profiles: %s", out)
-	}
-	out, _ = e.mustRun(ExitOK, "profile", "enable", "work")
-	if !strings.Contains(out, "already enabled") {
-		t.Fatalf("unexpected output: %s", out)
-	}
-
-	// With several profiles enabled: list and check cover them all, add needs --profile, and selectors look in all of
-	// them.
-	out, _ = e.mustRun(ExitOK, "list")
-	if !strings.Contains(out, "Profile default") || !strings.Contains(out, "Profile work") {
-		t.Fatalf("unexpected list: %s", out)
-	}
-	e.mustRun(ExitOK, "check")
-	_, errOut = e.mustRun(ExitFailure, "add", "z", pbC)
-	if !strings.Contains(errOut, "--profile") {
-		t.Fatalf("unexpected message: %s", errOut)
-	}
-	e.mustRun(ExitOK, "update", "y")
-	e.mustRun(ExitOK, "update", "--all")
-
-	// Profiles enabled together cannot provide the same skill.
-	_, errOut = e.mustRun(ExitFailure, "add", "y", pbB, "-p", "default")
-	if !strings.Contains(errOut, "also provided by playbook y of profile work") {
-		t.Fatalf("unexpected message: %s", errOut)
-	}
-
-	// Disabling a profile unlinks its playbooks only.
-	e.mustRun(ExitOK, "profile", "disable", "default")
-	e.assertMissing(filepath.Join(e.agentsSkills(), "x-a"))
-	e.assertLink(filepath.Join(e.agentsSkills(), "y-b"), filepath.Join(pbB, "skills", "y-b"))
-	e.mustRun(ExitFailure, "profile", "disable", "default") // not enabled
-	e.mustRun(ExitOK, "remove", "y")                        // the only enabled profile
-	e.assertMissing(filepath.Join(e.agentsSkills(), "y-b"))
-	e.mustRun(ExitOK, "add", "y", pbB)
-
-	// The enabled profiles cannot be removed; others can, unlinking nothing.
-	_, errOut = e.mustRun(ExitFailure, "profile", "remove", "work")
-	if !strings.Contains(errOut, "aiplam profile disable work") {
-		t.Fatalf("unexpected message: %s", errOut)
-	}
-	e.mustRun(ExitOK, "profile", "remove", "default")
-	e.mustRun(ExitFailure, "list", "-p", "default")
-	e.mustRun(ExitFailure, "profile", "enable", "default")
-
-	// No profile enabled.
-	e.mustRun(ExitOK, "profile", "disable", "work")
-	e.assertMissing(filepath.Join(e.agentsSkills(), "y-b"))
-	out, _ = e.mustRun(ExitOK, "list")
-	if !strings.Contains(out, "No profile is enabled") {
-		t.Fatalf("unexpected list: %s", out)
-	}
-	e.mustRun(ExitOK, "check")
-	_, errOut = e.mustRun(ExitFailure, "add", "z", pbC)
-	if !strings.Contains(errOut, "no profile is enabled") {
-		t.Fatalf("unexpected message: %s", errOut)
-	}
-
-	e.mustRun(ExitUsage, "profile")
-	e.mustRun(ExitUsage, "profile", "frob")
-	e.mustRun(ExitUsage, "profile", "enable")
-	e.mustRun(ExitUsage, "profile", "enable", "a,,b")
-	e.mustRun(ExitUsage, "profile", "list", "-p", "work")
-	e.mustRun(ExitUsage, "list", "--profile")
-	e.mustRun(ExitUsage, "list", "--profile", "../x")
-	e.mustRun(ExitUsage, "list", "-p", "a.b")
-}
-
-func TestProfileEnableCollisions(t *testing.T) {
-	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "standard")
-	pb := e.playbook("p", "x-a", "x-b")
-	other := e.playbook("q", "y-a")
-	e.mustRun(ExitOK, "add", "x", pb)
-	e.mustRun(ExitOK, "profile", "add", "work", "standard")
-	e.mustRun(ExitOK, "add", "x", pb, "-p", "work")
-	e.mustRun(ExitOK, "profile", "add", "more", "standard")
-	e.mustRun(ExitOK, "add", "y", other, "-p", "more")
-
-	// Enabling a profile whose links already exist (from an enabled profile) fails, changing nothing.
-	_, errOut := e.mustRun(ExitFailure, "profile", "enable", "work,more")
-	if !strings.Contains(errOut, "collide") {
-		t.Fatalf("unexpected message: %s", errOut)
-	}
-	e.assertMissing(filepath.Join(e.agentsSkills(), "y-a"))
-	if got := strings.Join(e.baseConfig().Enabled, ","); got != "default" {
-		t.Fatalf("enabled = %s", got)
-	}
-
-	// Also when the link exists for any other reason, even if it is right.
-	e.mustRun(ExitOK, "profile", "disable", "default")
-	if err := os.MkdirAll(e.agentsSkills(), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := fsutil.CreateLink(filepath.Join(e.agentsSkills(), "x-a"), filepath.Join(pb, "skills", "x-a")); err != nil {
-		t.Fatal(err)
-	}
-	_, errOut = e.mustRun(ExitFailure, "profile", "enable", "work")
-	if !strings.Contains(errOut, "already exists") {
-		t.Fatalf("unexpected message: %s", errOut)
-	}
-	if err := fsutil.RemoveLink(filepath.Join(e.agentsSkills(), "x-a")); err != nil {
-		t.Fatal(err)
-	}
-
-	// Two profiles being enabled together cannot collide either.
-	_, errOut = e.mustRun(ExitFailure, "profile", "enable", "default", "work")
-	if !strings.Contains(errOut, "collide") {
-		t.Fatalf("unexpected message: %s", errOut)
-	}
-	e.mustRun(ExitOK, "profile", "enable", "work,more")
-	e.assertLink(filepath.Join(e.agentsSkills(), "y-a"), filepath.Join(other, "skills", "y-a"))
-	e.assertLink(filepath.Join(e.agentsSkills(), "x-b"), filepath.Join(pb, "skills", "x-b"))
-}
-
-func TestProfileSwitch(t *testing.T) {
-	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "standard")
-	pb := e.playbook("p", "x-a", "x-b")
-	other := e.playbook("q", "y-a")
-	e.mustRun(ExitOK, "add", "x", pb)
-	e.mustRun(ExitOK, "profile", "add", "work", "standard")
-	e.mustRun(ExitOK, "add", "x", pb, "-p", "work")
-	e.mustRun(ExitOK, "profile", "add", "more", "standard")
-	e.mustRun(ExitOK, "add", "y", other, "-p", "more")
-
-	// Switching replaces the enabled profiles; links wanted before and after are left alone.
-	out, _ := e.mustRun(ExitOK, "profile", "switch", "work,more")
-	if strings.Contains(out, "x-a") {
-		t.Fatalf("links wanted by both profiles should be left alone: %s", out)
-	}
-	e.assertLink(filepath.Join(e.agentsSkills(), "x-a"), filepath.Join(pb, "skills", "x-a"))
-	e.assertLink(filepath.Join(e.agentsSkills(), "y-a"), filepath.Join(other, "skills", "y-a"))
-	if got := strings.Join(e.baseConfig().Enabled, ","); got != "work,more" {
-		t.Fatalf("enabled = %s", got)
-	}
-	e.mustRun(ExitOK, "profile", "switch", "more")
-	e.assertMissing(filepath.Join(e.agentsSkills(), "x-a"))
-	e.assertLink(filepath.Join(e.agentsSkills(), "y-a"), filepath.Join(other, "skills", "y-a"))
-	out, _ = e.mustRun(ExitOK, "profile", "switch", "more")
-	if !strings.Contains(out, "unchanged") {
-		t.Fatalf("unexpected output: %s", out)
-	}
-	e.mustRun(ExitFailure, "profile", "switch", "default,work") // they collide
-	e.assertLink(filepath.Join(e.agentsSkills(), "y-a"), filepath.Join(other, "skills", "y-a"))
-	e.mustRun(ExitFailure, "profile", "switch", "nope")
-}
-
-func TestProfileAgent(t *testing.T) {
-	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "standard")
-	pb := e.playbook("p", "x-a")
-	e.mustRun(ExitOK, "add", "x", pb)
-	out, _ := e.mustRun(ExitOK, "profile", "list")
-	if !strings.Contains(out, "* default") || !strings.Contains(out, "standard") {
-		t.Fatalf("unexpected list: %q", out)
-	}
-
-	// Changing the agent moves the links, and removes the folders left empty.
-	claude := filepath.Join(e.home, ".claude", "skills")
-	out, _ = e.mustRun(ExitOK, "profile", "agent", "default", "claude")
-	if !strings.Contains(out, "x-a (agent changed)") || !strings.Contains(out, "empty folder removed") {
-		t.Fatalf("unexpected output: %s", out)
-	}
-	e.assertLink(filepath.Join(claude, "x-a"), filepath.Join(pb, "skills", "x-a"))
-	e.assertMissing(filepath.Join(e.home, ".agents"))
-	if prof := e.config(); prof.Agent != "claude" {
-		t.Fatalf("agent = %s", prof.Agent)
-	}
-	out, _ = e.mustRun(ExitOK, "profile", "agent", "default", "claude")
-	if !strings.Contains(out, "already has agent claude") {
-		t.Fatalf("unexpected output: %s", out)
-	}
-
-	// Folders holding anything else are kept.
-	e.skill(claude, "mine")
-	e.mustRun(ExitOK, "profile", "agent", "default", "standard")
-	e.assertMissing(filepath.Join(claude, "x-a"))
-	if !fsutil.IsDir(filepath.Join(claude, "mine")) {
-		t.Fatal("an artifact added by hand was removed")
-	}
-
-	// codex reads skills from the same folder as standard: the links stay.
-	out, _ = e.mustRun(ExitOK, "profile", "agent", "default", "codex")
-	if strings.Contains(out, "x-a") {
-		t.Fatalf("unexpected output: %s", out)
-	}
-	e.assertLink(filepath.Join(e.agentsSkills(), "x-a"), filepath.Join(pb, "skills", "x-a"))
-
-	// A conflict in a new folder cancels everything.
-	if err := os.MkdirAll(filepath.Join(claude, "x-a"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	_, errOut := e.mustRun(ExitFailure, "profile", "agent", "default", "claude")
-	if !strings.Contains(errOut, "not changed") {
-		t.Fatalf("unexpected message: %s", errOut)
-	}
-	e.assertLink(filepath.Join(e.agentsSkills(), "x-a"), filepath.Join(pb, "skills", "x-a"))
-
-	// A profile that is not enabled only changes its file.
-	e.mustRun(ExitOK, "profile", "add", "other", "standard")
-	out, _ = e.mustRun(ExitOK, "profile", "agent", "other", "junie")
-	if !strings.Contains(out, "not enabled") {
-		t.Fatalf("unexpected output: %s", out)
-	}
-	e.mustRun(ExitUsage, "profile", "agent", "default")
-	e.mustRun(ExitUsage, "profile", "agent", "default", "nope")
-	e.mustRun(ExitUsage, "profile", "enable", "other", "--agent", "claude")
-	e.mustRun(ExitUsage, "profile", "add", "third", "nope")
-	for _, c := range []struct {
-		args []string
-		msg  string
-	}{
-		{nil, "profile add needs a profile name and an agent (standard, claude,"},
-		{[]string{"third"}, "profile add needs the agent after the profile name: 'aiplam profile add third <agent>'"},
-		{[]string{"claude"}, "profile add needs the profile name before the agent: 'aiplam profile add <profile> claude'"},
-		{[]string{"claude", "third"}, "profile add takes the profile name first, then the agent: 'aiplam profile add " +
-			"third claude'"},
-		{[]string{"third", "claude", "x"}, "unexpected argument: x"},
-		{[]string{"third", "--agent", "claude"}, "profile takes the agent as an argument, not with --agent"},
-	} {
-		_, errOut := e.mustRun(ExitUsage, append([]string{"profile", "add"}, c.args...)...)
-		if !strings.Contains(errOut, c.msg) {
-			t.Fatalf("profile add %v: unexpected message: %s", c.args, errOut)
-		}
-	}
-	e.mustRun(ExitFailure, "profile", "agent", "missing", "claude")
-}
-
-func TestArtifactKindsPerAgent(t *testing.T) {
-	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "claude")
-	pb := e.playbook("p", "x-a")
-	files := map[string]string{
-		"agents/x-rev.md": "", "agents/x-rev.agent.md": "", "agents/x-rev.toml": "", "agents/other.md": "",
-		"rules/x-style.md": "", "rules/x-style.mdc": "", "commands/x-go.md": "", "commands/x-go.toml": "",
-		"prompts/x-ask.prompt.md": "", "instructions/x-java.instructions.md": "",
-	}
-	for name := range files {
-		path := filepath.Join(pb, filepath.FromSlash(name))
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte("x\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	out, _ := e.mustRun(ExitOK, "add", "x", pb)
-	if !strings.Contains(out, "1 skill(s), 1 subagent(s), 1 command(s), 1 rule(s)") {
-		t.Fatalf("unexpected output: %s", out)
-	}
-	claude := filepath.Join(e.home, ".claude")
-	e.assertLink(filepath.Join(claude, "agents", "x-rev.md"), filepath.Join(pb, "agents", "x-rev.md"))
-	e.assertLink(filepath.Join(claude, "rules", "x-style.md"), filepath.Join(pb, "rules", "x-style.md"))
-	e.assertLink(filepath.Join(claude, "commands", "x-go.md"), filepath.Join(pb, "commands", "x-go.md"))
-	e.assertMissing(filepath.Join(claude, "agents", "x-rev.agent.md"))
-	e.assertMissing(filepath.Join(claude, "agents", "other.md"))
-	e.assertMissing(filepath.Join(claude, "prompts"))
-
-	// Each agent links the files in its own format, from its own folders (in the home folder here).
-	e.mustRun(ExitOK, "profile", "agent", "default", "copilot")
-	e.assertMissing(claude)
-	copilot := filepath.Join(e.home, ".copilot")
-	e.assertLink(filepath.Join(copilot, "agents", "x-rev.agent.md"), filepath.Join(pb, "agents", "x-rev.agent.md"))
-	e.assertLink(filepath.Join(copilot, "skills", "x-a"), filepath.Join(pb, "skills", "x-a"))
-	e.assertMissing(filepath.Join(copilot, "prompts")) // project-only for Copilot
-	e.mustRun(ExitOK, "profile", "agent", "default", "codex")
-	e.assertLink(filepath.Join(e.home, ".codex", "agents", "x-rev.toml"), filepath.Join(pb, "agents", "x-rev.toml"))
-	e.assertLink(filepath.Join(e.agentsSkills(), "x-a"), filepath.Join(pb, "skills", "x-a"))
-	e.mustRun(ExitOK, "check")
-
-	// In a project, Copilot reads .github, where prompts and instructions are linked too.
-	project := filepath.Join(e.root, "project")
-	if err := os.MkdirAll(project, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	e.app.Cwd = project
-	e.mustRun(ExitOK, "init", ".", "copilot")
-	e.mustRun(ExitOK, "add", "x", pb)
-	github := filepath.Join(project, ".github")
-	e.assertLink(filepath.Join(github, "prompts", "x-ask.prompt.md"), filepath.Join(pb, "prompts", "x-ask.prompt.md"))
-	e.assertLink(filepath.Join(github, "instructions", "x-java.instructions.md"),
-		filepath.Join(pb, "instructions", "x-java.instructions.md"))
-	e.mustRun(ExitOK, "remove", "x")
-	e.assertMissing(github)
-}
-
-func TestDefaultFoldersFollowTheAgent(t *testing.T) {
-	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "claude")
-	pb := e.playbook("p", "x-a")
-	write := func(rel string) {
-		path := filepath.Join(pb, filepath.FromSlash(rel))
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte("x\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	write("subagents/x-rev.md")
-
-	// Claude Code reads subagents from .claude/agents, so by default they are looked for in the playbook's agents/.
-	out, _ := e.mustRun(ExitOK, "add", "x", pb)
-	if strings.Contains(out, "subagent") {
-		t.Fatalf("unexpected output: %s", out)
-	}
-	e.assertMissing(filepath.Join(e.home, ".claude", "agents"))
-	e.mustRun(ExitOK, "remove", "x")
-
-	// With --subagents-path, its subagents/ folder is used, and kept in the profile.
-	out, _ = e.mustRun(ExitOK, "add", "x", pb, "-sap", "subagents")
-	if !strings.Contains(out, "1 subagent(s)") {
-		t.Fatalf("unexpected output: %s", out)
-	}
-	e.assertLink(filepath.Join(e.home, ".claude", "agents", "x-rev.md"), filepath.Join(pb, "subagents", "x-rev.md"))
-	if prof := e.config(); prof.Playbooks[0].Artifacts.Subagents.Path != "subagents" {
-		t.Fatalf("unexpected config: %+v", prof.Playbooks)
-	}
-
-	// A playbook without any folder its profile's agent reads cannot be added.
-	rulesOnly := filepath.Join(e.root, "rules-only")
-	if err := os.MkdirAll(filepath.Join(rulesOnly, "rules"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	e.mustRun(ExitOK, "profile", "add", "std", "standard")
-	_, errOut := e.mustRun(ExitFailure, "add", "y", rulesOnly, "-p", "std")
-	if !strings.Contains(errOut, "agent standard reads (skills/)") {
-		t.Fatalf("unexpected message: %s", errOut)
-	}
-	e.mustRun(ExitOK, "add", "y", rulesOnly) // Claude Code reads rules
-	e.mustRun(ExitFailure, "add", "z", pb, "-p", "std", "-cp", "missing")
-}
-
-func TestDoubleLoadWarning(t *testing.T) {
-	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "standard")
-	pb := e.playbook("p", "x-a")
-	e.mustRun(ExitOK, "add", "x", pb)
-	e.mustRun(ExitOK, "profile", "add", "claude", "claude")
-	e.mustRun(ExitOK, "add", "x", pb, "-p", "claude")
-	_, errOut := e.mustRun(ExitOK, "profile", "enable", "claude")
-	if strings.Contains(errOut, "loaded twice") {
-		t.Fatalf("claude does not read .agents: %s", errOut)
-	}
-	_, errOut = e.mustRun(ExitOK, "profile", "agent", "claude", "cursor")
-	if !strings.Contains(errOut, "skill x-a is linked for agent cursor (profile claude)") ||
-		!strings.Contains(errOut, "loaded twice") {
-		t.Fatalf("want a warning: %s", errOut)
-	}
-	_, errOut = e.mustRun(ExitOK, "check")
-	if !strings.Contains(errOut, "loaded twice") {
-		t.Fatalf("want a warning: %s", errOut)
-	}
-	// Profiles whose agents share a folder collide instead.
-	e.mustRun(ExitOK, "profile", "disable", "claude")
-	e.mustRun(ExitOK, "profile", "agent", "claude", "codex")
-	e.mustRun(ExitFailure, "profile", "enable", "claude")
-}
-
-func TestShortOptions(t *testing.T) {
-	e := newEnv(t)
-	claude := filepath.Join(e.home, ".claude")
-	e.mustRun(ExitOK, "init", "-g", "claude", "-p", "main")
-	if conf := e.baseConfig(); strings.Join(conf.Enabled, ",") != "main" {
-		t.Fatalf("base config = %+v", conf)
-	}
-	e.mustRun(ExitOK, "profile", "add", "work", "claude")
-
-	pb := filepath.Join(e.root, "flat")
-	e.skill(pb, "x-a")
-	e.mustRun(ExitOK, "add", "x", pb, "-sp", ".")
-	e.assertLink(filepath.Join(claude, "skills", "x-a"), filepath.Join(pb, "x-a"))
-	e.mustRun(ExitOK, "add", "x", pb, "-sp=.", "-p", "work")
-	e.mustRun(ExitOK, "update", "--all", "-p", "work")
-	e.mustRun(ExitOK, "list", "-p", "work")
-	e.mustRun(ExitOK, "check", "-p", "work")
-	e.mustRun(ExitOK, "remove", "x", "-p", "work")
-
-	_, errOut := e.mustRun(ExitUsage, "add", "y", pb, "-x")
-	if !strings.Contains(errOut, "unknown option: -x") {
-		t.Fatalf("unexpected message: %s", errOut)
-	}
-	e.mustRun(ExitUsage, "list", "-a", "standard") // init and profile accept -a only to say the agent is an argument
-	e.mustRun(ExitUsage, "add", "y", pb, "-sp")
-}
-
-func TestVersion(t *testing.T) {
+func TestHelpAndVersion(t *testing.T) {
 	e := newEnv(t)
 	for _, arg := range []string{"-v", "--version", "version"} {
 		out, _ := e.mustRun(ExitOK, arg)
@@ -1111,6 +830,23 @@ func TestVersion(t *testing.T) {
 	if !strings.Contains(errOut, "aiplam "+Version+" - AI Playbook Manager\n"+Copyright) {
 		t.Fatalf("unexpected help: %s", errOut)
 	}
+	for _, c := range commands {
+		out, _ := e.mustRun(ExitOK, c.name, "--help")
+		if !strings.HasPrefix(out, "Usage: aiplam "+c.name) {
+			t.Errorf("%s --help: %s", c.name, out)
+		}
+		for _, line := range strings.Split(out, "\n") {
+			if len([]rune(line)) > 120 {
+				t.Errorf("%s --help: line over 120 characters: %s", c.name, line)
+			}
+		}
+	}
+	out, _ := e.mustRun(ExitOK, "profile", "--help")
+	if !strings.Contains(out, "devin (and devin:standard): Devin") ||
+		!strings.Contains(out, "~/.config/devin/skills (Windows: %APPDATA%/devin/skills)") {
+		t.Fatalf("unexpected profile help:\n%s", out)
+	}
+	e.mustFail(ExitUsage, []string{"unknown command: check"}, "check")
 }
 
 func TestResolveVersion(t *testing.T) {
@@ -1139,685 +875,177 @@ func TestResolveVersion(t *testing.T) {
 	}
 }
 
-func TestPlaybookBehindSymlink(t *testing.T) {
-	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "standard")
-	pb := e.playbook("p", "x-a")
-	e.mustRun(ExitOK, "add", "x", pb)
-
-	// Move the playbook and leave a link at its old path: its links still lead to its skills.
-	moved := filepath.Join(e.root, "moved")
-	if err := os.Rename(pb, moved); err != nil {
+func TestSplitQuoted(t *testing.T) {
+	items, err := folderItems([]string{`skills:.agents/skills,rules:"a, b:c"`, `x:'y'`})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(moved, pb); err != nil {
-		t.Skipf("cannot create symbolic links: %v", err)
+	if len(items) != 3 || strings.Join(items[1], "|") != "rules|a, b:c" || strings.Join(items[2], "|") != "x|y" {
+		t.Fatalf("items: %q", items)
 	}
-	out, _ := e.mustRun(ExitOK, "update", "x")
-	if !strings.Contains(out, "up to date") {
-		t.Fatalf("unexpected output: %s", out)
-	}
-	e.mustRun(ExitOK, "check")
-	e.app.Cwd = moved // the real folder selects the playbook registered through the link
-	e.mustRun(ExitOK, "update")
-	e.mustRun(ExitOK, "remove", "x")
-	e.assertMissing(filepath.Join(e.agentsSkills(), "x-a"))
-}
-
-func TestFoldersAreRelativeToBase(t *testing.T) {
-	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "standard")
-	inside := filepath.Join(e.home, "playbooks", "p")
-	e.skill(filepath.Join(inside, "skills"), "x-a")
-	outside := e.playbook("q", "y-a")
-	e.mustRun(ExitOK, "add", "x", inside)
-	e.mustRun(ExitOK, "add", "y", outside)
-	prof := e.config()
-	if prof.Playbooks[0].Folder != "playbooks/p" || prof.Playbooks[1].Folder != "../q" {
-		t.Fatalf("folders = %q, %q", prof.Playbooks[0].Folder, prof.Playbooks[1].Folder)
-	}
-	// Links are relative too (junctions on Windows are always absolute).
-	link := filepath.Join(e.agentsSkills(), "x-a")
-	if target, err := os.Readlink(link); runtime.GOOS != "windows" && (err != nil || filepath.IsAbs(target)) {
-		t.Fatalf("link target = %q (%v), want a relative path", target, err)
-	}
-	e.assertLink(link, filepath.Join(inside, "skills", "x-a"))
-	e.mustRun(ExitOK, "check")
-	e.mustRun(ExitOK, "remove", inside)
-	e.assertMissing(link)
-}
-
-func TestArtifactsStayInsidePlaybook(t *testing.T) {
-	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "standard")
-	pb := e.playbook("p", "x-a")
-	other := e.playbook("other", "x-b")
-	for _, sp := range []string{"..", "../other/skills", "skills/../..", filepath.Join(e.root, "other")} {
-		e.mustRun(ExitUsage, "add", "x", pb, "-sp", sp)
-	}
-
-	// An artifact folder (skills), or a skill folder, that leads outside the playbook through a link is not used.
-	if err := os.Symlink(filepath.Join(other, "skills"), filepath.Join(pb, "linked")); err != nil {
-		t.Skipf("cannot create symbolic links: %v", err)
-	}
-	_, errOut := e.mustRun(ExitFailure, "add", "x", pb, "-sp", "linked")
-	if !strings.Contains(errOut, "outside the playbook folder") {
-		t.Fatalf("unexpected message: %s", errOut)
-	}
-	if err := os.Symlink(filepath.Join(other, "skills", "x-b"), filepath.Join(pb, "skills", "x-b")); err != nil {
-		t.Fatal(err)
-	}
-	e.mustRun(ExitOK, "add", "x", pb)
-	e.assertLink(filepath.Join(e.agentsSkills(), "x-a"), filepath.Join(pb, "skills", "x-a"))
-	e.assertMissing(filepath.Join(e.agentsSkills(), "x-b"))
-
-	// A hand-edited skills path leading outside is a configuration error.
-	e.writeProfile("default", "playbooks:\n  - name: x\n    folder: "+pb+"\n    artifacts:\n"+
-		"      skills:\n        path: ../other/skills\n")
-	_, errOut = e.mustRun(ExitFailure, "check")
-	if !strings.Contains(errOut, "inside the playbook folder") {
-		t.Fatalf("unexpected message: %s", errOut)
+	if _, err := folderItems([]string{"a,,b"}); err == nil {
+		t.Fatal("want an error for an empty item")
 	}
 }
 
-func TestProfileNameCase(t *testing.T) {
+func TestStatusReportsLeftoverLinks(t *testing.T) {
 	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "standard", "-p", "work")
-	if !config.ProfileExists(e.home, "Work") {
-		t.Skip("the file system distinguishes case: Work and work are different profiles")
-	}
-	pb := e.playbook("p", "x-a")
-	out, _ := e.mustRun(ExitOK, "add", "x", pb, "-p", "Work")
-	if strings.Contains(out, "not enabled") {
-		t.Fatalf("Work is the enabled profile work: %s", out)
-	}
-	e.assertLink(filepath.Join(e.agentsSkills(), "x-a"), filepath.Join(pb, "skills", "x-a"))
-	e.mustRun(ExitOK, "check", "-p", "Work")
-	e.mustRun(ExitFailure, "profile", "remove", "Work")
-}
-
-func TestFailedAddIsUndone(t *testing.T) {
-	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
-		t.Skip("needs a folder the current user cannot write to")
-	}
-	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "claude")
-	pb := e.playbook("p", "x-a")
-	if err := os.MkdirAll(filepath.Join(pb, "agents"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(pb, "agents", "x-r.md"), []byte("x\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	locked := filepath.Join(e.home, ".claude", "agents")
-	if err := os.MkdirAll(locked, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(locked, 0o555); err != nil {
-		t.Fatal(err)
-	}
-	defer os.Chmod(locked, 0o755)
-
-	_, errOut := e.mustRun(ExitFailure, "add", "x", pb)
-	if !strings.Contains(errOut, "undone") || !strings.Contains(errOut, "not registered") {
-		t.Fatalf("unexpected message: %s", errOut)
-	}
-	e.assertMissing(filepath.Join(e.home, ".claude", "skills", "x-a"))
-	if n := len(e.config().Playbooks); n != 0 {
-		t.Fatalf("%d playbooks registered", n)
-	}
-}
-
-func TestMessagesUseProfileAndHome(t *testing.T) {
-	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "standard")
-	pb := e.playbook("p", "x-a")
-	if err := os.MkdirAll(filepath.Join(e.agentsSkills(), "x-a"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	_, errOut := e.mustRun(ExitFailure, "add", "x", pb)
-	if !strings.Contains(errOut, "'~"+string(filepath.Separator)+".agents") {
-		t.Fatalf("conflict should show ~ paths: %s", errOut)
-	}
-
-	e.mustRun(ExitOK, "profile", "add", "work", "standard")
-	e.mustRun(ExitOK, "add", "x", pb, "-p", "work")
-	_, errOut = e.mustRun(ExitFailure, "add", "x", pb, "-p", "work")
-	if !strings.Contains(errOut, "'aiplam update x --profile work'") {
-		t.Fatalf("hint should name the profile: %s", errOut)
-	}
-	_, errOut = e.mustRun(ExitFailure, "add", "x", pb, "-p", "default")
-	if strings.Contains(errOut, "--profile") {
-		t.Fatalf("hint should not name the enabled profile: %s", errOut)
-	}
-}
-
-func TestBaseFolders(t *testing.T) {
-	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "standard")
-	e.mustRun(ExitOK, "profile", "add", "claude", "claude")
-	e.mustRun(ExitOK, "profile", "enable", "claude")
-	project := filepath.Join(e.root, "project")
-	module := filepath.Join(project, "module")
-	if err := os.MkdirAll(module, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	pb := e.playbook("p", "x-a", "y-a")
-	other := e.playbook("o", "z-a")
-
-	// Outside any configuration, commands use the home folder's.
-	e.app.Cwd = module
-	out, _ := e.mustRun(ExitOK, "list")
-	if !strings.Contains(out, "Base folder: ~\n") {
-		t.Fatalf("unexpected list: %s", out)
-	}
-
-	// A project configuration, found from its subfolders.
-	out, _ = e.mustRun(ExitOK, "init", project, "standard")
-	if strings.Contains(out, "git repository") ||
-		!strings.Contains(out, "the home folder at "+e.home+string(filepath.Separator)+
-			" is also being used as a base folder for playbook management, and agents always read") {
-		t.Fatalf("unexpected notes: %s", out) // not inside a repository; outside home, so home is a higher-level base folder
-	}
-	if fsutil.IsDir(filepath.Join(project, ".agents")) || fsutil.IsDir(filepath.Join(project, ".claude")) {
-		t.Fatal("init should not create agents configuration folders")
-	}
-	out, _ = e.mustRun(ExitOK, "add", "x", pb)
-	if !strings.HasPrefix(out, "Base folder: "+project+"\n") {
-		t.Fatalf("unexpected output: %s", out)
-	}
-	projectSkills := filepath.Join(project, ".agents", "skills")
-	e.assertLink(filepath.Join(projectSkills, "x-a"), filepath.Join(pb, "skills", "x-a"))
-	e.assertMissing(filepath.Join(e.agentsSkills(), "x-a"))
-	if f, err := config.LoadProfile(project, "default"); err != nil || f.Playbooks[0].Folder != "../p" {
-		t.Fatalf("profile = %+v (%v)", f, err)
-	}
-
-	// --global and --base choose the configuration explicitly.
-	e.mustRun(ExitOK, "add", "z", other, "-g", "-p", "default")
-	e.mustRun(ExitOK, "add", "z", other, "-g", "-p", "claude")
-	e.assertLink(filepath.Join(e.agentsSkills(), "z-a"), filepath.Join(other, "skills", "z-a"))
-	e.app.Cwd = e.root
-	e.mustRun(ExitOK, "add", "y", pb, "--base", project)
-	e.assertLink(filepath.Join(projectSkills, "y-a"), filepath.Join(pb, "skills", "y-a"))
-	e.mustRun(ExitUsage, "list", "-b", project, "-g")
-	_, errOut := e.mustRun(ExitFailure, "list", "-b", module)
-	if !strings.Contains(errOut, "aiplam init") {
-		t.Fatalf("unexpected message: %s", errOut)
-	}
-
-	// The home folder is a higher-level base folder for a project outside it: a skill linked from either cannot be
-	// linked from the other.
-	e.app.Cwd = module
-	_, errOut = e.mustRun(ExitFailure, "add", "z", other)
-	if !strings.Contains(errOut, "higher-level base folder") || !strings.Contains(errOut, "--base <basefolder>") ||
-		strings.Contains(errOut, "what is in the way") {
-		t.Fatalf("unexpected message: %s", errOut)
-	}
-	e.assertMissing(filepath.Join(projectSkills, "z-a"))
-	// Only checked upwards: the project's links are not seen from home.
-	e.mustRun(ExitOK, "add", "x", pb, "-g", "-p", "default")
-	_, errOut = e.mustRun(ExitFailure, "check")
-	if !strings.Contains(errOut, "agents reading both would see it twice") {
-		t.Fatalf("check should report the duplicate: %s", errOut)
-	}
-	e.mustRun(ExitOK, "remove", "x", "-g", "-p", "default")
-	e.mustRun(ExitOK, "check")
-
-	// list --all lists every base folder, nearest first.
-	out, _ = e.mustRun(ExitOK, "list", "--all", "--json")
-	var levels []listOutput
-	if err := json.Unmarshal([]byte(out), &levels); err != nil {
-		t.Fatalf("invalid JSON: %v\n%s", err, out)
-	}
-	if len(levels) != 2 || levels[0].Base != project || levels[1].Base != e.home ||
-		len(levels[1].Profiles) != 2 || levels[1].Profiles[1].Agent != "claude" {
-		t.Fatalf("unexpected levels: %+v", levels)
-	}
-	out, _ = e.mustRun(ExitOK, "list", "--all")
-	if strings.Count(out, "Base folder: ") != 2 {
-		t.Fatalf("unexpected list: %s", out)
-	}
-	e.mustRun(ExitUsage, "list", "--all", "-p", "default")
-
-	// A nested configuration inside a git repository.
-	if err := os.Mkdir(filepath.Join(project, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	out, _ = e.mustRun(ExitOK, "init", ".", "claude")
-	if !strings.Contains(out, "git repository") ||
-		!strings.Contains(out, "higher-level base folders exist: the home folder") ||
-		!strings.Contains(out, "whose agents configuration folders some agents read too") ||
-		!strings.Contains(out, "/.claude/skills/<name>-*") ||
-		!strings.Contains(out, "'"+filepath.Join(module, ".gitignore")+"'") {
-		t.Fatalf("unexpected notes: %s", out)
-	}
-	// Only artifacts linked for the same agent collide: z is in ~/.claude, x only in the project's .agents.
-	_, errOut = e.mustRun(ExitFailure, "add", "z", other)
-	if !strings.Contains(errOut, "higher-level base folder") {
-		t.Fatalf("unexpected message: %s", errOut)
-	}
-	e.mustRun(ExitOK, "add", "x", pb)
-	e.assertLink(filepath.Join(module, ".claude", "skills", "x-a"), filepath.Join(pb, "skills", "x-a"))
-	e.mustRun(ExitOK, "check")
-}
-
-func TestBaseDiscoveryAndHints(t *testing.T) {
-	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "standard")
-	project := filepath.Join(e.root, "project")
-	elsewhere := filepath.Join(e.root, "elsewhere")
-	for _, dir := range []string{project, elsewhere} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	pb := e.playbook("p", "x-a")
-
-	// init from another folder: suggested commands name the new base folder.
-	e.app.Cwd = elsewhere
-	out, _ := e.mustRun(ExitOK, "init", project, "standard")
-	if !strings.Contains(out, "'aiplam add <name> <playbookfolder> --base "+project+"'") {
-		t.Fatalf("hint should name the base folder: %s", out)
-	}
-	_, errOut := e.mustRun(ExitFailure, "init", project, "standard")
-	if !strings.Contains(errOut, "'aiplam profile --base "+project+"'") {
-		t.Fatalf("hint should name the base folder: %s", errOut)
-	}
-	out, _ = e.mustRun(ExitOK, "profile", "add", "work", "standard", "-b", project)
-	if !strings.Contains(out, "'aiplam profile enable work --base "+project+"'") {
-		t.Fatalf("hint should name the base folder: %s", out)
-	}
-
-	// From inside a linked skill, the base folder is the one above the link, not the playbook's.
-	e.app.Cwd = project
-	e.mustRun(ExitOK, "add", "x", pb)
-	e.app.Cwd = filepath.Join(project, ".agents", "skills", "x-a")
-	out, _ = e.mustRun(ExitOK, "list")
-	if !strings.HasPrefix(out, "Base folder: "+project+"\n") {
-		t.Fatalf("unexpected list: %s", out)
-	}
-
-	// A .aiplam folder makes a base folder, even without its configuration.
-	empty := filepath.Join(e.root, "empty")
-	if err := os.MkdirAll(filepath.Join(empty, ".aiplam"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	e.app.Cwd = empty
-	_, errOut = e.mustRun(ExitFailure, "list")
-	if !strings.Contains(errOut, "aiplam init") {
-		t.Fatalf("unexpected message: %s", errOut)
-	}
-	e.mustRun(ExitOK, "init", ".", "standard")
-
-	// list --all reports a higher-level base folder it cannot read and lists the others.
-	nested := filepath.Join(project, "nested")
-	if err := os.MkdirAll(nested, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	e.app.Cwd = nested
-	e.mustRun(ExitOK, "init", ".", "standard")
-	if err := os.WriteFile(config.BaseConfigFile(project), []byte("types: [nope]\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	out, errOut = e.mustRun(ExitFailure, "list", "--all")
-	if !strings.Contains(out, "Base folder: "+nested) || !strings.Contains(out, "Base folder: ~") ||
-		!strings.Contains(errOut, config.BaseConfigName+".yaml") {
-		t.Fatalf("unexpected list: %s / %s", out, errOut)
-	}
-}
-
-// file creates a file (and its folders) at a path relative to dir.
-func (e *env) file(dir, rel string) string {
-	e.t.Helper()
-	path := filepath.Join(dir, filepath.FromSlash(rel))
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		e.t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte("x\n"), 0o644); err != nil {
-		e.t.Fatal(err)
-	}
-	return path
-}
-
-func TestUpdateFileArtifacts(t *testing.T) {
-	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "claude")
-	pb := e.playbook("p", "x-a")
-	sub := e.file(pb, "agents/x-r.md")
-	e.mustRun(ExitOK, "add", "x", pb)
-	claude := filepath.Join(e.home, ".claude")
-	e.assertLink(filepath.Join(claude, "agents", "x-r.md"), sub)
-
-	// Another version of the playbook: the subagent is gone, a command is new.
-	if err := os.Remove(sub); err != nil {
-		t.Fatal(err)
-	}
-	cmd := e.file(pb, "commands/x-go.md")
-	_, errOut := e.mustRun(ExitFailure, "check")
-	if !strings.Contains(errOut, "would remove") || !strings.Contains(errOut, "would link") {
-		t.Fatalf("check should report the changes: %s", errOut)
-	}
-	out, _ := e.mustRun(ExitOK, "update", "x")
-	if !strings.Contains(out, "x-r.md (broken link: its artifact no longer exists)") ||
-		!strings.Contains(out, "agents (empty folder removed)") {
-		t.Fatalf("unexpected output: %s", out)
-	}
-	e.assertMissing(filepath.Join(claude, "agents"))
-	e.assertLink(filepath.Join(claude, "commands", "x-go.md"), cmd)
-	e.mustRun(ExitOK, "check")
-	out, _ = e.mustRun(ExitOK, "update", "--all")
-	if !strings.Contains(out, "up to date") {
-		t.Fatalf("unexpected output: %s", out)
-	}
-}
-
-func TestCheckReportsBrokenFileLinks(t *testing.T) {
-	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "claude")
-	pb := e.playbook("p", "x-a")
-	e.mustRun(ExitOK, "add", "x", pb)
-	stray := filepath.Join(e.home, ".claude", "skills", "old-skill")
-	if err := fsutil.CreateLink(stray, filepath.Join(e.root, "gone")); err != nil {
-		t.Fatal(err)
-	}
-	_, errOut := e.mustRun(ExitFailure, "check")
-	if !strings.Contains(errOut, "broken link") || !strings.Contains(errOut, "old-skill") {
-		t.Fatalf("unexpected message: %s", errOut)
-	}
-}
-
-func TestHomeAndProjectFoldersDiffer(t *testing.T) {
-	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "copilot")
-	pb := e.playbook("p", "x-a")
-	e.file(pb, "prompts/x-ask.prompt.md")
-	out, _ := e.mustRun(ExitOK, "add", "x", pb)
-	if strings.Contains(out, "prompt") {
-		t.Fatalf("Copilot reads prompts in projects only: %s", out)
-	}
-	e.assertLink(filepath.Join(e.home, ".copilot", "skills", "x-a"), filepath.Join(pb, "skills", "x-a"))
-	e.assertMissing(filepath.Join(e.home, ".github"))
-
-	// In a project, Copilot reads .github: the skill linked from ~/.copilot is refused there.
-	project := filepath.Join(e.home, "project")
-	if err := os.MkdirAll(project, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	e.app.Cwd = project
-	e.mustRun(ExitOK, "init", ".", "copilot")
-	_, errOut := e.mustRun(ExitFailure, "add", "x", pb)
-	if !strings.Contains(errOut, "'~"+string(filepath.Separator)+filepath.Join(".copilot", "skills", "x-a")+"'") ||
-		!strings.Contains(errOut, "agent copilot") {
-		t.Fatalf("unexpected message: %s", errOut)
-	}
-	e.mustRun(ExitOK, "remove", "x", "-g")
-	out, _ = e.mustRun(ExitOK, "add", "x", pb)
-	if !strings.Contains(out, "1 skill(s), 1 prompt(s)") {
-		t.Fatalf("unexpected output: %s", out)
-	}
-	e.assertLink(filepath.Join(project, ".github", "skills", "x-a"), filepath.Join(pb, "skills", "x-a"))
-	e.assertMissing(filepath.Join(e.home, ".copilot")) // removed once empty
-}
-
-func TestHomeConfigFolders(t *testing.T) {
-	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "opencode")
-	pb := e.playbook("p", "x-a")
-	e.file(pb, "rules/x-style.md")
-	e.mustRun(ExitOK, "add", "x", pb)
-	e.assertLink(filepath.Join(e.home, ".config", "opencode", "skills", "x-a"), filepath.Join(pb, "skills", "x-a"))
-
-	// Devin keeps rules in ~/.devin but everything else in ~/.config/devin.
-	e.mustRun(ExitOK, "profile", "agent", "default", "devin")
-	e.assertMissing(filepath.Join(e.home, ".config", "opencode"))
-	if !fsutil.IsDir(filepath.Join(e.home, ".config")) {
-		t.Fatal("~/.config is not an agents configuration folder and must stay")
-	}
-	e.assertLink(filepath.Join(e.home, ".config", "devin", "skills", "x-a"), filepath.Join(pb, "skills", "x-a"))
-	e.assertLink(filepath.Join(e.home, ".devin", "rules", "x-style.md"), filepath.Join(pb, "rules", "x-style.md"))
-	e.mustRun(ExitOK, "profile", "disable", "default")
-	e.assertMissing(filepath.Join(e.home, ".devin"))
-	e.assertMissing(filepath.Join(e.home, ".config", "devin"))
-}
-
-func TestExplicitPathSurvivesAgentChange(t *testing.T) {
-	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "claude")
-	pb := e.playbook("p", "x-a")
-	sub := e.file(pb, "ai/subagents/x-r.md")
-	e.file(pb, "agents/x-default.md")
-	e.mustRun(ExitOK, "add", "x", pb, "--subagents-path", "ai/subagents")
-	e.assertLink(filepath.Join(e.home, ".claude", "agents", "x-r.md"), sub)
-	e.assertMissing(filepath.Join(e.home, ".claude", "agents", "x-default.md"))
-	e.mustRun(ExitOK, "profile", "agent", "default", "cursor")
-	e.assertLink(filepath.Join(e.home, ".cursor", "agents", "x-r.md"), sub)
-	if p := e.config().Playbooks[0]; p.Artifacts.Subagents.Path != "ai/subagents" || p.Artifacts.Skills.Path != "" {
-		t.Fatalf("unexpected config: %+v", p)
-	}
-	_, errOut := e.mustRun(ExitUsage, "add", "y", pb, "-sap", "../outside")
-	if !strings.Contains(errOut, "--subagents-path must be a path inside the playbook folder") {
-		t.Fatalf("unexpected message: %s", errOut)
-	}
-}
-
-func TestListJSONKinds(t *testing.T) {
-	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "claude")
-	pb := e.playbook("p", "x-a")
-	e.file(pb, "agents/x-r.md")
-	e.mustRun(ExitOK, "add", "x", pb)
-	if err := os.Remove(filepath.Join(e.home, ".claude", "agents", "x-r.md")); err != nil {
-		t.Fatal(err)
-	}
-	out, _ := e.mustRun(ExitOK, "list", "--json")
-	var list listOutput
-	if err := json.Unmarshal([]byte(out), &list); err != nil {
-		t.Fatal(err)
-	}
-	p := list.Profiles[0]
-	if p.Agent != "claude" || len(p.Playbooks[0].Artifacts) != 4 {
-		t.Fatalf("unexpected list: %+v", p)
-	}
-	sub := p.Playbooks[0].Artifacts[1]
-	if sub.Kind != "subagents" || sub.Path != "agents" || sub.LinkFolder != filepath.Join(e.home, ".claude", "agents") ||
-		len(sub.Items) != 1 || sub.Items[0].Linked {
-		t.Fatalf("unexpected subagents: %+v", sub)
-	}
-	out, _ = e.mustRun(ExitOK, "list")
-	notLinked := "x-r.md  (not linked from ~" + string(filepath.Separator) + filepath.Join(".claude", "agents")
-	if !strings.Contains(out, notLinked) ||
-		!strings.Contains(out, "agent claude (Claude Code)") || strings.Contains(out, "commands (") {
-		t.Fatalf("unexpected list: %s", out)
-	}
-}
-
-func TestProfileSwitchBetweenAgents(t *testing.T) {
-	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "standard")
-	pb := e.playbook("p", "x-a")
-	e.mustRun(ExitOK, "add", "x", pb)
-	e.mustRun(ExitOK, "profile", "add", "claude", "claude")
-	e.mustRun(ExitOK, "add", "x", pb, "-p", "claude")
-	out, _ := e.mustRun(ExitOK, "profile", "switch", "claude")
-	if !strings.Contains(out, "Disabling default; enabling claude") {
-		t.Fatalf("unexpected output: %s", out)
-	}
-	e.assertMissing(filepath.Join(e.home, ".agents"))
-	e.assertLink(filepath.Join(e.home, ".claude", "skills", "x-a"), filepath.Join(pb, "skills", "x-a"))
-	e.mustRun(ExitOK, "profile", "switch", "default,claude") // different folders: no collision
-	e.assertLink(filepath.Join(e.agentsSkills(), "x-a"), filepath.Join(pb, "skills", "x-a"))
-	out, _ = e.mustRun(ExitOK, "profile", "list")
-	if !strings.Contains(out, "* claude               claude") ||
-		!strings.Contains(out, "* default              standard") {
-		t.Fatalf("unexpected list: %s", out)
-	}
-	_, errOut := e.mustRun(ExitFailure, "add", "y", pb)
-	if !strings.Contains(errOut, "2 profiles are enabled") {
-		t.Fatalf("unexpected message: %s", errOut)
-	}
-}
-
-func TestRemoveKeepsHandAddedFiles(t *testing.T) {
-	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "claude")
-	pb := e.playbook("p", "x-a")
-	e.file(pb, "agents/x-r.md")
-	e.mustRun(ExitOK, "add", "x", pb)
-	mine := e.file(e.home, ".claude/agents/mine.md")
-	settings := e.file(e.home, ".claude/settings.json")
-	out, _ := e.mustRun(ExitOK, "remove", "x")
-	if !strings.Contains(out, "skills (empty folder removed)") || strings.Contains(out, "agents (empty") {
-		t.Fatalf("unexpected output: %s", out)
-	}
-	if !fsutil.IsFile(mine) || !fsutil.IsFile(settings) {
-		t.Fatal("files added by hand were removed")
-	}
-	e.assertMissing(filepath.Join(e.home, ".claude", "agents", "x-r.md"))
-	e.assertMissing(filepath.Join(e.home, ".claude", "skills"))
-}
-
-func TestAgentsHelp(t *testing.T) {
-	e := newEnv(t)
-	out, _ := e.mustRun(ExitOK, "profile", "--help")
-	for _, want := range []string{"copilot   GitHub Copilot", ".github/agents, ~/.copilot/agents (.agent.md files)",
-		".github/prompts, not in the home folder", "custom agent definitions"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("profile help lacks %q", want)
-		}
-	}
-	out, _ = e.mustRun(ExitOK, "--help")
-	if !strings.Contains(out, "Agents: "+strings.Join(config.AgentNames(), ", ")) {
-		t.Errorf("main help lacks the agents: %s", out)
-	}
-	for _, args := range [][]string{{}, {"init"}, {"add"}, {"update"}, {"remove"}, {"list"}, {"check"}, {"profile"}} {
-		out, _ := e.mustRun(ExitOK, append(args, "--help")...)
-		for i, line := range strings.Split(out, "\n") {
-			if n := len([]rune(line)); n > 120 {
-				t.Errorf("%v help, line %d: %d characters", args, i+1, n)
-			}
-		}
-	}
-}
-
-func TestSandbox(t *testing.T) {
-	e := newEnv(t)
-	outside := filepath.Join(e.root, "outside")
-	if err := os.MkdirAll(outside, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	e.mustRun(ExitOK, "init", outside, "claude") // the real configuration, set up before the sandbox
-	e.app.Sandbox = e.home
-	for _, args := range [][]string{
-		{"init", e.root, "claude"},         // init outside the sandbox
-		{"list"},                           // the base folder found from a current folder outside the sandbox
-		{"profile", "list", "-b", outside}, // a base folder given outside the sandbox
-	} {
-		e.app.Cwd = outside
-		_, errOut := e.mustRun(ExitFailure, args...)
-		if !strings.Contains(errOut, "is outside the aiplam sandbox ('"+e.home+"')") {
-			t.Fatalf("%v: unexpected message: %s", args, errOut)
-		}
-	}
-	if fsutil.IsDir(filepath.Join(e.root, ".aiplam")) {
-		t.Fatal("init outside the sandbox should create nothing")
-	}
-	e.app.Cwd = e.home
-	e.mustRun(ExitOK, "init", "-g", "claude")
-	e.mustRun(ExitOK, "list")
-	project := filepath.Join(e.home, "project")
-	if err := os.MkdirAll(project, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	e.mustRun(ExitOK, "init", project, "standard")
-}
-
-func TestCheckMissingPlaybookFolder(t *testing.T) {
-	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "standard")
+	e.mustRun(ExitOK, "init", "-u", "-a", "standard")
 	pb := e.playbook("pb", "x-a")
 	e.mustRun(ExitOK, "add", "x", pb)
-	if err := os.Rename(pb, pb+"-moved"); err != nil {
+	e.mustRun(ExitOK, "status")
+
+	// A profile removed from the enabled ones by hand: its links stay, and status reports them.
+	if err := config.SaveConfig(e.home, &config.Config{}); err != nil {
 		t.Fatal(err)
 	}
-	_, errOut := e.mustRun(ExitFailure, "check")
-	if !strings.Contains(errOut, "playbook folder '"+pb+"' does not exist") ||
-		strings.Contains(errOut, "not managed by any registered playbook") {
-		t.Fatalf("unexpected message: %s", errOut)
-	}
-	// Removing the playbook removes its broken links.
-	e.mustRun(ExitOK, "remove", "x")
-	e.assertMissing(filepath.Join(e.agentsSkills(), "x-a"))
-	e.mustRun(ExitOK, "check")
-}
+	e.mustFail(ExitFailure, []string{"~/.agents/skills/x-a -> " + filepath.Join(pb, "skills", "x-a") + " leads into " +
+		"a registered playbook folder, but it belongs to no playbook of the enabled profiles", "1 item(s)"}, "status")
 
-func TestListMissingEnabledProfile(t *testing.T) {
-	e := newEnv(t)
-	e.mustRun(ExitOK, "init", "-g", "standard")
-	e.mustRun(ExitOK, "add", "x", e.playbook("pb", "x-a"))
-	if err := config.SaveBaseConfig(e.home, &config.BaseConfig{Enabled: []string{"default", "ghost"}}); err != nil {
+	// A playbook's mapping changed by hand (here, its name, so its format): the old links are reported too.
+	if err := config.SaveConfig(e.home, &config.Config{Enabled: []string{"default"}}); err != nil {
 		t.Fatal(err)
 	}
-
-	// list warns, and lists the other enabled profiles.
-	out, errOut := e.mustRun(ExitOK, "list")
-	if !strings.Contains(errOut, "WARNING: the enabled profile 'ghost' does not exist") ||
-		!strings.Contains(errOut, "'aiplam profile disable ghost'") || !strings.Contains(out, "Profile default") ||
-		!strings.Contains(out, "x-a") {
-		t.Fatalf("unexpected list: %s\n%s", out, errOut)
-	}
-	out, _ = e.mustRun(ExitOK, "list", "--json")
-	var listed listOutput
-	if err := json.Unmarshal([]byte(out), &listed); err != nil {
+	prof := e.profile(e.home, "default")
+	prof.Playbooks[0].Name = "z"
+	if err := config.SaveProfile(e.home, prof); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(listed.MissingProfiles, ",") != "ghost" || len(listed.Profiles) != 1 {
-		t.Fatalf("unexpected JSON: %s", out)
-	}
-
-	// Commands that change links still fail: the missing profile's links cannot be accounted for.
-	e.mustRun(ExitFailure, "update", "--all")
-
-	if err := config.SaveBaseConfig(e.home, &config.BaseConfig{Enabled: []string{"ghost"}}); err != nil {
+	e.mustFail(ExitFailure, []string{"leads into a registered playbook folder"}, "status")
+	prof.Playbooks[0].Name = "x"
+	if err := config.SaveProfile(e.home, prof); err != nil {
 		t.Fatal(err)
 	}
-	out, _ = e.mustRun(ExitOK, "list")
-	if !strings.Contains(out, "None of the enabled profiles exists") || strings.Contains(out, "No profile is enabled") {
-		t.Fatalf("unexpected list: %s", out)
+	e.mustRun(ExitOK, "status")
+
+	// Links to elsewhere are not aiplam's: not reported. A profile that is not enabled and not valid is warned about,
+	// without counting.
+	if err := os.Symlink(e.root, filepath.Join(e.homeSkills(), "mine")); err != nil {
+		t.Fatal(err)
+	}
+	e.writeProfile(e.home, "broken", "name: other\n")
+	_, errOut := e.mustRun(ExitOK, "status")
+	if !strings.Contains(errOut, "the profile cannot be enabled until it is fixed") || strings.Contains(errOut, "mine") {
+		t.Fatalf("unexpected warnings: %s", errOut)
+	}
+	out, _ := e.mustRun(ExitOK, "profile", "list")
+	if !strings.Contains(out, "broken") || !strings.Contains(out, "problem(s) to fix by hand") {
+		t.Fatalf("unexpected list:\n%s", out)
 	}
 }
 
-func TestInitEdgeCases(t *testing.T) {
+func TestStatusReportsEachConflictOnce(t *testing.T) {
 	e := newEnv(t)
-	file := filepath.Join(e.root, "afile")
-	if err := os.WriteFile(file, nil, 0o644); err != nil {
+	e.mustRun(ExitOK, "init", "-u", "-a", "standard", "-p", "a")
+	e.mustRun(ExitOK, "profile", "add", "b", "-a", "standard")
+	pb := e.playbook("pb", "x-a")
+	e.mustRun(ExitOK, "add", "x", pb, "-p", "a,b")
+	// Both enabled by hand: the same playbook in two enabled profiles is one problem.
+	if err := config.SaveConfig(e.home, &config.Config{Enabled: []string{"a", "b"}}); err != nil {
 		t.Fatal(err)
 	}
-	_, errOut := e.mustRun(ExitFailure, "init", file, "claude")
-	if !strings.Contains(errOut, "is not a folder") {
-		t.Fatalf("unexpected message: %s", errOut)
+	_, errOut := e.mustRun(ExitFailure, "status")
+	if n := strings.Count(errOut, "the same playbook cannot be in two enabled profiles"); n != 1 {
+		t.Fatalf("reported %d times:\n%s", n, errOut)
 	}
+}
 
-	// A base folder whose configuration file was lost: init keeps the existing profile, and says how to recover it.
-	e.mustRun(ExitOK, "init", "-g", "standard")
-	e.mustRun(ExitOK, "add", "x", e.playbook("pb", "x-a"))
-	if err := os.Remove(config.BaseConfigFile(e.home)); err != nil {
+func TestHintsNameTheManagedFolder(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init", "-u", "-a", "standard")
+	project := e.mkdir(filepath.Join(e.home, "project"))
+	e.mustRun(ExitOK, "init", project, "-a", "standard")
+	// Listing another managed folder: suggested commands are run from inside it.
+	e.app.Cwd = e.home
+	out, _ := e.mustRun(ExitOK, "list", project)
+	if !strings.Contains(out, "'cd ~/project && aiplam add <name> <playbookfolder>'") {
+		t.Fatalf("unexpected hint:\n%s", out)
+	}
+	// Listing the user managed folder from elsewhere: with --user.
+	e.app.Cwd = project
+	out, _ = e.mustRun(ExitOK, "list", e.home)
+	if !strings.Contains(out, "'aiplam add <name> <playbookfolder> --user'") {
+		t.Fatalf("unexpected hint:\n%s", out)
+	}
+	// The managed folder the current folder leads to: plain commands.
+	out, _ = e.mustRun(ExitOK, "list", ".")
+	if !strings.Contains(out, "'aiplam add <name> <playbookfolder>'") {
+		t.Fatalf("unexpected hint:\n%s", out)
+	}
+}
+
+func TestInitNotesManagedFolderAbove(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init", "-u", "-a", "standard")
+	outside := e.mkdir(filepath.Join(e.root, "outside"))
+	out, _ := e.mustRun(ExitOK, "init", outside, "-a", "standard")
+	if strings.Contains(out, "is inside managed folder") { // the home folder applies outside it, but does not hold it
+		t.Fatalf("unexpected note:\n%s", out)
+	}
+	inside := e.mkdir(filepath.Join(e.home, "w", "inside"))
+	out, _ = e.mustRun(ExitOK, "init", inside, "-a", "standard")
+	if !strings.Contains(out, "'~/w/inside' is inside managed folder '~'") {
+		t.Fatalf("missing note:\n%s", out)
+	}
+}
+
+func TestBrokenProfileCanBeDisabled(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init", "-u", "-a", "standard", "-p", "a,b")
+	pb := e.playbook("pb", "x-a")
+	e.mustRun(ExitOK, "add", "x", pb, "-p", "a")
+	e.writeProfile(e.home, "b", "name: B\nagent: standard\ntargets:\n  skills: .agents/skills\n")
+	e.mustFail(ExitFailure, []string{"it must be 'b'"}, "status")
+	// Enabling needs every enabled profile, but disabling and removing work around a broken one.
+	e.mustRun(ExitOK, "profile", "add", "c", "-a", "standard")
+	e.mustFail(ExitFailure, []string{"it must be 'b'"}, "profile", "enable", "c")
+	_, errOut := e.mustRun(ExitOK, "profile", "disable", "b")
+	if !strings.Contains(errOut, "profile 'b' cannot be loaded") {
+		t.Fatalf("want a warning: %s", errOut)
+	}
+	e.assertLink(filepath.Join(e.homeSkills(), "x-a"), filepath.Join(pb, "skills", "x-a"))
+	e.mustRun(ExitOK, "profile", "remove", "b")
+	if config.ProfileExists(e.home, "b") || e.enabled(e.home) != "a" {
+		t.Fatal("the broken profile was not removed")
+	}
+	e.mustRun(ExitOK, "profile", "enable", "c")
+}
+
+func TestProfileShow(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init", "-u", "-a", "claude")
+	pb := e.playbook("pb", "x-a")
+	e.file("pb/agents/r.md")
+	e.mustRun(ExitOK, "add", "x", pb, "-f", "subagents:agents:*.md")
+	out, _ := e.mustRun(ExitOK, "profile", "show", "default")
+	for _, want := range []string{"Profile default (~/.aiplam/default.yaml): enabled, agent claude",
+		"  skills: .claude/skills\n", "  x: " + pb + " (unknown)\n",
+		"    skills: " + filepath.Join(pb, "skills") + ", format 'x-*': 1 artifact(s)",
+		"    subagents: " + filepath.Join(pb, "agents") + ", format '*.md': 1 artifact(s)",
+		"    rules: " + filepath.Join(pb, "rules") + ", format 'x-*': not found"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+	e.mustRun(ExitOK, "profile", "add", "empty", "-a", "standard")
+	out, _ = e.mustRun(ExitOK, "profile", "show", "empty")
+	if !strings.Contains(out, "not enabled, agent standard") || !strings.Contains(out, "No playbooks are registered") {
+		t.Fatalf("unexpected output:\n%s", out)
+	}
+	e.mustFail(ExitFailure, []string{"profile 'nope' does not exist"}, "profile", "show", "nope")
+	e.mustFail(ExitUsage, []string{"profile show needs one profile name"}, "profile", "show")
+}
+
+func TestFailedInitIsUndone(t *testing.T) {
+	e := newEnv(t)
+	project := e.mkdir(filepath.Join(e.root, "project"))
+	// A folder where the second profile's file must go makes saving it fail.
+	e.mkdir(filepath.Join(project, ".aiplam", "b.yaml"))
+	e.mustRun(ExitFailure, "init", project, "-a", "standard", "-p", "a,b")
+	e.assertMissing(config.ProfileFile(project, "a"))
+	e.assertMissing(config.ConfigFile(project))
+	if err := os.Remove(filepath.Join(project, ".aiplam", "b.yaml")); err != nil {
 		t.Fatal(err)
 	}
-	_, errOut = e.mustRun(ExitFailure, "init", "-g", "standard")
-	if !strings.Contains(errOut, "from an earlier setup of this base folder") ||
-		!strings.Contains(errOut, "'enabled: [default]'") || strings.Contains(errOut, "remove it") {
-		t.Fatalf("unexpected message: %s", errOut)
-	}
-	if prof, err := config.LoadProfile(e.home, "default"); err != nil || len(prof.Playbooks) != 1 {
-		t.Fatalf("the existing profile should be kept: %+v (%v)", prof, err)
-	}
-
-	_, errOut = e.mustRun(ExitUsage, "help", "nosuchcommand")
-	if !strings.Contains(errOut, "unknown command: nosuchcommand") {
-		t.Fatalf("unexpected message: %s", errOut)
-	}
-	if out, _ := e.mustRun(ExitOK, "help", "init"); !strings.HasPrefix(out, "Usage: aiplam init") {
-		t.Fatalf("unexpected help: %s", out)
-	}
+	e.mustRun(ExitOK, "init", project, "-a", "standard", "-p", "a,b")
 }
