@@ -1,35 +1,54 @@
 # aiplam: AI Playbook Manager
 
 `aiplam` makes coding agents (Claude Code, GitHub Copilot, Cursor, Codex, Gemini CLI, ...) use the skills, subagents,
-commands and other artifacts of **AI playbooks**: git repositories of such artifacts shared by a team or by a family
-of related projects.
+commands and rules of **AI playbooks**: git repositories of such artifacts, shared by a team or by a family of related
+projects.
 
-Each developer keeps a local clone of each playbook, checked out at the tag (or commit) they want to use. `aiplam`
-registers those clones and links their artifacts into the **target folders** that coding agents read them from
-(`.agents/skills`, `.claude/agents`, `.github/prompts`, ...), in the home folder or in any folder where agent sessions
-start. Agents follow the links and read the files straight from the clones, so switching a clone to another tag and
-running `aiplam update` is all an update takes.
+- Each developer keeps a local clone of each playbook, checked out at the tag (or commit) they want to use.
+- `aiplam` links the artifacts of those clones into the folders that agents read them from (`.claude/skills`,
+  `.github/agents`, ...).
+- Agents follow the links, so they read the files straight from the clones.
+- Updating a playbook is switching its clone to another tag and running `aiplam update`.
 
 ```text
- ┌─────────────────────────┐   aiplam add   ┌─────────────────────────┐     links      ┌─────────────────────────┐
- │ playbook folder         │ ─────────────► │ .aiplam/<profile>.yaml  │ ─────────────► │ target folders:         │
- │ (a git clone, checked   │  registers it  │ the profile's target    │ (enabled only) │ .claude/skills,         │
- │ out at a tag)           │                │ folders and playbooks   │                │ .github/agents, ...     │
- └─────────────────────────┘                └─────────────────────────┘                └─────────────────────────┘
-              ▲                                                                                     │
-              └──────────── agents follow the links and read the playbook's own files ──────────────┘
+   playbook folder (a git clone,                           managed folder (here, the home folder, ~)
+   checked out at tag v1.2.0)
+  ┌───────────────────────────────────┐                   ┌────────────────────────────────────────────┐
+  │ ~/Workspace/acme-ai-playbook/     │                   │    ~/.aiplam/       aiplam's configuration │
+  │ ├── skills/                       │                   │                                            │
+  │ │   ├── acme-deploy/   ◄──────────┼───────────────────┼─── ~/.claude/skills/acme-deploy            │
+  │ │   └── acme-review/   ◄──────────┼───────────────────┼─── ~/.claude/skills/acme-review            │
+  │ └── subagents/                    │   links made by   │                                            │
+  │     └── acme-reviewer.md  ◄───────┼───── aiplam ──────┼─── ~/.claude/agents/acme-reviewer.md       │
+  └───────────────────────────────────┘                   └────────────────────────────────────────────┘
+                                                                              ▲
+                                                                              │ reads its skills and subagents
+                                                                       ┌──────┴──────┐
+                                                                       │ Claude Code │
+                                                                       └─────────────┘
 ```
 
-`aiplam` never clones, fetches, pulls or switches a playbook checkout: selecting versions is the developer's job. It
+`aiplam` never clones, fetches, pulls or switches a playbook's checkout: choosing versions is the developer's job. It
 only creates and removes links, and the folders that hold them (see [Safety](#safety)).
+
+**Contents:**
+
+- [Install](#install) and [Quick start](#quick-start)
+- [Concepts](#concepts): artifacts, playbooks, target folders, agents, profiles, managed folders
+- [How it works](#how-it-works): linking, Windows, updating, collisions, finding the managed folder, sharing
+- [Agents in detail](#agents-in-detail): the formats each agent reads, and guidelines (`AGENTS.md` and the like)
+- [Safety](#safety)
+- [Reference](#reference): commands, configuration files, exit codes
 
 ## Install
 
-`aiplam` is a single executable with no dependencies, for Linux, macOS and Windows. Put it in a folder in your
-`PATH` (`aiplam.exe` on Windows). `git` is optional: without it, playbook versions are shown as `unknown`.
+`aiplam` is a single executable with no dependencies (`aiplam`, or `aiplam.exe` on Windows), for Linux, macOS and
+Windows:
+
+- put it in your `PATH`;
+- `git` is optional: without it, playbook versions are shown as `unknown`.
 
 With Go 1.26 or later installed, `go install arxila.io/aiplam/cmd/aiplam@latest` builds it into `$(go env GOPATH)/bin`.
-
 To build it from a clone:
 
 ```bash
@@ -40,31 +59,190 @@ make dist       # dist/aiplam-<version>-<os>-<arch>.tar.gz (.zip for Windows) pe
 ## Quick start
 
 ```bash
-aiplam init --user --agent claude                   # ~ as managed folder, with a profile for Claude Code
+aiplam init --user --agent claude                   # make ~ a managed folder, with a profile for Claude Code
 cd ~/Workspace/acme-ai-playbook
-git switch --detach v1.2.0                          # choose the playbook's version
+git checkout v1.2.0                                 # choose the playbook's version
 aiplam add acme .                                   # register it as 'acme', and link its acme-* artifacts
 aiplam list                                         # what is linked, and from where
-git switch --detach v1.3.0                          # later: another version...
+git checkout v1.3.0                                 # later: another version...
 aiplam update                                       # ...and its new or removed artifacts are linked or unlinked
+```
+
+`aiplam add` shows what it finds and links:
+
+```text
+Managed folder: ~ (user managed folder)
+Adding playbook acme (v1.2.0) from ~/Workspace/acme-ai-playbook to profile(s) default
+  profile 'default':
+    skills: ~/Workspace/acme-ai-playbook/skills, format 'acme-*': 2 artifact(s)
+    subagents: ~/Workspace/acme-ai-playbook/subagents, format 'acme-*': 1 artifact(s)
+    commands: ~/Workspace/acme-ai-playbook/commands, format 'acme-*': not found
+    rules: ~/Workspace/acme-ai-playbook/rules, format 'acme-*': 1 artifact(s)
+  + ~/.claude/skills/acme-deploy -> ~/Workspace/acme-ai-playbook/skills/acme-deploy
+  + ~/.claude/skills/acme-review -> ~/Workspace/acme-ai-playbook/skills/acme-review
+  + ~/.claude/agents/acme-reviewer.md -> ~/Workspace/acme-ai-playbook/subagents/acme-reviewer.md
+  + ~/.claude/rules/acme-style.md -> ~/Workspace/acme-ai-playbook/rules/acme-style.md
+Added acme.
 ```
 
 ## Concepts
 
+At a glance:
+
+- **Artifact**: a file or folder an agent reads: a skill (a folder with a `SKILL.md`), a subagent, a command, a rule...
+- **Artifact kind** (or just **kind**): a type of artifact, by name: `skills`, `subagents`, `commands`, `rules`, or
+  any other name.
+- **Playbook**: a folder (usually a git clone) holding artifacts, usually in one subfolder per kind.
+- **Target folder**: a folder where an agent reads the artifacts of a kind, such as `.claude/skills`; aiplam links
+  the artifacts there.
+- **Agent template**: the set of target folders of a known agent, ready to be used as a template for a profile's
+  target folders (`--agent claude`).
+- **Profile**: a working scope: a set of target folders and the playbooks to link into them. Only the playbooks of
+  **enabled** profiles are linked.
+- **Managed folder**: a folder whose target folders aiplam manages: the home folder, or a folder where agent sessions
+  start (such as a project's top folder). Its `.aiplam` folder holds the profiles.
+
+```text
+ managed folder ── holds ──► profiles ── each has ──► target folders, one per kind (where to link)
+                                 │
+                                 └────── each has ──► playbooks (what to link): their artifacts, by kind
+```
+
+### Artifacts and kinds
+
+- An **artifact** is an entry, a file or a folder, that an agent reads. aiplam links it as is, under its own name: a
+  skill's whole folder is linked, with every file in it.
+- Artifacts are grouped by **kind**. A kind is only a name, which joins two things:
+  - the playbook's subfolder holding the artifacts of the kind (by default, named like the kind: `skills/`);
+  - the target folder they are linked into (such as `.claude/skills`).
+- Kinds are any names (`skills`, `subagents`, `my-prompts`, ...). aiplam only treats `skills` specially, to show the
+  versions skills declare.
+
+### Playbooks
+
+A **playbook** is a folder, usually a git clone, holding agent artifacts. It has no manifest: it is given a **name**
+when it is registered (`aiplam add acme <folder>`), and, for each kind, its artifacts are the files and folders
+directly inside its **subfolder** for the kind whose names match the kind's **format**. A matching file is linked; a
+matching folder is linked as a whole, with everything inside it:
+
+- by default, the subfolder is named like the kind (`skills/`, `subagents/`, ...), and the format is `<name>-*`;
+- `aiplam add --folder <kind>:<subfolder>[:<format>]` (`-f`) sets another subfolder (`.` for the playbook folder
+  itself) and format, in which `*` matches any characters (`-f subagents:agents:*.agent.md`, `-f 'skills:.:*'`);
+- hidden entries (named `.*`) are never artifacts, whatever the format;
+- aiplam does not check what an entry holds: a folder without a `SKILL.md` that matches the format is linked too.
+
+```text
+acme-ai-playbook/                    registered with: aiplam add acme ~/Workspace/acme-ai-playbook
+├── README.md                        not in a kind's subfolder: not an artifact
+├── skills/                          kind skills: entries named acme-*
+│   ├── acme-review/                 an artifact: the whole folder is linked
+│   │   ├── SKILL.md
+│   │   └── checklist.md
+│   ├── acme-deploy/                 an artifact
+│   │   └── SKILL.md
+│   ├── .acme-draft/                 hidden: never an artifact
+│   └── other-tool/                  not named acme-*: not an artifact of this playbook
+├── subagents/                       kind subagents: entries named acme-*
+│   └── acme-reviewer.md             an artifact
+└── rules/                           kind rules: entries named acme-*
+    └── acme-style.md                an artifact
+```
+
+- **Why a prefix.** The default format, `<name>-*`, lets several playbooks be linked side by side into the same target
+  folders without clashing: `acme-*` next to `tools-*`.
+- **Missing subfolders are fine.** A playbook does not need a subfolder for every kind: once a subfolder appears, what
+  it holds is linked the next time the playbook is updated or its profile enabled.
+- **Several formats side by side.** A playbook meant for several agents can hold the same artifact in several formats
+  (`acme-reviewer.md` and `acme-reviewer.agent.md`); each registration picks its own with a format (see [Formats agents
+  read](#formats-agents-read)).
+- **Ids.** The same name can be registered from several playbook folders, as long as the last segments of their paths
+  differ. Their **ids** are then `<name>@<last folder segment>` (`acme@acme-ai-playbook`); otherwise the id is the name.
+
+**Versions.** A playbook's version is whatever is checked out: the tags of its current commit, or else its branch.
+
+- Changes to existing artifacts are seen at once, as the links point into the clone.
+- `aiplam update` is only needed to link the artifacts a version adds, and unlink those it removes.
+- Skills can also declare their own version, in the frontmatter of their `SKILL.md`, as the Agent Skills specification
+  suggests (`metadata.version: "2.1"`). `aiplam list` shows it, for information only: agents ignore it.
+
+### Target folders
+
+A **target folder** is a folder where aiplam links the artifacts of a kind, and where agents read them:
+
+- it is relative to the managed folder: `.claude/skills` in the home folder is `~/.claude/skills`;
+- it never leaves the managed folder: `..` is never allowed. The only exception is `%APPDATA%`, which a target folder
+  of the user managed folder can start with, on Windows;
+- aiplam only manages the links in it that belong to its playbooks: anything else there (settings, artifacts added by
+  hand) is left alone;
+- it is created when the first artifact is linked there, and removed again when unlinking leaves it empty (with its
+  empty parents, such as `.claude`, up to the managed folder).
+
+### Supported agents
+
+Each agent reads its artifacts from a set of folders, some of its own (`.claude/skills`) and some shared with other
+agents (`.agents/skills`), which can differ between a project and the home folder. **Agent templates** hold them, so
+that `--agent <template>` fills in a profile's target folders:
+
+| Template | Agent | Kinds, in a project (and in the home folder) |
+|---|---|---|
+| `standard` | any agent reading `.agents` | skills in `.agents/skills` |
+| `claude` | Claude Code | skills, subagents, commands, rules in `.claude/...` |
+| `copilot` | GitHub Copilot | skills, subagents, instructions in `.github/...` (`~/.copilot/...`); prompts |
+| `cursor` | Cursor | skills, subagents, commands in `.cursor/...`; rules |
+| `codex` | OpenAI Codex | skills in `.agents/skills`; subagents in `.codex/agents` |
+| `gemini` | Gemini CLI | skills, subagents, commands in `.gemini/...` |
+| `junie` | JetBrains Junie | skills, subagents, commands in `.junie/...`; rules |
+| `opencode` | OpenCode | skills, subagents, commands in `.opencode/...` (`~/.config/opencode/...`) |
+| `devin` | Devin (formerly Windsurf) | skills, subagents in `.devin/...` (`~/.config/devin/...`); rules |
+
+- Copilot's prompts and the rules of Cursor and Junie are read in projects only, so these templates have no target
+  folder for them in the home folder.
+- Every template but `standard` and `claude` has a `:standard` variant (`junie:standard`, ...) that links skills into
+  the cross-agent `.agents/skills` instead, which these agents read too.
+- `aiplam profile --help` lists every template with its exact target folders.
+- A template only fills in the target folders when a profile is created: the profile then works as if they had been
+  given by hand (`--folder skills:.agents/skills,...`).
+
+### Profiles
+
+A **profile** is a working scope: the playbooks used together, such as those of a client, a team or a kind of work.
+Each is kept in its own file, `.aiplam/<profile>.yaml`, with:
+
+- its **target folders**: for each kind, where its artifacts are linked;
+- its **agent**: the template its target folders were taken from, or `custom` when they were given by hand. aiplam
+  only uses it to warn when the target folders no longer match the template;
+- its registered **playbooks**, with the subfolders and formats given for them.
+
+Only the playbooks of the **enabled** profiles are linked, so moving from one scope to another is enabling and
+disabling profiles. Any number of profiles can be enabled at once, combining their scopes:
+
+```text
+ .aiplam/
+ ├── aiplam-config.yaml   enabled: [default, acme]
+ ├── default.yaml         agent: claude   playbooks: team-common, arxila     enabled: always needed
+ ├── acme.yaml            agent: claude   playbooks: acme                    enabled: working for client Acme now
+ └── initech.yaml         agent: custom   playbooks: initech, initech-data   disabled: back to it next month
+```
+
+```bash
+aiplam profile switch default,initech    # next month: unlink acme's playbooks, link initech's
+```
+
+- `init` creates the first profiles (`default`, unless others are named with `--profile`) and enables them;
+  `profile add` creates more, not enabled.
+- No command changes a profile's target folders or agent: edit its file, or remove the profile and create it again.
+
 ### Managed folders
 
-A **managed folder** is a folder with a `.aiplam` folder (the **aiplam configuration folder**), which holds aiplam's
-configuration for it. Usually these are the home folder, the **user managed folder**, and the folders where agent
-sessions start, such as a project's top folder. A managed folder holds:
+A **managed folder** is a folder with a `.aiplam` folder (the **aiplam configuration folder**):
 
-- its `.aiplam` folder: `aiplam-config.yaml` (the **aiplam configuration**: which profiles are enabled) and one
-  `<profile>.yaml` per profile. Agents never read it;
-- the **target folders** of its profiles (`.claude/skills`, `.agents/skills`, ...), where the artifacts are linked and
-  agents read them. aiplam only manages the links in them that belong to its playbooks: anything else there
-  (settings, artifacts added by hand) is left alone.
+- the **user managed folder** is the home folder, once it has a `.aiplam` folder: its target folders are those that
+  agents read in every session, whatever the project (`~/.claude/skills`, ...);
+- a project's managed folder is usually its top folder, where agent sessions start: its target folders are those that
+  agents read in that project only (`<project>/.claude/skills`, ...);
+- each managed folder is independent: it has its own profiles, playbooks and links.
 
-This is a home folder set up with `aiplam init --user --agent claude`, after `aiplam add acme
-~/Workspace/acme-ai-playbook`:
+This is a home folder after `aiplam init --user --agent claude` and `aiplam add acme ~/Workspace/acme-ai-playbook`:
 
 ```text
 ~/                                         the user managed folder
@@ -85,201 +263,190 @@ This is a home folder set up with `aiplam init --user --agent claude`, after `ai
     └── acme-ai-playbook/                  the playbook folder (a git clone)
 ```
 
-**Which managed folder a command uses.** Commands use the nearest managed folder from the current folder up to the
-home folder; when there is none (in particular, from folders outside the home folder, up to the root of the file
-system), the home folder, if it is managed. Folders above the home folder are never used from inside it. `--user`
-(`-u`) selects the user managed folder from anywhere. Commands that change something start by naming the managed
-folder they act on (`Managed folder: ...`). The current folder is walked up as given, so inside a linked artifact
-(such as `.agents/skills/x`) the managed folder is the one above the link, not one in the playbook folder.
+## How it works
+
+### Linking artifacts
+
+For each playbook of each enabled profile, and for each kind of the profile's target folders, aiplam links every
+artifact into the target folder:
+
+```text
+           profile 'default'                       playbook 'acme'
+  ┌──────────────────────────────────┐   ┌──────────────────────────────────┐
+  │ kind skills:                     │   │ subfolder for skills:  skills/   │
+  │   target folder: .claude/skills  │   │ format for skills:     acme-*    │
+  └─────────────────┬────────────────┘   └─────────────────┬────────────────┘
+                    │                                      │
+                    ▼                                      ▼
+ <managed folder>/.claude/skills/<entry>  ── link ──►  <playbook folder>/skills/<entry>
+                              (for each <entry> matching acme-*)
+```
+
+- A link has the artifact's own name: `.claude/skills/acme-deploy` leads to `skills/acme-deploy`.
+- Links are relative symbolic links on Linux and macOS. On Windows, links to folders (skills) are directory junctions,
+  and links to files (subagents, rules) are symbolic links, which need developer mode or administrator rights (see
+  [Windows without developer mode](#windows-without-developer-mode)).
+- Artifacts never come from outside the playbook folder, not even through links inside it.
+- Playbooks of profiles that are not enabled are registered, but not linked.
+
+### Windows without developer mode
+
+On Windows, links to files need developer mode or administrator rights, which many users do not have. Without them,
+aiplam links what it can and skips the rest:
+
+- folders (skills) are always linked: directory junctions need no rights;
+- files (subagents, commands, rules, instructions) are **skipped**, with a warning listing them, and everything else
+  is linked: `add` still registers the playbook, and `profile enable` still enables the profile;
+- `aiplam status` lists them too, but does not count them as problems, so it can still succeed;
+- `aiplam list` ends by saying how many artifacts are not linked for this reason;
+- links to files made earlier, when the rights were available, are still removed when needed (that needs no rights);
+- once developer mode is turned on (or administrator rights are available), `aiplam status` shows which
+  `aiplam update` commands link what was skipped.
+
+```text
+WARNING: 2 artifact(s) were not linked, as they are files and, on Windows, links to files need developer mode or
+administrator rights; once you have either, 'aiplam status' shows what to update to link them:
+  commands acme-ship.md of playbook acme (profile default) -> ~/Workspace/acme-ai-playbook/commands/acme-ship.md
+  rules acme-style.md of playbook acme (profile default) -> ~/Workspace/acme-ai-playbook/rules/acme-style.md
+```
+
+Agents do not see the skipped artifacts. Collisions between playbooks over a skipped artifact are still refused (they
+are in the configuration), but a file that is already where a skipped link would go is left alone, as nothing is
+created there.
+
+### Keeping links in step
+
+aiplam does not watch anything: links change only when an aiplam command runs. Each command that changes links
+computes the links that should exist afterwards, compares them with the links on disk, and creates and removes the
+difference:
+
+| Command | What changes | Links created | Links removed |
+|---|---|---|---|
+| `add` | a playbook is registered | its artifacts | none |
+| `update` | the playbook's checkout changed | its new artifacts | those of deleted artifacts |
+| `remove` | a playbook is unregistered | none | all of its links |
+| `profile enable` | profiles are enabled | their playbooks' artifacts | none |
+| `profile disable` | profiles are disabled | none | their playbooks' links |
+| `profile switch` | exactly the given profiles are enabled | those not already linked | those no longer wanted |
+
+```text
+$ git checkout v1.3.0              # v1.3.0 adds skills/acme-audit/ and deletes skills/acme-review/
+$ aiplam update acme
+Managed folder: ~ (user managed folder)
+Updating playbook acme of profile 'default' (v1.3.0) from ~/Workspace/acme-ai-playbook
+  - ~/.claude/skills/acme-review (broken link: its artifact no longer exists)
+  + ~/.claude/skills/acme-audit -> ~/Workspace/acme-ai-playbook/skills/acme-audit
+```
+
+- Links that stay the same are left alone: `profile switch` from one profile to another that registers the same
+  playbook does not touch its links.
+- Removing a link removes the folders this leaves empty, up to the managed folder.
+- `aiplam status` shows what `update` would change, without changing anything.
+
+### One owner per link
+
+Every link belongs to a single playbook of a single profile, so that removing a playbook, or disabling a profile, never
+removes a link that something else still needs. A command refuses to run, and changes nothing, when, afterwards:
+
+- two playbooks would link something at the same place, in the same profile or in profiles enabled together, even if
+  both would link the same artifact;
+- the same playbook (same name and playbook folder) would be registered in two enabled profiles;
+- something is already where a link must go: a file, a folder, or even a link to the same artifact that aiplam did not
+  make for that playbook. The one exception is a link to a file that is skipped on Windows without developer mode
+  (see [Windows without developer mode](#windows-without-developer-mode)): what is there is left alone, as nothing is
+  created there.
+
+```text
+  profile 'default' (enabled)        playbook tools:  skills/tools-git/  ─┐
+                                                                          ├─► .claude/skills/tools-git  refused
+  profile 'acme' (being enabled)     playbook extras: skills/tools-git/  ─┘
+```
+
+`add`, `update`, `profile enable` and `profile switch` check this for everything that would be linked afterwards, and
+report every collision at once.
+
+### Finding the managed folder
+
+Every command acts on one managed folder, found from the folder it starts from (the current folder, or the folder
+given to `status` and `list`):
+
+```text
+          start folder
+               │
+               ▼
+  ┌──────────────────────────┐   yes
+  │ has a .aiplam folder?    ├────────►  use it
+  └────────────┬─────────────┘
+               │ no
+               ▼
+  ┌──────────────────────────┐   yes
+  │ is it the home folder,   ├────────►  use the home folder, if it is managed (if not, fail)
+  │ or the file system root? │
+  └────────────┬─────────────┘
+               │ no
+               ▼
+      go up to its parent folder, and check again
+```
+
+- `--user` (`-u`) skips the search: the command uses the user managed folder, from anywhere.
+- Folders above the home folder are never used from inside it.
+- From a folder outside the home folder, the search goes up to the root of the file system, and then falls back to the
+  home folder.
+- The start folder is walked up as given, without resolving links: inside a linked artifact (such as
+  `.claude/skills/acme-deploy`), the managed folder is the one above the link, not one in the playbook folder.
+- Commands that change something start by naming the managed folder they act on (`Managed folder: ...`); `status` and
+  `list` also say whether it is the user managed folder, and whether it is in a git repository.
 
 ```text
 ~/                                         user managed folder
 ├── .aiplam/
 └── Workspace/
-    ├── big-project/                       project's managed folder: sessions start here or below
+    ├── big-project/                       a project's managed folder: agent sessions start here
     │   ├── .aiplam/
     │   ├── .claude/skills/...
     │   └── module-a/                      commands run here use big-project's configuration
     └── small-project/                     not managed: commands run here use ~'s configuration
 ```
 
-`aiplam status` and `aiplam list` show the managed folder that applies, whether it is the user managed folder, and
-whether it is in a git repository (and where its root is). Each managed folder is independent: aiplam does not check
-what higher-level managed folders link, nor which of them an agent also reads.
+aiplam does not check what other managed folders link, nor which of them an agent reads: an agent started in
+`big-project` usually reads both `big-project/.claude/skills` and `~/.claude/skills`.
 
-**Sharing a project's configuration.** Playbook folders are stored relative to the managed folder, so a project's
-`.aiplam` folder can be committed and shared (on Windows, a playbook must be on the same drive as the managed folder).
-The links themselves are specific to each machine (and on Windows, links to folders are junctions, which git cannot
-store as links): when the managed folder is inside a git repository, `init` suggests lines to add to `.gitignore` for
-its target folders (such as `/.claude/skills/<name>-*`).
+### Sharing a project's configuration
 
-### Profiles and target folders
+- Playbook folders are stored relative to the managed folder, so a project's `.aiplam` folder can be committed and
+  shared, as long as everyone keeps the playbooks at the same place relative to the project (on Windows, a playbook
+  must be on the same drive as the managed folder).
+- The links themselves are specific to each machine (and on Windows, links to folders are junctions, which git cannot
+  store as links). When the managed folder is in a git repository, `init` suggests lines for `.gitignore` that leave
+  them out (such as `/.claude/skills/<name>-*`).
+- After cloning a project with a shared configuration, `aiplam status` shows what is not linked yet, naming the
+  `aiplam update` command that links it.
 
-A **profile** is a working scope: a group of playbooks that are used together, such as those of a client, a team or a
-kind of work. Each profile is kept in its own file (`.aiplam/<profile>.yaml`) with:
+### Editing the configuration by hand
 
-- its **target folders**: for each **kind** of artifact, the folder (relative to the managed folder) where its
-  artifacts are linked. Kinds are any names (`skills`, `subagents`, `my-prompts`...): aiplam only knows `skills`, to
-  show the versions skills declare. In the user managed folder on Windows, a target folder can also start with
-  `%APPDATA%`; nothing else can leave the managed folder, and `..` is never allowed;
-- its **agent**: the agent template its target folders were taken from (see [Agent templates](#agent-templates)), or
-  `custom` when they were given by hand. It is only a label;
-- its registered **playbooks**.
+The configuration files are plain YAML (see [Configuration files](#configuration-files)), and can be edited. Editing a
+file does not move any link, so afterwards:
 
-Only the playbooks of the **enabled** profiles are linked, so moving from one scope to another is a matter of enabling
-and disabling profiles. Any number of profiles can be enabled at once, combining their scopes.
+- `aiplam status` reports what `update` would change, naming the `aiplam update` command to run;
+- it reports the links left behind: those in the target folders of any profile that are broken, or lead into a
+  registered playbook folder, but belong to no playbook of the enabled profiles (after disabling a profile by hand, or
+  changing a mapping). Remove them by hand: they get in the way of the playbook's own links, even if you made them
+  yourself;
+- it warns when a profile's target folders no longer match its agent template: set its agent to `custom` if the change
+  is intended;
+- it cannot see links left in a folder that is no longer a target folder of any profile: before changing a target
+  folder by hand, disable the profile (its links go), and enable it again afterwards.
 
-```text
- .aiplam/
- ├── aiplam-config.yaml   enabled: [default, acme]
- ├── default.yaml         agent: claude   playbooks: team-common, arxila     enabled: always needed
- ├── acme.yaml            agent: claude   playbooks: acme                    enabled: working for client Acme now
- └── initech.yaml         agent: custom   playbooks: initech, initech-data   disabled: back to it next month
-```
+A profile whose file is not valid cannot be enabled, but it can still be disabled and removed: its links, if any, are
+then left in place, for you to remove.
 
-`init` creates the first profiles (`default`, or those given with `--profile`), all with the same target folders,
-and enables them; `profile add` creates more, not enabled. Both take the target folders in one of two ways:
+## Agents in detail
 
-```bash
-aiplam init --user --agent claude                                    # from an agent template
-aiplam init . --agent junie:standard                                 # a template's :standard variant
-aiplam init . --folder skills:.agents/skills,rules:.junie/rules      # by hand
-aiplam profile add acme --agent claude                               # a profile for the work for client Acme
-aiplam add acme ~/Workspace/acme/acme-ai-playbook -p acme            # register a playbook in it: nothing linked yet
-aiplam profile enable acme                                           # link its playbooks too
-aiplam profile switch acme                                           # work only on Acme: disable the other profiles
-aiplam profile switch default,acme                                   # enable exactly these profiles
-aiplam profile disable acme                                          # unlink Acme's playbooks
-aiplam profile list                                                  # the profiles and agents; '*' marks the enabled
-aiplam profile show acme                                             # its target folders, playbooks and mappings
-aiplam profile remove old                                            # delete a profile (unlinking it if enabled)
-```
+### Formats agents read
 
-No command changes a profile's target folders or agent: edit its file, or remove the profile and create it again. A
-template only fills in the target folders when the profile is created, so `aiplam status` and `aiplam list` warn when
-a profile's target folders no longer match its template (because they were edited, or because a later aiplam changed
-the template): set its agent to `custom` if the change is intended.
-
-A profile's file repeats its name (`name: acme` in `acme.yaml`), exactly as in the file name. A profile whose file is
-not valid cannot be enabled, but it can still be disabled and removed: its links, if any, are then left in place for
-you to remove (`aiplam status` reports those that lead into a registered playbook folder).
-
-**Every link belongs to a single playbook of a single profile.** So:
-
-- two playbooks can never link something at the same place, whether they are in the same profile or in profiles
-  enabled together, even if both would link the same artifact;
-- the same playbook (same name and playbook folder) cannot be registered in two profiles that are enabled together;
-- nothing can be linked where something already is, even a link to the same artifact that aiplam did not make for
-  that playbook.
-
-`add`, `update`, `profile enable` and `profile switch` check this for everything that would be linked afterwards, and
-change nothing if anything collides. Profiles that are never enabled together never collide: `profile switch` can
-replace a profile with another that registers the same playbooks, and the links that stay the same are left alone.
-
-In a profile that is not enabled, `add` and `remove` only register and unregister playbooks, and `update` has nothing
-to do. Profile names use letters, digits, `_` and `-`; `aiplam-config` is reserved.
-
-### Playbooks
-
-A **playbook** is a folder (usually a git clone) holding agent artifacts. It has no manifest: when it is registered,
-it is given a **name**, and, for each kind of its profile's target folders, its **artifacts** are the entries (folders
-and files alike) of its **subfolder** for that kind whose names match the kind's **format**:
-
-- by default, the subfolder is named like the kind (`skills/`, `subagents/`, ...), and the format is `<name>-*`;
-- `aiplam add --folder <kind>:<subfolder>[:<format>]` (`-f`) sets another subfolder (`.` for the playbook folder
-  itself; never `..`) and format, in which `*` matches any characters (for example `-f subagents:agents:*.agent.md`
-  or `-f 'skills:.:*'`);
-- hidden entries (named `.*`) are never artifacts, whatever the format, and artifacts never come from outside the
-  playbook folder, not even through links;
-- each matched entry is linked as is, under its own name (a skill's whole folder is linked, with any other files in
-  it). aiplam does not check what an entry holds: a skill folder without a `SKILL.md` that matches the format is linked
-  too.
-
-```text
-acme-ai-playbook/                    registered with: aiplam add acme ~/Workspace/acme-ai-playbook
-├── README.md                        not an artifact
-├── skills/                          kind skills: entries named acme-*
-│   ├── acme-review/
-│   │   ├── SKILL.md
-│   │   └── checklist.md             part of the skill: the whole folder is linked
-│   ├── acme-deploy/
-│   │   └── SKILL.md
-│   ├── .acme-draft/                 hidden: never an artifact
-│   └── other-tool/                  not named acme-*: not an artifact of this playbook
-├── subagents/
-│   ├── acme-reviewer.md             Claude Code, Cursor, Gemini CLI, Junie, OpenCode, Devin
-│   ├── acme-reviewer.agent.md       GitHub Copilot: give a format to pick one (-f 'subagents:subagents:*.agent.md')
-│   └── acme-reviewer.toml           OpenAI Codex
-└── rules/
-    ├── acme-style.md
-    └── acme-style.mdc               Cursor
-```
-
-The default format works as a prefix, so that several playbooks can be linked side by side in the same target folders
-without clashing. A playbook meant for several agents can hold the same artifact in several formats, side by side:
-each profile then picks its own with a format when the playbook is registered in it (see [Formats agents
-read](#formats-agents-read)).
-
-The same name can be registered from several playbook folders, as long as their last path segments differ. Their
-**ids** are then `<name>@<last folder segment>` (for example `acme@acme-ai-playbook`); otherwise the id is the name.
-Ids are computed, not stored.
-
-Subfolders that do not exist yet are fine: what a subfolder holds is linked whenever the playbook is updated or its
-profile enabled.
-
-**Versions.** A playbook's version is whatever is checked out: the tags of its current commit, or else its branch.
-Since the links point into the clone, changes to existing artifacts are seen at once; `aiplam update` is only needed
-to link the artifacts a version adds and unlink those it removes.
-
-Skills can declare their own version in their `SKILL.md` frontmatter, as the Agent Skills specification suggests:
-
-```yaml
----
-name: acme-deploy
-description: ...
-metadata:
-  version: "2.1"
----
-```
-
-`aiplam list` shows, next to each link, its playbook's version (its tags, such as `v1.2.0`, or `branch: main` when no
-tag points at the checked-out commit) and, for the kind `skills`, the version the skill declares, if any. Versions are
-only shown, for information: aiplam always links whatever is checked out, and agents ignore `metadata.version`.
-
-### Agent templates
-
-An agent template fills in a profile's target folders with those where an agent reads each kind of artifact, which
-can differ between a project and the user managed folder. Templates are listed (here and by aiplam) from the most to
-the least used agent, according to the developer surveys of 2026, after the standard one:
-
-- `standard`, the cross-agent `.agents` convention: skills in `.agents/skills` (and `~/.agents/skills`).
-- `claude`, Claude Code: skills, subagents, commands and rules, in `.claude/skills`, `.claude/agents`,
-  `.claude/commands` and `.claude/rules` (and the same in `~`).
-- `copilot`, GitHub Copilot: skills and subagents in `.github/skills` and `.github/agents` (`~/.copilot/skills` and
-  `~/.copilot/agents`), instructions in `.github/instructions` (`~/.copilot/instructions`), and prompts (deprecated) in
-  `.github/prompts`, in projects only.
-- `cursor`, Cursor: skills, subagents and commands in `.cursor/skills`, `.cursor/agents` and `.cursor/commands` (and
-  the same in `~`), and rules in `.cursor/rules`, in projects only.
-- `codex`, OpenAI Codex: skills in `.agents/skills` and subagents in `.codex/agents` (and the same in `~`).
-- `gemini`, Gemini CLI: skills, subagents and commands in `.gemini/skills`, `.gemini/agents` and `.gemini/commands`
-  (and the same in `~`).
-- `junie`, JetBrains Junie: skills, subagents and commands in `.junie/skills`, `.junie/agents` and `.junie/commands`
-  (and the same in `~`), and rules in `.junie/rules`, in projects only.
-- `opencode`, OpenCode: skills, subagents and commands in `.opencode/skills`, `.opencode/agents` and
-  `.opencode/commands` (`~/.config/opencode/...`).
-- `devin`, Devin (formerly Windsurf): skills and subagents in `.devin/skills` and `.devin/agents`
-  (`~/.config/devin/...`; on Windows, `%APPDATA%\devin\...`), and rules in `.devin/rules` (`~/.devin/rules`).
-
-Every template but `standard` and `claude` also has a `:standard` variant (`junie:standard`, ...), which links skills
-from the standard `.agents/skills` instead, as these agents read it too. `codex` and `codex:standard` are the same for
-now: Codex reads skills from `.agents/skills` only. `aiplam profile --help` shows the same list, from the single
-source file that defines it (`internal/config/templates.go`).
-
-#### Formats agents read
-
-Templates only give target folders: which entries of a playbook are linked is decided when the playbook is
-registered, by its formats. When a playbook holds artifacts for several agents side by side, or files an agent would
-misread, give each kind a format matching the files the agent reads:
+Templates only give target folders: which entries of a playbook are linked is decided by the formats it is registered
+with. When a playbook holds artifacts for several agents side by side, or files an agent would misread, give each kind
+a format matching the files the agent reads:
 
 | Agent | Subagents | Commands | Prompts | Rules | Instructions |
 |---|---|---|---|---|---|
@@ -292,9 +459,19 @@ misread, give each kind a format matching the files the agent reads:
 | OpenCode | `*.md` | `*.md` | | | |
 | Devin | `*.md` | | | `*.md` | |
 
-Skills are folders holding a `SKILL.md`, for every agent. Formats are plain patterns: `*.md` also matches
-`acme-reviewer.agent.md`, so a playbook that holds both should keep them in different subfolders, or name its files
-so that one format cannot match the other's (`acme-*.claude.md` and `acme-*.agent.md`). For example, for Copilot:
+- Skills are folders holding a `SKILL.md`, for every agent.
+- Formats are plain patterns: `*.md` also matches `acme-reviewer.agent.md`. A playbook that holds both should keep them
+  in different subfolders, or name its files so that one format cannot match the other's (`acme-*.claude.md` and
+  `acme-*.agent.md`).
+
+```text
+acme-ai-playbook/subagents/
+├── acme-reviewer.md             Claude Code, Cursor, Gemini CLI, Junie, OpenCode, Devin
+├── acme-reviewer.agent.md       GitHub Copilot
+└── acme-reviewer.toml           OpenAI Codex
+```
+
+For example, for Copilot:
 
 ```bash
 aiplam add acme ~/Workspace/acme-ai-playbook -f 'subagents:subagents:acme-*.agent.md' \
@@ -303,18 +480,19 @@ aiplam add acme ~/Workspace/acme-ai-playbook -f 'subagents:subagents:acme-*.agen
 
 ### Guidelines: `AGENTS.md`, `CLAUDE.md` and the like
 
-Agents also read a main instructions file: `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.github/copilot-instructions.md`,
-... aiplam does not link or edit those files. Each has a fixed name, so there can be only one per folder: several
-playbooks could not each provide one, and it would collide with the one the user (or the project) already has.
+Agents also read a main instructions file: `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.github/copilot-instructions.md`...
+aiplam does not link or edit those files:
 
-Instead, a playbook provides its guidelines as **rules** or **instructions**: one file per playbook, named after it
-like any other artifact (`acme-guidelines.md`), which agents load besides the main instructions file. They never
-collide with each other or with the user's own files, and aiplam links and unlinks them like any other artifact:
+- each has a fixed name, so there can be only one per folder: several playbooks could not each provide one;
+- it would collide with the one the user (or the project) already has.
+
+Instead, a playbook provides its guidelines as **rules** or **instructions**: files named after the playbook like any
+other artifact (`acme-guidelines.md`), which agents load besides the main instructions file:
 
 ```text
  .claude/
  ├── CLAUDE.md                     the user's own: aiplam never touches it
- └── rules/                        Claude Code loads every file here, besides CLAUDE.md
+ └── rules/                        Claude Code reads the files here, besides CLAUDE.md
      ├── acme-guidelines.md   ──►  ~/Workspace/acme-ai-playbook/rules/acme-guidelines.md
      ├── tools-guidelines.md  ──►  ~/Workspace/tools-ai-playbook/rules/tools-guidelines.md
      └── my-rules.md               the user's own: left alone
@@ -331,12 +509,31 @@ or when the agent finds them relevant), according to each agent's documentation:
 | Junie | `*.md` | `.junie/rules` | the project has no `.junie/AGENTS.md` |
 | Devin | `*.md` | `.devin/rules`, `~/.devin/rules` | its frontmatter has `trigger: always_on` |
 
-Codex, Gemini CLI, OpenCode and the standard template read guidelines only from their main instructions file
-(`AGENTS.md`, `GEMINI.md`, ...), so aiplam cannot link guidelines for them; nor, in the home folder, for Cursor and
-Junie, which read such files in projects only. A later version may manage a marked block of its own inside those main
-instructions files, leaving the rest of them untouched.
+- Codex, Gemini CLI and OpenCode read guidelines only from their main instructions file, so aiplam cannot link
+  guidelines for them, nor for profiles made with the `standard` template, which has no rules folder.
+- Nor can it in the home folder for Cursor and Junie, which read such files in projects only.
+- A later version may manage a marked block of its own inside the main instructions files, leaving the rest of them
+  untouched.
 
-## Commands
+## Safety
+
+- **Only links.** aiplam only creates and removes links. It never deletes a real file, nor a folder that holds
+  anything: it only removes the folders its unlinking leaves empty, up to the managed folder (or `%APPDATA%`). It never
+  touches a playbook's content.
+- **Only its own links.** It only removes links that belong to a registered playbook: they lead into its subfolder for
+  the kind, and their names match its format.
+- **All or nothing.** Commands that change links check everything first: if anything collides (see [One owner per
+  link](#one-owner-per-link)), nothing is changed and every problem is reported. If creating or removing a link fails
+  midway, the changes already made are undone. The one exception is decided before anything changes: links to files
+  that Windows does not allow (see [Windows without developer mode](#windows-without-developer-mode)) are skipped.
+- **Safe to repeat.** Every command can be run again. `status` and `list` change nothing.
+- **One at a time.** Commands that change a managed folder run one at a time: while one runs, others on the same
+  managed folder fail (`status` and `list` still work). Interrupting one (Ctrl+C) takes effect once it has finished its
+  changes, which takes milliseconds, so that links and configuration never disagree.
+
+## Reference
+
+### Commands
 
 ```bash
 aiplam init <folder>|--user (--agent A | --folder K:F...) [--profile P...]   # make a managed folder, and profiles
@@ -350,42 +547,87 @@ aiplam profile add <profile> (--agent A | --folder K:F...)        # create a pro
 aiplam profile enable|disable|switch <profile>[,<profile>...]     # choose the profiles linked
 ```
 
-Every command acts on the managed folder that applies to the current folder, or on the user managed folder with
-`--user` (`-u`); `status` and `list` also take a folder to start from. `add`, `update` and `remove` act on the enabled
-profile, which must be the only one enabled, or on the profiles given with `--profile` (`-p`), enabled or not. Options
-that take lists accept repeated options or comma-separated values; quote values holding commas or colons. Other short
-forms: `-a` (`--agent`) and `-f` (`--folder`).
+Run `aiplam <command> --help` for the full details of each command.
 
-Without a selector, `update` acts on the playbook registered for the current folder. A selector is an id, a name
-(when only one playbook has it), a playbook folder (when only one playbook is registered there), or a name and a
-playbook folder.
+**Common options:**
 
-Run `aiplam <command> --help` for the details of each command.
+- `-u`, `--user`: use the user managed folder, wherever the command is run.
+- `-p`, `--profile P,...`: for `add`, `update` and `remove`, the profiles to act on, enabled or not. It can be left out
+  when exactly one profile is enabled. For `init`, the names of the first profiles.
+- `-h`, `--help`: the command's help.
+- Options that take lists accept repeated options or comma-separated values; quote values holding commas or colons
+  (`--folder 'skills:"my, folder"'`). `--` ends the options.
 
-## Safety
+**`aiplam init <folder> | --user`** makes a folder a managed folder:
 
-- `aiplam` only creates and removes **links**: relative symbolic links on Linux and macOS. On Windows, links to
-  folders (such as skills) are directory junctions, which need no administrator rights or developer mode, while links
-  to files (such as subagents and rules) are symbolic links, which need developer mode or administrator rights. It
-  never deletes a real file, nor a folder that holds anything (it only removes the folders its unlinking leaves empty,
-  up to the managed folder, or to `%APPDATA%`), and never touches a playbook's content.
-- Commands that change links are all-or-nothing: if anything would collide (see [Profiles and target
-  folders](#profiles-and-target-folders)), nothing is changed and the problem is reported. If creating or removing a
-  link fails midway, the changes already made are undone.
-- Only links that belong to a playbook (they point into its subfolder for the kind, and their names match its format)
-  are ever removed.
-- Every command can be run again safely. `status` and `list` change nothing; `status` exits with 1 when anything needs
-  attention.
-- Commands that change a managed folder run one at a time: while one runs, others on the same managed folder fail
-  (`status` and `list` still work). Interrupting one (Ctrl+C) takes effect once it has finished its changes, which
-  takes milliseconds, so that links and configuration never disagree.
+- creates its `.aiplam` folder, and its first profiles (`default`, or those given with `--profile`), all with the same
+  target folders, enabled;
+- `-a`, `--agent A`: take the target folders from an agent template (`claude`, `junie:standard`, ...);
+- `-f`, `--folder K:F,...`: or give them by hand, as `<kind>:<target folder>` (`skills:.agents/skills`);
+- when the folder is in a git repository, it suggests `.gitignore` lines for the links.
 
-## Configuration files
+**`aiplam status [<folder> | --user]`** shows the managed folder and its enabled profiles, and reports everything
+that needs attention, exiting with 1 if there is anything:
 
-A configuration lives in the `.aiplam` folder of its managed folder, in YAML files that aiplam writes and `aiplam
-status` validates:
+- problems in the configuration files, and missing playbook folders;
+- the links `update` would create or remove, or why it would refuse to;
+- links left behind (see [Editing the configuration by hand](#editing-the-configuration-by-hand));
+- target folders, or playbook subfolders, that are files instead of folders;
+- without counting them, the artifacts that cannot be linked on Windows without developer mode.
 
-- `aiplam-config.yaml`, the aiplam configuration: the enabled profiles. Written by `init` and `profile enable`,
+**`aiplam list [<folder> | --user]`** lists the links of the enabled profiles, by profile and kind, with the playbook
+and version of each, the version a skill declares, and broken links:
+
+```text
+Profile default (agent claude)
+  skills (~/.claude/skills):
+    acme-deploy  playbook acme (v1.2.0), skill version 2.1
+    acme-review  playbook acme (v1.2.0)
+  subagents (~/.claude/agents):
+    acme-reviewer.md  playbook acme (v1.2.0)
+```
+
+**`aiplam add <name> <playbookfolder>`** registers a playbook in profiles and, in those that are enabled, links its
+artifacts:
+
+- `-f`, `--folder K:S[:F],...`: the subfolder `S` and format `F` of kind `K` (defaults: `K` and `<name>-*`). `S` is
+  `.` for the playbook folder itself; `K` must be a kind of every profile given;
+- `-p`, `--profile P,...`: the profiles to register it in.
+
+**`aiplam update [<selector>]`** links a playbook's new artifacts and unlinks those that no longer exist, in each
+profile given (or the only enabled one). Without a selector, it updates the playbook registered for the current folder.
+
+**`aiplam remove <selector>`** removes a playbook's links (in enabled profiles) and unregisters it. Only links are
+removed: the playbook folder is left in place.
+
+A **selector** designates a playbook in a profile, as:
+
+- an id (`acme@acme-ai-playbook`);
+- a name, when only one playbook has it;
+- a playbook folder, when only one playbook is registered there;
+- a name and a playbook folder.
+
+**`aiplam profile <subcommand>`** manages profiles:
+
+| Subcommand | What it does |
+|---|---|
+| `list` | lists the profiles and their agents; `*` marks the enabled ones |
+| `show <profile>` | shows its agent, target folders and playbooks (versions, subfolders, formats, artifacts) |
+| `add <profile>` | creates a profile, not enabled, with `--agent` or `--folder` as in `init` |
+| `remove <profile>` | deletes it, with its registrations, removing its links first if it is enabled |
+| `enable <profile>,...` | enables profiles besides those already enabled, linking their playbooks |
+| `disable <profile>,...` | disables profiles, unlinking their playbooks |
+| `switch <profile>,...` | enables exactly the given profiles: disables the others and enables these |
+
+Profile names use letters, digits, `_` and `-`, starting with a letter or digit; `aiplam-config` is reserved. A
+profile's file repeats its name exactly (`name: acme` in `acme.yaml`).
+
+### Configuration files
+
+A managed folder's configuration lives in its `.aiplam` folder, in YAML files that aiplam writes and `aiplam status`
+validates:
+
+- `aiplam-config.yaml`, the **aiplam configuration**: the enabled profiles. Written by `init` and `profile enable`,
   `disable` and `switch`.
 
   ```yaml
@@ -413,24 +655,23 @@ status` validates:
           format: "*.md"
   ```
 
-Target folders are relative to the managed folder. Playbook folders are relative to the managed folder too
-(`../playbooks/x` is fine), and each mapping's folder is relative to the playbook folder; only the mappings given with
-`--folder` are stored (other kinds use the subfolder named like the kind, and the format `<name>-*`).
+- `.lock`, which keeps two commands from changing the managed folder at once, and a `.gitignore` that keeps `.lock`
+  (and the temporary files of interrupted saves) out of git when the `.aiplam` folder is committed.
 
-Editing a file by hand does not move any link. `aiplam status` then reports what `update` would change, and the links
-left behind: those in the target folders of any profile that lead into a registered playbook folder but belong to no
-playbook of the enabled profiles (after disabling a profile by hand, or changing a playbook's mapping), which you remove
-by hand: they would get in the way of the playbook's own links, even if you made them yourself. It also reports target
-folders and playbook subfolders that are files, not folders. It cannot see links left in a folder that is no longer a
-target folder of any profile: before changing a target folder by hand, disable the profile (its links go), and enable it
-again afterwards.
+Paths in the profile files:
 
-The `.aiplam` folder also holds `.lock`, which keeps two commands from changing the managed folder at once, and a
-`.gitignore` that keeps it out of git when the folder is committed.
+- target folders are relative to the managed folder;
+- playbook folders are relative to the managed folder too (`../playbooks/x` is fine);
+- each mapping's folder is relative to the playbook folder. Only the mappings given with `--folder` are stored: other
+  kinds use the subfolder named like the kind, and the format `<name>-*`.
 
-## Exit codes
+### Exit codes
 
-`0` success, `1` failure, cancelled operation or (for `status`) something needs attention, `2` invalid command line.
+| Code | Meaning |
+|---|---|
+| `0` | success |
+| `1` | failure, cancelled operation or (for `status`) something needs attention |
+| `2` | invalid command line |
 
 ## License
 
