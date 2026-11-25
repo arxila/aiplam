@@ -19,6 +19,7 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -91,7 +92,7 @@ Examples:
   aiplam init ~/Workspace/thymeleaf --agent claude --profile work,personal
 `
 
-func (a *App) cmdInit(args []string) error {
+func (a *App) cmdInit(args []string) (err error) {
 	p, err := parseArgs(args, []string{"agent", "folder"}, nil)
 	if err != nil {
 		return err
@@ -128,7 +129,18 @@ func (a *App) cmdInit(args []string) error {
 	if len(profiles) == 0 {
 		profiles = []string{config.DefaultProfile}
 	}
-	if err := os.MkdirAll(config.Dir(a.Managed), 0o755); err != nil {
+	dir := config.Dir(a.Managed)
+	if _, serr := os.Lstat(dir); errors.Is(serr, os.ErrNotExist) {
+		// A failed init removes the .aiplam folder it created, so that the folder does not become a managed folder
+		// without configuration (which would shadow the managed folders above it). Deferred before the lock is taken,
+		// it runs after the lock is released.
+		defer func() {
+			if err != nil {
+				removeNewConfigDir(dir)
+			}
+		}()
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	unlock, err := a.lock()

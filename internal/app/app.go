@@ -428,6 +428,21 @@ const (
 	ignoreName = ".gitignore"
 )
 
+// removeNewConfigDir removes a .aiplam folder that a failed init created: the files aiplam writes there before the
+// configuration (the lock file, its .gitignore and temporary files of interrupted saves), and then the folder, only if
+// that leaves it empty.
+func removeNewConfigDir(dir string) {
+	for _, name := range []string{lockName, ignoreName} {
+		_ = os.Remove(filepath.Join(dir, name))
+	}
+	if tmps, err := filepath.Glob(filepath.Join(dir, "*.tmp")); err == nil {
+		for _, tmp := range tmps {
+			_ = os.Remove(tmp)
+		}
+	}
+	_ = os.Remove(dir)
+}
+
 // lock makes sure that no other aiplam command changes the managed folder while this one runs, and defers the first
 // interruption (Ctrl+C) until it ends, so that the links and the configuration stay consistent: changes take
 // milliseconds. A second interruption stops aiplam at once. It does nothing for a folder without a .aiplam folder (the
