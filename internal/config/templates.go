@@ -62,7 +62,7 @@ type Template struct {
 	Product string
 	// Targets are the kinds the agent reads, in the order they are shown.
 	Targets []TemplateTarget
-	// Standard says whether the template has a ":standard" variant, which links skills from .agents/skills.
+	// Standard says whether the template has a ":standard" variant, which links skills into .agents/skills.
 	Standard bool
 }
 

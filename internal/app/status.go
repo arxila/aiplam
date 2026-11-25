@@ -47,7 +47,8 @@ Then it reports everything that needs attention, and exits with 1 if there is an
     must be removed by hand, even if you made them yourself;
   - target folders (or their parents) and playbook subfolders that are files, not folders.
 It also warns, without counting them, about the profiles that are not enabled and not valid (they cannot be enabled
-until they are fixed).
+until they are fixed), and about the artifacts that cannot be linked because they are files and, on Windows, links to
+files need developer mode or administrator rights.
 
 Examples:
   aiplam status
@@ -206,7 +207,7 @@ func (a *App) cmdStatus(args []string) error {
 			scope[e.Key()] = true
 		}
 	}
-	plan, err := playbook.Transition(groups(st.enabled), groups(st.enabled), scope)
+	plan, err := a.transition(st.enabled, st.enabled, scope)
 	if err != nil {
 		problem("%s", err)
 	}
@@ -269,9 +270,19 @@ func (a *App) cmdStatus(args []string) error {
 		}
 	}
 
+	// Links to files that cannot be created are reported, but not counted: only developer mode or administrator
+	// rights (on Windows) can fix them.
+	if len(plan.Skipped()) > 0 {
+		a.warnf("%s", a.skippedText(plan, "cannot be linked"))
+	}
+
 	if attention > 0 {
 		a.printf("\n%d item(s) need attention; see the warnings above.\n", attention)
 		return errSilent
+	}
+	if len(plan.Skipped()) > 0 {
+		a.printf("\nEverything else is up to date.\n")
+		return nil
 	}
 	a.printf("\nEverything is up to date.\n")
 	return nil

@@ -95,10 +95,14 @@ type App struct {
 	// sets it, with the AIPLAM_SANDBOX environment variable, so that trying aiplam there cannot change the real
 	// configuration, such as ~/.aiplam, even when run from a folder outside the sandbox or given one.
 	Sandbox string
+	// FileLinks reports whether links to files can be created (see fsutil.FileLinksAllowed, the default when nil).
+	// When they cannot, the artifacts that are files are not linked, with a warning.
+	FileLinks func() bool
 
-	user         bool // whether --user was given
-	elsewhere    bool // whether the managed folder is not the one commands run from the current folder would use
-	managedShown bool // whether the "Managed folder: ..." line has been printed
+	fileLinks    *bool // the cached answer of FileLinks
+	user         bool  // whether --user was given
+	elsewhere    bool  // whether the managed folder is not the one commands run from the current folder would use
+	managedShown bool  // whether the "Managed folder: ..." line has been printed
 	gitWarned    bool
 }
 
@@ -168,10 +172,12 @@ func init() {
 func (a *App) mainUsage() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "aiplam %s - AI Playbook Manager\n%s\n\n", Version, Copyright)
-	b.WriteString(`Links the artifacts of AI playbooks (git checkouts shared by a team), such as skills, into the
-folders that coding agents read them from (.agents/skills, .claude/skills, ...): symbolic links (on Windows,
-directory junctions for folders, and symbolic links for files, which need developer mode).
-
+	b.WriteString("" +
+		"Links the artifacts of AI playbooks (git repositories shared by a team), such as skills, from your local clones\n" +
+		"into folders where coding agents read them (.agents/skills, .claude/skills, ...): symbolic links (on Windows,\n" +
+		"directory junctions for folders, and symbolic links for files, which need developer mode or administrator\n" +
+		"rights: without either, files are skipped with a warning).\n" +
+		`
 Usage: aiplam <command> [arguments]
 
 Commands:
@@ -182,21 +188,22 @@ Commands:
 	b.WriteString(`
 How it works:
   - a managed folder is a folder with a .aiplam folder, which holds aiplam's configuration for it: usually the home
-    folder (the user managed folder) and the folders where agent sessions start, such as a project's top folder;
+    folder (the user managed folder) and folders where agent sessions start, such as a project's top folder;
   - commands use the nearest managed folder from the current folder up to the home folder; when there is none, the
     home folder, if it is managed;
   - the configuration holds profiles: working scopes (a client, a team, a kind of work...), each with its target
-    folders (where it links each kind of artifact: skills, subagents, rules...) and its registered playbooks;
+    folders (where it links each artifact kind: skills, subagents, rules...) and its registered playbooks;
   - the target folders are given by hand, or taken from an agent template (` + "`--agent claude`" + `, ...);
   - aiplam links the artifacts of the playbooks of the enabled profiles into their target folders, so updating a
     playbook only takes switching its checkout to another tag and running 'aiplam update'.
 
 `)
-	b.WriteString("Agent templates: " + config.TemplateList() + ".\n'aiplam profile --help' shows their target folders.\n")
+	b.WriteString(wrapWords("Agent templates: "+config.TemplateList()+". 'aiplam profile --help' shows their target "+
+		"folders.", helpWidth) + "\n")
 	b.WriteString(`
 Options:
   -u, --user                 use the user managed folder (the home folder, e.g. /home/username)
-  -p, --profile PROFILE,...  for init, add, update and remove: the profiles to act on
+  -p, --profile PROFILE,...  for add, update and remove: the profiles to act on; for init: the profiles to create
 
 Getting started:
   aiplam init --user --agent claude                   # ~ as managed folder, with a profile for Claude Code
@@ -205,6 +212,29 @@ Getting started:
 
 Run 'aiplam <command> --help' for a command's help, and 'aiplam --version' for the version.
 `)
+	return b.String()
+}
+
+// helpWidth is the width of the help texts.
+const helpWidth = 120
+
+// wrapWords wraps text at its spaces into lines of at most width characters (longer words are not split).
+func wrapWords(text string, width int) string {
+	var b strings.Builder
+	line := 0
+	for i, word := range strings.Fields(text) {
+		switch {
+		case i == 0:
+		case line+1+len(word) > width:
+			b.WriteString("\n")
+			line = 0
+		default:
+			b.WriteString(" ")
+			line++
+		}
+		b.WriteString(word)
+		line += len(word)
+	}
 	return b.String()
 }
 
@@ -232,7 +262,7 @@ func templatesHelp() string {
 			fmt.Fprintf(&b, "    %-13s %s, %s\n", tt.Kind, project, user)
 		}
 	}
-	fmt.Fprintf(&b, "  The %s variants link skills from .agents/skills instead (in projects and in ~).\n",
+	fmt.Fprintf(&b, "  The %s variants link skills into .agents/skills instead (in projects and in ~).\n",
 		config.StandardVariant)
 	return b.String()
 }
@@ -601,6 +631,54 @@ func (a *App) newProfileState(prof *config.Profile, enabled bool) (*profileState
 	return s, nil
 }
 
+// transition plans the link changes from the profiles in from to those in to for the playbooks in scope (see
+// playbook.Transition). When links to files cannot be created, the plan skips them (see playbook.Plan.SkipFileLinks).
+// Whether they can is only found out when the plan wants one, as finding it out creates a test link (on Windows).
+//
+// Undoing a failed change recreates the links it removed: without the rights, a link to a file made earlier (when
+// they were available) cannot be recreated, and the failure to undo is reported (see undo).
+func (a *App) transition(from, to []*profileState, scope map[playbook.Key]bool) (playbook.Plan, error) {
+	plan, err := playbook.Transition(groups(from), groups(to), scope)
+	if err == nil && plan.WantsFileLinks() && !a.fileLinksAllowed() {
+		plan.SkipFileLinks()
+	}
+	return plan, err
+}
+
+// fileLinksAllowed reports, once per run, whether links to files can be created.
+func (a *App) fileLinksAllowed() bool {
+	if a.fileLinks == nil {
+		check := a.FileLinks
+		if check == nil {
+			check = fsutil.FileLinksAllowed
+		}
+		allowed := check()
+		a.fileLinks = &allowed
+	}
+	return *a.fileLinks
+}
+
+// skippedText describes the links to files a plan skips ("<count> artifact(s) <verb>", why, and one line per
+// artifact).
+func (a *App) skippedText(plan playbook.Plan, verb string) string {
+	skipped := plan.Skipped()
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d artifact(s) %s, as they are files and, on Windows, links to files need developer mode or "+
+		"administrator rights; once you have either, '%s' shows what to update to link them:", len(skipped), verb,
+		a.hint("status"))
+	for _, s := range skipped {
+		fmt.Fprintf(&b, "\n  %s %s of playbook %s -> %s", s.Artifact, s.Name, s.Playbook, a.pretty(s.Source))
+	}
+	return b.String()
+}
+
+// warnSkipped warns about the links to files a plan skips, if any.
+func (a *App) warnSkipped(plan playbook.Plan) {
+	if len(plan.Skipped()) > 0 {
+		a.warnf("%s", a.skippedText(plan, "were not linked"))
+	}
+}
+
 // groups returns the groups of profiles.
 func groups(profiles []*profileState) []playbook.Group {
 	var g []playbook.Group
@@ -772,7 +850,8 @@ func (a *App) templateCheck(s *profileState) {
 	for _, t := range targets {
 		want = append(want, t.Kind+": "+t.Folder)
 	}
-	a.warnf("profile '%s': its targets no longer match those of agent template '%s' (%s); if they were changed on "+
+	a.warnf("profile '%s': its target folders no longer match those of its agent template '%s' (%s); if they were "+
+		"changed on "+
 		"purpose, set 'agent: %s' in %s.", s.name, s.prof.Agent, strings.Join(want, ", "), config.CustomAgent,
 		a.profileFile(s.name))
 }
@@ -889,8 +968,8 @@ func (a *App) undo(plan playbook.Plan, saveErr error, state string) error {
 
 // Advice for each kind of conflict (see conflictAdvice).
 const (
-	adviceInTheWay = "remove or rename what is in the way (a link to the same artifact made by another playbook or " +
-		"profile is in the way too: every link belongs to a single playbook of a single profile)"
+	adviceInTheWay = "remove or rename what is in the way (a link to the same artifact that aiplam did not make for " +
+		"this playbook is in the way too: every link belongs to a single playbook of a single profile)"
 	adviceDuplicate = "give one of the playbooks a format (or name) that does not match the same artifacts, or " +
 		"unregister one of them"
 	adviceSame = "register the playbook in only one of the profiles enabled together"
@@ -967,10 +1046,11 @@ func (a *App) checkPlaybookFolders(e playbook.Entry, targets []playbook.Target) 
 	for _, t := range targets {
 		dir := e.SourceDir(t.Kind)
 		if _, err := os.Stat(dir); err == nil && !fsutil.IsDir(dir) {
-			return fmt.Errorf("playbook %s: its %s folder '%s' is not a folder", e.Label(), t.Kind, a.pretty(dir))
+			return fmt.Errorf("playbook %s: its subfolder for %s, '%s', is not a folder", e.Label(), t.Kind,
+				a.pretty(dir))
 		}
 		if fsutil.IsDir(dir) && !fsutil.Within(dir, e.Dir) {
-			return fmt.Errorf("playbook %s: its %s folder '%s' is outside the playbook folder '%s' (through a link)",
+			return fmt.Errorf("playbook %s: its subfolder for %s, '%s', is outside the playbook folder '%s' (through a link)",
 				e.Label(), t.Kind, a.pretty(dir), a.pretty(e.Dir))
 		}
 	}

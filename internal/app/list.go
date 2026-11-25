@@ -42,7 +42,8 @@ its target folder), each link:
 
 Only the links that belong to a registered playbook are listed: anything else in the target folders (artifacts added
 by hand, for example) is left out. Versions are shown for information only: aiplam links whatever is checked out.
-'aiplam status' shows what 'aiplam update' would change.
+'aiplam status' shows what 'aiplam update' would change. On Windows without developer mode or administrator rights,
+it ends by saying how many artifacts are not linked because they are files ('aiplam status' lists them).
 
 Examples:
   aiplam list
@@ -83,6 +84,28 @@ func (a *App) cmdList(args []string) error {
 		versions[e.Dir] = v
 		return v
 	}
+	// What update would do, to tell apart the artifacts that cannot be linked (files, on Windows without the rights),
+	// which are not on disk.
+	scope := map[playbook.Key]bool{}
+	for _, s := range st.enabled {
+		for _, e := range s.entries {
+			scope[e.Key()] = true
+		}
+	}
+	plan, err := a.transition(st.enabled, st.enabled, scope)
+	if err != nil {
+		plan = playbook.Plan{}
+	}
+	count := func(kind playbook.ActionKind, profile string) int {
+		n := 0
+		for _, act := range plan.Actions {
+			if act.Kind == kind && act.Profile == profile {
+				n++
+			}
+		}
+		return n
+	}
+
 	for _, s := range st.enabled {
 		a.printf("\nProfile %s (agent %s)\n", s.name, s.prof.Agent)
 		linked := false
@@ -136,10 +159,17 @@ func (a *App) cmdList(args []string) error {
 		case len(s.entries) == 0:
 			a.printf("  no playbooks are registered: register one with '%s'\n",
 				a.withProfile(st, s.name, "add <name> <playbookfolder>"))
+		case count(playbook.Skip, s.name) > 0 && count(playbook.Create, s.name) == 0:
+			a.printf("  nothing is linked: its playbooks' artifacts are files, which cannot be linked here (see below)\n")
 		default:
 			a.printf("  nothing is linked ('%s' shows what '%s' would link)\n", a.hint("status"),
 				a.withProfile(st, s.name, "update <playbook>"))
 		}
+	}
+
+	if len(plan.Skipped()) > 0 {
+		a.printf("\n%d artifact(s) are not linked, as they are files and, on Windows, links to files need developer "+
+			"mode or administrator rights ('%s' lists them).\n", len(plan.Skipped()), a.hint("status"))
 	}
 	return nil
 }

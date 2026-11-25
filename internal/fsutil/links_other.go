@@ -25,6 +25,8 @@ import (
 	"path/filepath"
 )
 
+func fileLinksAllowed() bool { return true }
+
 // createLink creates a symbolic link whose target is relative to the link's folder (with links resolved), so that the
 // link keeps working when a folder holding both the link and its target is moved.
 func createLink(link, target string) error {

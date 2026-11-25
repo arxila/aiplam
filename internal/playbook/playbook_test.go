@@ -436,3 +436,50 @@ func TestSamePlaybookReportedOnce(t *testing.T) {
 		t.Fatalf("plan: %+v", plan)
 	}
 }
+
+func TestSkipFileLinks(t *testing.T) {
+	s := newSandbox(t)
+	s.skill("x-a")
+	s.file("pb/subagents/x-r.md")
+	s.file("pb/subagents/x-s.md")
+	s.file("pb/subagents/x-t.md")
+	before := s.group("p")
+	// Something in the way of a link to a file (x-s), and of a link to a folder (x-a, left out of the rest).
+	s.file("m/.claude/agents/x-s.md")
+	after := s.group("p", pb("x", nil))
+	plan := s.transition([]Group{before}, []Group{after}, scopeOf(after))
+	plan.SkipFileLinks()
+	if got := actions(plan, Skip); got != "x-r.md,x-s.md,x-t.md" {
+		t.Fatalf("skipped: %s", got)
+	}
+	if got := actions(plan, Create); got != "x-a" {
+		t.Fatalf("created: %s", got)
+	}
+	if len(plan.Conflicts()) > 0 {
+		t.Fatalf("conflicts: %+v", plan.Conflicts())
+	}
+	if err := Apply(plan, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(s.link(".claude/agents/x-r.md")); !os.IsNotExist(err) {
+		t.Fatalf("a skipped link was created")
+	}
+
+	// A conflict between playbooks over a link to a file stays: it is in the configuration.
+	both := s.group("p", pb("x", nil), pb("y", map[string]config.Mapping{"subagents": {Folder: "subagents",
+		Format: "x-t.md"}}))
+	plan = s.transition([]Group{after}, []Group{both}, scopeOf(both))
+	plan.SkipFileLinks()
+	if len(plan.Conflicts()) != 1 || plan.Conflicts()[0].Cause != Duplicate || plan.Conflicts()[0].Name != "x-t.md" {
+		t.Fatalf("duplicate: %+v", plan.Conflicts())
+	}
+
+	// Something in the way of a link to a folder is still a conflict.
+	s.file("m/.agents/skills/x-b")
+	s.skill("x-b")
+	plan = s.transition([]Group{after}, []Group{after}, scopeOf(after))
+	plan.SkipFileLinks()
+	if len(plan.Conflicts()) != 1 || plan.Conflicts()[0].Name != "x-b" || plan.Conflicts()[0].Cause != NotLink {
+		t.Fatalf("folder in the way: %+v", plan.Conflicts())
+	}
+}

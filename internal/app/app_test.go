@@ -57,6 +57,7 @@ func (e *env) run(args ...string) (int, string, string) {
 	var out, errOut bytes.Buffer
 	e.app.Stdout, e.app.Stderr = &out, &errOut
 	e.app.gitWarned = false
+	e.app.fileLinks = nil
 	code := e.app.Run(args)
 	return code, out.String(), errOut.String()
 }
@@ -217,7 +218,7 @@ func TestInitUsage(t *testing.T) {
 		args []string
 		msg  string
 	}{
-		{[]string{"init"}, "init needs the folder"},
+		{[]string{"init"}, "init needs a folder"},
 		{[]string{"init", project}, "init needs the target folders: an agent template with --agent (standard, claude"},
 		{[]string{"init", project, "-u", "-a", "claude"}, "give either a folder or --user"},
 		{[]string{"init", project, "x", "-a", "claude"}, "unexpected argument: x"},
@@ -352,7 +353,7 @@ func TestAddAndMappings(t *testing.T) {
 		{[]string{"-f", "skills"}, "must be <kind>:<subfolder>[:<format>]"},
 		{[]string{"-f", "skills::*"}, "the playbook subfolder is empty"},
 		{[]string{"-f", "skills:.:a/b"}, "cannot contain path separators"},
-		{[]string{"-f", "skills:.:.x*"}, "would only match hidden entries"},
+		{[]string{"-f", "skills:.:.x*"}, "would only match hidden files and folders"},
 		{[]string{"-f", "skills:a,skills:b"}, "kind 'skills' is given more than once"},
 		{[]string{"-f", "skills:a:b:c"}, "must be <kind>:<subfolder>[:<format>]"},
 	} {
@@ -532,7 +533,7 @@ func TestStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.mustFail(ExitFailure, []string{"'aiplam update x' would link ~/.claude/skills/x-new",
-		"broken link ~/.claude/skills/stray", "its targets no longer match those of agent template 'claude'",
+		"broken link ~/.claude/skills/stray", "its target folders no longer match those of its agent template 'claude'",
 		"2 item(s) need attention"}, "status")
 	// A missing playbook folder.
 	if err := os.Rename(pb, pb+".moved"); err != nil {
@@ -1080,8 +1081,8 @@ func TestFilesWhereFoldersMustBe(t *testing.T) {
 	// A playbook subfolder that is a file: refused with a clear message, and reported by status, without stopping it.
 	other := e.mkdir(filepath.Join(e.root, "other"))
 	e.file("other/skills")
-	e.mustFail(ExitFailure, []string{"its skills folder '" + filepath.Join(other, "skills") + "' is not a folder"},
-		"add", "y", other)
+	e.mustFail(ExitFailure,
+		[]string{"its subfolder for skills, '" + filepath.Join(other, "skills") + "', is not a folder"}, "add", "y", other)
 	prof := e.profile(e.home, "default")
 	prof.Playbooks = append(prof.Playbooks, config.Playbook{Name: "y", Folder: "../other"})
 	if err := config.SaveProfile(e.home, prof); err != nil {
@@ -1136,5 +1137,106 @@ func TestQuotedHintsAndGitNote(t *testing.T) {
 	_, errOut := e.mustRun(ExitUsage, "help", "nope")
 	if strings.Contains(errOut, "Getting started") {
 		t.Fatalf("the whole help was printed: %s", errOut)
+	}
+}
+
+// TestFileLinksNotAllowed checks that, where links to files cannot be created (Windows without developer mode or
+// administrator rights), the artifacts that are files are skipped with a warning, and linked once they can be.
+func TestFileLinksNotAllowed(t *testing.T) {
+	e := newEnv(t)
+	allowed := false
+	e.app.FileLinks = func() bool { return allowed }
+	e.mustRun(ExitOK, "init", "-u", "-a", "claude")
+	pb := e.playbook("pb", "x-a")
+	e.file("pb/subagents/x-rev.md")
+	e.file("pb/rules/x-style.md")
+	agent := filepath.Join(e.home, ".claude", "agents", "x-rev.md")
+	rule := filepath.Join(e.home, ".claude", "rules", "x-style.md")
+
+	// add: the skill is linked, the files are skipped with a warning, and the playbook is registered.
+	e.mustFail(ExitOK, []string{"2 artifact(s) were not linked, as they are files",
+		"subagents x-rev.md of playbook x (profile default) -> " + filepath.Join(pb, "subagents", "x-rev.md"),
+		"rules x-style.md of playbook x (profile default)", "Added x."}, "add", "x", pb)
+	e.assertLink(filepath.Join(e.home, ".claude", "skills", "x-a"), filepath.Join(pb, "skills", "x-a"))
+	e.assertMissing(agent)
+	e.assertMissing(rule)
+	if len(e.profile(e.home, "default").Playbooks) != 1 {
+		t.Fatal("the playbook was not registered")
+	}
+
+	// status: reported, not counted; list: mentioned.
+	e.mustFail(ExitOK, []string{"2 artifact(s) cannot be linked", "Everything else is up to date."}, "status")
+	e.mustFail(ExitOK, []string{"2 artifact(s) are not linked, as they are files"}, "list")
+
+	// update: something in the way of a skipped link is no conflict, as nothing is created there.
+	e.file("home/.claude/agents/x-rev.md")
+	e.mustFail(ExitOK, []string{"up to date, except the files that cannot be linked", "2 artifact(s) were not linked"},
+		"update", "x")
+	if info, err := os.Lstat(agent); err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("the file in the way was touched: %v", err)
+	}
+	if err := os.Remove(agent); err != nil {
+		t.Fatal(err)
+	}
+
+	// A conflict between playbooks over a skipped link is still refused: it is in the configuration.
+	pb2 := e.mkdir(filepath.Join(e.root, "pb2"))
+	e.file("pb2/subagents/x-rev.md")
+	e.mustFail(ExitFailure, []string{"would also be linked by x (profile default)"}, "add", "y", pb2,
+		"-f", "subagents:subagents:x-*")
+
+	// profile enable: the same.
+	e.mustRun(ExitOK, "profile", "add", "other", "-a", "claude")
+	e.file("pb3/rules/z-rule.md")
+	e.mustRun(ExitOK, "add", "z", filepath.Join(e.root, "pb3"), "-p", "other")
+	e.mustFail(ExitOK, []string{"1 artifact(s) were not linked", "rules z-rule.md of playbook z (profile other)"},
+		"profile", "enable", "other")
+	// list: a profile whose only artifacts are skipped files says so, not that 'update' would link them.
+	e.mustFail(ExitOK, []string{"Profile other (agent claude)\n  nothing is linked: its playbooks' artifacts are files"},
+		"list")
+	// ...but with something 'update' would link, too, it points to it.
+	e.skill(filepath.Join(e.root, "pb3", "skills"), "z-new")
+	e.mustFail(ExitOK, []string{"Profile other (agent claude)\n  nothing is linked ('aiplam status' shows what"}, "list")
+	e.mustRun(ExitOK, "profile", "disable", "other")
+
+	// Once links to files can be created: status shows what to update, and update links them.
+	allowed = true
+	e.mustFail(ExitFailure, []string{"'aiplam update x' would link ~/.claude/agents/x-rev.md", "2 item(s)"}, "status")
+	out, errOut := e.mustRun(ExitOK, "update", "x")
+	if strings.Contains(out+errOut, "not linked") {
+		t.Fatalf("unexpected warning:\n%s%s", out, errOut)
+	}
+	e.assertLink(agent, filepath.Join(pb, "subagents", "x-rev.md"))
+	e.assertLink(rule, filepath.Join(pb, "rules", "x-style.md"))
+	e.mustFail(ExitOK, []string{"Everything is up to date."}, "status")
+	if out, _ := e.mustRun(ExitOK, "list"); strings.Contains(out, "are not linked") {
+		t.Fatalf("list mentions skipped artifacts:\n%s", out)
+	}
+
+	// Existing links to files are still removed when they cannot be created (removing one needs no rights).
+	allowed = false
+	e.mustRun(ExitOK, "remove", "x")
+	e.assertMissing(agent)
+	e.assertMissing(rule)
+}
+
+// TestFileLinksCheckedOnlyWhenWanted checks that whether links to files can be created (which creates a test link, on
+// Windows) is only found out when a plan wants one.
+func TestFileLinksCheckedOnlyWhenWanted(t *testing.T) {
+	e := newEnv(t)
+	checks := 0
+	e.app.FileLinks = func() bool { checks++; return false }
+	e.mustRun(ExitOK, "init", "-u", "-a", "claude")
+	pb := e.playbook("pb", "x-a")
+	for _, args := range [][]string{{"add", "x", pb}, {"status"}, {"list"}, {"update", "x"}} {
+		e.mustRun(ExitOK, args...)
+	}
+	if checks != 0 {
+		t.Fatalf("checked %d time(s) without any link to a file to make", checks)
+	}
+	e.file("pb/rules/x-style.md")
+	e.mustRun(ExitOK, "update", "x")
+	if checks != 1 {
+		t.Fatalf("checked %d time(s) for one update with a link to a file to make, want 1", checks)
 	}
 }

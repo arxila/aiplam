@@ -82,6 +82,13 @@ func CreateLink(link, target string) error {
 	return createLink(link, target)
 }
 
+// FileLinksAllowed reports whether links to files can be created: always on Linux and macOS; on Windows, only with
+// developer mode or administrator rights, which it finds out by trying to create one in a temporary folder (any failure
+// other than missing rights counts as allowed, so that creating the real links reports it).
+func FileLinksAllowed() bool {
+	return fileLinksAllowed()
+}
+
 // RemoveLink removes the link at path, never its target's content. It fails when path is not a link.
 func RemoveLink(path string) error {
 	state, _, err := Inspect(path)

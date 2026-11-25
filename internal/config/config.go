@@ -102,13 +102,13 @@ func (t Targets) MarshalYAML() (any, error) {
 // UnmarshalYAML reads the targets from a mapping of kinds to folders, keeping their order.
 func (t *Targets) UnmarshalYAML(node *yaml.Node) error {
 	if node.Kind != yaml.MappingNode {
-		return fmt.Errorf("line %d: targets must be a mapping from kinds of artifacts to folders", node.Line)
+		return fmt.Errorf("line %d: targets must be a mapping from artifact kinds to target folders", node.Line)
 	}
 	*t = nil
 	for i := 0; i+1 < len(node.Content); i += 2 {
 		k, v := node.Content[i], node.Content[i+1]
 		if k.Kind != yaml.ScalarNode || v.Kind != yaml.ScalarNode {
-			return fmt.Errorf("line %d: targets must be a mapping from kinds of artifacts to folders", k.Line)
+			return fmt.Errorf("line %d: targets must be a mapping from artifact kinds to target folders", k.Line)
 		}
 		*t = append(*t, Target{Kind: k.Value, Folder: v.Value})
 	}
@@ -337,7 +337,7 @@ func CleanTarget(folder string, user bool) (string, error) {
 	c := path.Clean(f)
 	switch {
 	case c == "." || c == "":
-		return "", fmt.Errorf("target folder '%s' cannot be the folder itself", folder)
+		return "", fmt.Errorf("target folder '%s' cannot be the managed folder itself", folder)
 	case !filepath.IsLocal(filepath.FromSlash(c)):
 		return "", fmt.Errorf("target folder '%s' is not a valid folder name", folder)
 	case prefix == "" && strings.EqualFold(strings.Split(c, "/")[0], DirName):
@@ -369,9 +369,9 @@ func CheckFormat(format string) error {
 	case format == "":
 		return errors.New("the format is empty")
 	case strings.ContainsAny(format, `/\`):
-		return fmt.Errorf("format '%s' cannot contain path separators: it matches names of entries", format)
+		return fmt.Errorf("format '%s' cannot contain path separators: it matches the names of files and folders", format)
 	case strings.HasPrefix(format, "."):
-		return fmt.Errorf("format '%s' would only match hidden entries, which are never linked", format)
+		return fmt.Errorf("format '%s' would only match hidden files and folders, which are never artifacts", format)
 	}
 	return nil
 }
@@ -705,7 +705,7 @@ func (s *Profile) Validate(managed, profile string, user bool) []error {
 		for _, kind := range kinds {
 			m := p.Mappings[kind]
 			if _, ok := s.Targets.Folder(kind); !ok {
-				add("%s: mappings: '%s' is not a kind of the profile's targets (%s)", label, kind,
+				add("%s: mappings: '%s' is not a kind of the profile's target folders (%s)", label, kind,
 					strings.Join(s.Targets.Kinds(), ", "))
 			}
 			if _, err := CleanSubfolder(m.Folder); err != nil {

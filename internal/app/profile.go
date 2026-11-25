@@ -38,13 +38,13 @@ var profileUsage = `Usage: aiplam profile list
        aiplam profile switch <profile>[,<profile>...]
 
 Manages profiles: working scopes, such as a client, a team or a kind of work, each kept in its own file
-(<managedfolder>/.aiplam/<profile>.yaml) with its target folders (where the artifacts of each kind are linked) and its
-registered playbooks:
+(<managedfolder>/.aiplam/<profile>.yaml) with its target folders (where the artifacts of each kind are linked), its
+agent (the template its target folders were taken from, or '` + config.CustomAgent + `') and its registered playbooks:
   - only the playbooks of the enabled profiles are linked, so switching scopes is enabling and disabling profiles;
   - several profiles can be enabled at once, combining their scopes; every link belongs to a single playbook of a
     single profile, so profiles enabled together cannot link anything at the same place, nor register the same
     playbook (same name and playbook folder);
-  - 'add', 'update' and 'remove' act on the enabled profile, or on those given with --profile.
+  - 'add', 'update' and 'remove' act on the enabled profile (when only one is), or on those given with --profile.
 
 Subcommands:
   list      list the profiles and their agents; '*' marks the enabled ones
@@ -57,9 +57,10 @@ Subcommands:
   disable   disable profiles: unlink their playbooks
   switch    enable exactly the given profiles: disable the others and enable these, all-or-nothing
 
-Enabling, disabling and switching are all-or-nothing: nothing changes if any link cannot be made. A profile's target
-folders and agent are not changed by any command: edit its file (and set its agent to '` + config.CustomAgent + `' when
-the targets no longer match its template, as 'aiplam status' warns), or remove it and create it again.
+Enabling, disabling and switching are all-or-nothing: nothing changes if any link cannot be made (except links to
+files on Windows without developer mode or administrator rights, which are skipped with a warning). A profile's target
+folders and agent are not changed by any command: edit its file (and set its agent to '` + config.CustomAgent + `'
+when the targets no longer match its template, as 'aiplam status' warns), or remove it and create it again.
 
 Folders are created when an artifact is first linked there, and removed when unlinking leaves them empty (such as
 .claude/agents, and then .claude itself, up to the managed folder), but never when they hold anything else, such as
@@ -436,7 +437,7 @@ func (a *App) changeProfiles(updated *config.Config, removed, added, stay []*pro
 	}
 	from := append(append([]*profileState{}, stay...), removed...)
 	to := append(append([]*profileState{}, stay...), added...)
-	plan, err := playbook.Transition(groups(from), groups(to), scope)
+	plan, err := a.transition(from, to, scope)
 	if err != nil {
 		return err
 	}
@@ -461,6 +462,7 @@ func (a *App) changeProfiles(updated *config.Config, removed, added, stay []*pro
 		return a.undo(plan, err, "the enabled profiles were not changed")
 	}
 	a.cleanup(plan)
+	a.warnSkipped(plan)
 	if len(updated.Enabled) == 0 {
 		a.printf("No profile is enabled now.\n")
 	} else {

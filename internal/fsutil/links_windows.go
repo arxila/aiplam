@@ -22,6 +22,7 @@ package fsutil
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -39,6 +40,20 @@ func createLink(link, target string) error {
 		return createFileLink(link, target)
 	}
 	return createJunction(link, target)
+}
+
+func fileLinksAllowed() bool {
+	dir, err := os.MkdirTemp("", "aiplam-")
+	if err != nil {
+		return true
+	}
+	defer os.RemoveAll(dir)
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, nil, 0o644); err != nil {
+		return true
+	}
+	err = os.Symlink("target", filepath.Join(dir, "link"))
+	return !errors.Is(err, windows.ERROR_PRIVILEGE_NOT_HELD)
 }
 
 // createFileLink creates a symbolic link to a file, with a target relative to the link's folder when possible.

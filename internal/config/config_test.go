@@ -437,7 +437,8 @@ func TestTargetDir(t *testing.T) {
 	}
 }
 
-// TestReadmeTemplates checks that the README lists every agent template, in the order of the table.
+// TestReadmeTemplates checks that the README's table of agent templates lists every template, in the order of
+// TemplateTable.
 func TestReadmeTemplates(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
 	if err != nil {
@@ -445,7 +446,7 @@ func TestReadmeTemplates(t *testing.T) {
 	}
 	var listed []string
 	for _, line := range strings.Split(string(data), "\n") {
-		if name, ok := strings.CutPrefix(line, "- `"); ok {
+		if name, ok := strings.CutPrefix(line, "| `"); ok {
 			if name, _, ok := strings.Cut(name, "`"); ok {
 				if _, _, known := LookupTemplate(name); known && !strings.Contains(name, ":") {
 					listed = append(listed, name)

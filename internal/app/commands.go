@@ -35,11 +35,11 @@ const targetOptions = `Target folders (exactly one of):
   -a, --agent AGENT              take them from an agent template (` + "'aiplam profile --help'" + ` lists them): the
                                  template only fills them in; the profile then works as if they had been given by hand
   -f, --folder KIND:FOLDER,...   give them by hand: the folder, relative to the managed folder, where the artifacts of
-                                 each kind are linked. Kinds are any names (skills, subagents, my-prompts...); they
-                                 match the playbooks' subfolders of the same name. Repeat the option or separate the
-                                 items with commas; quote folders holding commas or colons ("my, folder"). Folders
-                                 cannot contain '..'; in the user managed folder, they can start with %APPDATA%
-                                 (Windows)`
+                                 each kind are linked. Kinds are any names (skills, subagents, my-prompts...); by
+                                 default, they match the playbooks' subfolders of the same name. Repeat the option or
+                                 separate the items with commas; quote folders holding commas or colons ("my,
+                                 folder"). Folders cannot contain '..'; in the user managed folder, they can start with
+                                 %APPDATA% (Windows)`
 
 // targetsFromOptions returns the agent and the targets given with --agent or --folder, for the user managed folder when
 // user is set.
@@ -73,8 +73,9 @@ Makes <folder> (or, with --user, the home folder) a managed folder:
   - creates <folder>/.aiplam, holding its configuration (aiplam-config.yaml, and one <profile>.yaml per profile);
   - creates its first profiles (by default, one named 'default'), all with the same target folders, and enables them.
 
-From then on, commands run anywhere inside <folder> use its configuration: each command uses the nearest managed
-folder from the current folder up to the home folder (or, when there is none, the home folder, if it is managed).
+From then on, commands run inside <folder> use its configuration, unless a managed folder below it is nearer: each
+command uses the nearest managed folder from the current folder up to the home folder (or, when there is none, the
+home folder, if it is managed).
 
 ` + targetOptions + `
 
@@ -99,7 +100,7 @@ func (a *App) cmdInit(args []string) error {
 	case a.user && len(p.positional) > 0:
 		return usagef("give either a folder or --user, not both")
 	case !a.user && len(p.positional) == 0:
-		return usagef("init needs the folder to make a managed folder, or --user for the home folder")
+		return usagef("init needs a folder to make a managed folder, or --user for the home folder")
 	case len(p.positional) > 1:
 		return usagef("unexpected argument: %s", p.positional[1])
 	}
@@ -114,7 +115,7 @@ func (a *App) cmdInit(args []string) error {
 	}
 	if !a.user {
 		if info, err := os.Stat(a.Managed); err == nil && !info.IsDir() {
-			return fmt.Errorf("'%s' is not a folder: give the folder to make a managed folder", p.positional[0])
+			return fmt.Errorf("'%s' is not a folder: give a folder to make a managed folder", p.positional[0])
 		}
 		if !fsutil.IsDir(a.Managed) {
 			return fmt.Errorf("folder '%s' does not exist", p.positional[0])
@@ -210,9 +211,10 @@ Registers the playbook in <playbookfolder> under <name> in profiles and, in thos
 artifacts into their target folders, at whatever tag or commit is checked out:
   - the profiles are those given with --profile, enabled or not; it can be left out when exactly one profile is
     enabled;
-  - for each kind of the profile's targets, the artifacts are the entries (folders and files alike) of the
-    playbook's subfolder for the kind whose names match the kind's format: by default, the subfolder named like the
-    kind and the format '<name>-*'. Hidden entries (named '.*') are never artifacts;
+  - for each kind of the profile's targets, the artifacts are the files and folders directly inside the playbook's
+    subfolder for the kind whose names match the kind's format: by default, the subfolder named like the kind and
+    the format '<name>-*'. A matching file is linked; a matching folder is linked as a whole, with everything inside
+    it. Hidden entries (named '.*') are never artifacts;
   - <playbookfolder> is stored relative to the managed folder;
   - several playbooks can share a name if the last segments of their playbook folders differ: their ids are then
     '<name>@<last folder segment>'.
@@ -220,8 +222,12 @@ artifacts into their target folders, at whatever tag or commit is checked out:
 Subfolders that do not exist yet are fine: what a subfolder holds is linked whenever the playbook is updated or its
 profile enabled.
 
+On Windows without developer mode or administrator rights, the artifacts that are files (subagents, rules...) are
+not linked, with a warning: links to files need either. The rest is linked, and the playbook is registered.
+
 Every link belongs to a single playbook of a single profile, so nothing is registered or linked if:
-  - something is already where a link must go, even a link to the same artifact made by another playbook or profile;
+  - something is already where a link must go, even a link to the same artifact that aiplam did not make for this
+    playbook (except where a skipped link to a file would go, as nothing is created there);
   - another playbook, of this profile or of another enabled profile, would link something at the same place;
   - the same playbook (same name and playbook folder) is registered in another enabled profile.
 
@@ -252,7 +258,8 @@ func (a *App) cmdAdd(args []string) error {
 	}
 	name := p.positional[0]
 	if !config.ValidName(name) {
-		return usagef("invalid name '%s': use letters, digits, '.', '_' and '-', starting with a letter or digit", name)
+		return usagef("invalid playbook name '%s': use letters, digits, '.', '_' and '-', starting with a letter or "+
+			"digit", name)
 	}
 	mappings, err := parseMappings(p.values["folder"])
 	if err != nil {
@@ -327,7 +334,7 @@ func (a *App) cmdAdd(args []string) error {
 
 	var plan playbook.Plan
 	if len(scope) > 0 {
-		plan, err = playbook.Transition(groups(st.enabled), groups(replaceProfiles(st.enabled, updated...)), scope)
+		plan, err = a.transition(st.enabled, replaceProfiles(st.enabled, updated...), scope)
 		if err != nil {
 			return err
 		}
@@ -359,7 +366,7 @@ func (a *App) cmdAdd(args []string) error {
 	}
 	if total == 0 {
 		a.warnf("no artifacts were found in '%s' for the kinds of the profile(s): check the subfolders and formats "+
-			"above (they are linked as they appear, with 'aiplam update').", a.pretty(folder))
+			"above (artifacts that appear later are linked by 'aiplam update').", a.pretty(folder))
 	}
 	for i, u := range updated {
 		if !u.enabled {
@@ -367,6 +374,7 @@ func (a *App) cmdAdd(args []string) error {
 		}
 		a.reportRenamedIDs(selected[i].entries, u.entries)
 	}
+	a.warnSkipped(plan)
 	a.printf("Added %s.\n", name)
 	return nil
 }
@@ -416,14 +424,15 @@ The playbook is chosen, in each profile, by:
 
 aiplam never fetches, pulls or switches a checkout: select the version in the playbook folder first. Only the
 playbooks of the enabled profiles are linked, so only they have anything to update. Nothing is changed if a link
-cannot be made ('aiplam add --help' explains why that can happen).
+cannot be made ('aiplam add --help' explains why that can happen), except links to files on Windows without developer
+mode or administrator rights, which are skipped with a warning.
 
 Options:
   -p, --profile PROFILE,...   the profiles to update the playbook in (default: the enabled profile, when only one is)
 
 Examples:
   cd ~/Workspace/arxila-ai-playbook
-  git switch --detach v1.3.0
+  git checkout v1.3.0
   aiplam update                # the playbook registered for the current folder
   aiplam update arxila
 `
@@ -459,7 +468,7 @@ func (a *App) cmdUpdate(args []string) error {
 	if len(scope) == 0 {
 		return nil
 	}
-	plan, err := playbook.Transition(groups(st.enabled), groups(st.enabled), scope)
+	plan, err := a.transition(st.enabled, st.enabled, scope)
 	if err != nil {
 		return err
 	}
@@ -469,13 +478,19 @@ func (a *App) cmdUpdate(args []string) error {
 		return errSilent
 	}
 	if len(plan.Changes()) == 0 {
-		a.printf("  up to date\n")
+		if len(plan.Skipped()) > 0 {
+			a.printf("  up to date, except the files that cannot be linked (see below)\n")
+		} else {
+			a.printf("  up to date\n")
+		}
+		a.warnSkipped(plan)
 		return nil
 	}
 	if err := playbook.Apply(plan, a.printAction); err != nil {
 		return err
 	}
 	a.cleanup(plan)
+	a.warnSkipped(plan)
 	return nil
 }
 
@@ -568,7 +583,7 @@ func (a *App) cmdRemove(args []string) error {
 	}
 	var plan playbook.Plan
 	if len(scope) > 0 {
-		plan, err = playbook.Transition(groups(st.enabled), groups(replaceProfiles(st.enabled, updated...)), scope)
+		plan, err = a.transition(st.enabled, replaceProfiles(st.enabled, updated...), scope)
 		if err != nil {
 			return err
 		}

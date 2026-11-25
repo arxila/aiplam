@@ -168,6 +168,9 @@ const (
 	Remove
 	// Conflict: the link cannot be created; the operation must be cancelled.
 	Conflict
+	// Skip: the link, to a file, is not created, as links to files cannot be created (on Windows, without developer
+	// mode or administrator rights; see Plan.SkipFileLinks).
+	Skip
 )
 
 // ConflictCause says why an action is a Conflict.
@@ -221,6 +224,39 @@ type Plan struct {
 
 // Conflicts returns the conflicting actions.
 func (p Plan) Conflicts() []Action { return p.filter(Conflict) }
+
+// Skipped returns the links to files that are not created (see SkipFileLinks).
+func (p Plan) Skipped() []Action { return p.filter(Skip) }
+
+// SkipFileLinks turns the creations of links to files into Skip actions, for when links to files cannot be created.
+// So does it with the conflicts with what is found where such a link must go (NotLink, OtherLink and Exists), as
+// nothing will be created there; conflicts between playbooks (Duplicate and SamePlaybook) stay, as they are conflicts
+// in the configuration.
+func (p *Plan) SkipFileLinks() {
+	for i, a := range p.Actions {
+		if wantsFileLink(a) {
+			p.Actions[i].Kind, p.Actions[i].Cause, p.Actions[i].Current = Skip, 0, ""
+		}
+	}
+}
+
+// WantsFileLinks reports whether the plan would create a link to a file, or is in conflict with what is found where
+// one must go: whether SkipFileLinks would change it.
+func (p Plan) WantsFileLinks() bool {
+	for _, a := range p.Actions {
+		if wantsFileLink(a) {
+			return true
+		}
+	}
+	return false
+}
+
+// wantsFileLink reports whether an action creates a link to a file, or is a conflict with what is found where one
+// must go (see SkipFileLinks).
+func wantsFileLink(a Action) bool {
+	inTheWay := a.Kind == Conflict && (a.Cause == NotLink || a.Cause == OtherLink || a.Cause == Exists)
+	return (a.Kind == Create || inTheWay) && !fsutil.IsDir(a.Source)
+}
 
 // Changes returns the actions that would change something (removals, then creations).
 func (p Plan) Changes() []Action {
