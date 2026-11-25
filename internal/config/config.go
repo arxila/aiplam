@@ -537,10 +537,11 @@ func SaveProfile(managed string, s *Profile) error {
 	}
 	return save(ProfileFile(managed, s.Name), s, fmt.Sprintf(
 		"# aiplam (AI Playbook Manager) profile '%s'.\n"+
-			"# agent: the agent template the targets were created from, or '%s' if they were given by hand. It is only\n"+
-			"#   a label: 'aiplam status' and 'aiplam list' warn when the targets no longer match the template; set it\n"+
-			"#   to '%s' when changing the targets by hand.\n"+
-			"# targets: the folder (relative to the managed folder) where the artifacts of each kind are linked.\n"+
+			"# agent: the agent template the target folders were taken from, or '%s' if they were given by hand.\n"+
+			"#   aiplam only uses it to warn ('aiplam status', 'aiplam list') when the target folders no longer match\n"+
+			"#   the template; set it to '%s' when changing them on purpose.\n"+
+			"# targets: for each artifact kind, the target folder (relative to the managed folder) where its artifacts\n"+
+			"#   are linked.\n"+
 			"# playbooks: registered playbooks, managed with 'aiplam add', 'aiplam update' and 'aiplam remove'; their\n"+
 			"#   mappings are those given with 'aiplam add --folder' (other kinds use the subfolder named like the kind,\n"+
 			"#   and the format '<name>-*').\n",
