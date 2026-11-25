@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"arxila.io/aiplam/internal/config"
+	"arxila.io/aiplam/internal/fsutil"
 	"arxila.io/aiplam/internal/playbook"
 )
 
@@ -146,10 +147,15 @@ func (a *App) cmdProfile(args []string) error {
 		if err != nil {
 			return err
 		}
-		for _, name := range names {
+		for i, name := range names {
 			if sub != "disable" && !config.ProfileExists(a.Managed, name) {
 				return fmt.Errorf("profile '%s' does not exist; create it with '%s'", name,
 					a.hint("profile add "+name+" --agent <agent>"))
+			}
+			// The configuration names profiles by their files ("work", even when given as "Work" on a file system
+			// that ignores case), so that it works on any file system.
+			if sub != "disable" {
+				names[i] = config.ProfileName(a.Managed, name)
 			}
 		}
 		switch sub {
@@ -223,10 +229,11 @@ func (a *App) profileShow(conf *config.Config, name string) error {
 	}
 	a.printf("Playbooks:\n")
 	for _, e := range s.entries {
-		version := "missing playbook folder"
+		version := "unknown"
 		if err := a.checkPlaybookFolders(e, s.targets); err != nil {
 			a.warnf("%s", err)
-		} else {
+		}
+		if fsutil.IsDir(e.Dir) {
 			version = a.version(e.Dir).String()
 		}
 		a.printf("  %s: %s (%s)\n", e.ID, a.pretty(e.Dir), version)
@@ -412,6 +419,9 @@ func namesOf(profiles []*profileState) []string {
 func (a *App) changeProfiles(updated *config.Config, removed, added, stay []*profileState) error {
 	scope := map[playbook.Key]bool{}
 	for _, s := range added {
+		if err := a.checkTargetFolders(s); err != nil {
+			return fmt.Errorf("%w; profile '%s' cannot be enabled, so nothing was changed", err, s.name)
+		}
 		for _, e := range s.entries {
 			if err := a.checkPlaybookFolders(e, s.targets); err != nil {
 				return fmt.Errorf("%w; profile '%s' cannot be enabled, so nothing was changed", err, s.name)

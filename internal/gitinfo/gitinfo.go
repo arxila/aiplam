@@ -29,13 +29,13 @@ import (
 // Version is the checked-out version of a folder.
 type Version struct {
 	// Known is false when git is not available or the folder is not a git checkout.
-	Known bool `json:"known"`
+	Known bool
 	// Tags are the tags pointing at the checked-out commit.
-	Tags []string `json:"tags"`
+	Tags []string
 	// Branch is the checked-out branch, when HEAD is attached.
-	Branch string `json:"branch,omitempty"`
+	Branch string
 	// Commit is the abbreviated checked-out commit.
-	Commit string `json:"commit,omitempty"`
+	Commit string
 }
 
 // String formats the version for humans: the tags ("v1.2.0", or "v1.2.0, stable"), "branch: b", "commit: c

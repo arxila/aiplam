@@ -132,13 +132,13 @@ type Item struct {
 
 // Items returns the artifacts that e provides for kind: the entries of its folder for the kind (files and folders
 // alike) whose names match its format, except hidden ones and links leading outside the playbook folder, sorted by
-// name. A playbook without a folder for the kind provides none.
+// name. A playbook without a folder for the kind (or with something else than a folder there) provides none.
 func Items(e Entry, kind string) ([]Item, error) {
 	dir := e.SourceDir(kind)
-	entries, err := os.ReadDir(dir)
-	if errors.Is(err, os.ErrNotExist) {
+	if !fsutil.IsDir(dir) {
 		return nil, nil
 	}
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}

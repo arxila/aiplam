@@ -42,8 +42,10 @@ Then it reports everything that needs attention, and exits with 1 if there is an
   - for each playbook of the enabled profiles, the links that 'aiplam update' would create or remove, or the reasons
     it would refuse to;
   - in the target folders of every profile, the links that belong to no playbook of the enabled profiles and are
-    broken, or lead into a registered playbook folder (left behind by changes to the configuration made by hand,
-    such as disabling a profile or changing a mapping): remove them by hand.
+    broken, or lead into a registered playbook folder: aiplam leaves those when the configuration is changed by hand
+    (such as disabling a profile or changing a mapping), and they get in the way of the playbook's own links, so they
+    must be removed by hand, even if you made them yourself;
+  - target folders (or their parents) and playbook subfolders that are files, not folders.
 It also warns, without counting them, about the profiles that are not enabled and not valid (they cannot be enabled
 until they are fixed).
 
@@ -192,6 +194,10 @@ func (a *App) cmdStatus(args []string) error {
 	// Every playbook of the enabled profiles, planned together: what 'aiplam update' would change for each.
 	scope := map[playbook.Key]bool{}
 	for _, s := range st.enabled {
+		if err := a.checkTargetFolders(s); err != nil {
+			problem("%s", err)
+			continue
+		}
 		for _, e := range s.entries {
 			if err := a.checkPlaybookFolders(e, s.targets); err != nil {
 				problem("%s", err)
@@ -254,7 +260,8 @@ func (a *App) cmdStatus(args []string) error {
 			for _, r := range registered {
 				if fsutil.Within(fsutil.Canonical(current), r) {
 					problem("%s -> %s leads into a registered playbook folder, but it belongs to no playbook of the "+
-						"enabled profiles (a leftover of a change to the configuration made by hand?): remove it by hand",
+						"enabled profiles: aiplam leaves such links when the configuration is changed by hand, and they "+
+						"get in the way of the playbook's own links; remove it by hand (if you made it yourself, too)",
 						a.pretty(link), a.pretty(current))
 					break
 				}

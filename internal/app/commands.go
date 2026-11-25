@@ -184,7 +184,9 @@ func (a *App) cmdInit(args []string) error {
 	if repo := config.GitRepository(a.Managed); repo != "" {
 		var lines []string
 		for _, t := range targets {
-			lines = append(lines, "'/"+t.Folder+"/<name>-*'")
+			if !strings.HasPrefix(t.Folder, config.AppData+"/") { // not in the managed folder, so not in its repository
+				lines = append(lines, "'/"+t.Folder+"/<name>-*'")
+			}
 		}
 		a.printf("Note: '%s' is inside a git repository. The %s folder can be committed to share the configuration "+
 			"(playbook folders are stored relative to '%s'), but the links aiplam makes in the target folders belong to "+
@@ -311,6 +313,11 @@ func (a *App) cmdAdd(args []string) error {
 		if err := a.checkPlaybookFolders(e, u.targets); err != nil {
 			return err
 		}
+		if u.enabled {
+			if err := a.checkTargetFolders(u); err != nil {
+				return err
+			}
+		}
 		updated = append(updated, u)
 		entries = append(entries, e)
 		if u.enabled {
@@ -371,7 +378,9 @@ func (a *App) printSources(s *profileState, e playbook.Entry) int {
 	for _, t := range s.targets {
 		dir := e.SourceDir(t.Kind)
 		what := "not found"
-		if fsutil.IsDir(dir) {
+		if _, err := os.Stat(dir); err == nil && !fsutil.IsDir(dir) {
+			what = "not a folder"
+		} else if fsutil.IsDir(dir) {
 			items, _ := playbook.Items(e, t.Kind)
 			what = fmt.Sprintf("%d artifact(s)", len(items))
 			total += len(items)
@@ -438,6 +447,9 @@ func (a *App) cmdUpdate(args []string) error {
 			continue
 		}
 		if err := a.checkPlaybookFolders(sel.entry, sel.profile.targets); err != nil {
+			return err
+		}
+		if err := a.checkTargetFolders(sel.profile); err != nil {
 			return err
 		}
 		scope[sel.entry.Key()] = true

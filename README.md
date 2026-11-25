@@ -419,9 +419,11 @@ Target folders are relative to the managed folder. Playbook folders are relative
 
 Editing a file by hand does not move any link. `aiplam status` then reports what `update` would change, and the links
 left behind: those in the target folders of any profile that lead into a registered playbook folder but belong to no
-playbook of the enabled profiles (after disabling a profile by hand, or changing a playbook's mapping), which you
-remove by hand. It cannot see links left in a folder that is no longer a target folder of any profile: before
-changing a target folder by hand, disable the profile (its links go), and enable it again afterwards.
+playbook of the enabled profiles (after disabling a profile by hand, or changing a playbook's mapping), which you remove
+by hand: they would get in the way of the playbook's own links, even if you made them yourself. It also reports target
+folders and playbook subfolders that are files, not folders. It cannot see links left in a folder that is no longer a
+target folder of any profile: before changing a target folder by hand, disable the profile (its links go), and enable it
+again afterwards.
 
 The `.aiplam` folder also holds `.lock`, which keeps two commands from changing the managed folder at once, and a
 `.gitignore` that keeps it out of git when the folder is committed.

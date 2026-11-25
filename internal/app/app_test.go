@@ -841,7 +841,11 @@ func TestHelpAndVersion(t *testing.T) {
 			}
 		}
 	}
-	out, _ := e.mustRun(ExitOK, "profile", "--help")
+	out, _ := e.mustRun(ExitOK, "--help")
+	if !strings.Contains(out, "list, show, add, remove, enable, disable, switch") {
+		t.Fatalf("unexpected main help:\n%s", out)
+	}
+	out, _ = e.mustRun(ExitOK, "profile", "--help")
 	if !strings.Contains(out, "devin (and devin:standard): Devin") ||
 		!strings.Contains(out, "~/.config/devin/skills (Windows: %APPDATA%/devin/skills)") {
 		t.Fatalf("unexpected profile help:\n%s", out)
@@ -1048,4 +1052,89 @@ func TestFailedInitIsUndone(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.mustRun(ExitOK, "init", project, "-a", "standard", "-p", "a,b")
+}
+
+func TestFilesWhereFoldersMustBe(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init", "-u", "-f", "skills:t/skills")
+	pb := e.playbook("pb", "x-a")
+	// A target folder's parent that is a file: refused with a clear message, and reported by status.
+	e.file("home/t")
+	e.mustFail(ExitFailure, []string{"target folder 't/skills' cannot be used: '~/t' exists and is not a folder"},
+		"add", "x", pb)
+	if err := os.Remove(filepath.Join(e.home, "t")); err != nil {
+		t.Fatal(err)
+	}
+	e.mustRun(ExitOK, "add", "x", pb)
+	if err := os.RemoveAll(filepath.Join(e.home, "t")); err != nil {
+		t.Fatal(err)
+	}
+	e.file("home/t/skills")
+	e.mustFail(ExitFailure, []string{"'~/t/skills' exists and is not a folder", "1 item(s)"}, "status")
+	e.mustFail(ExitFailure, []string{"'~/t/skills' exists and is not a folder"}, "update", "x")
+	if err := os.Remove(filepath.Join(e.home, "t", "skills")); err != nil {
+		t.Fatal(err)
+	}
+	e.mustRun(ExitOK, "update", "x")
+
+	// A playbook subfolder that is a file: refused with a clear message, and reported by status, without stopping it.
+	other := e.mkdir(filepath.Join(e.root, "other"))
+	e.file("other/skills")
+	e.mustFail(ExitFailure, []string{"its skills folder '" + filepath.Join(other, "skills") + "' is not a folder"},
+		"add", "y", other)
+	prof := e.profile(e.home, "default")
+	prof.Playbooks = append(prof.Playbooks, config.Playbook{Name: "y", Folder: "../other"})
+	if err := config.SaveProfile(e.home, prof); err != nil {
+		t.Fatal(err)
+	}
+	e.mustFail(ExitFailure, []string{"is not a folder", "1 item(s)"}, "status")
+	out, _ := e.mustRun(ExitOK, "profile", "show", "default")
+	if !strings.Contains(out, "format 'y-*': not a folder") {
+		t.Fatalf("unexpected output:\n%s", out)
+	}
+}
+
+func TestSwitchStoresFileNames(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init", "-u", "-a", "standard")
+	e.mustRun(ExitOK, "profile", "add", "other", "-a", "standard")
+	if !config.ProfileExists(e.home, "Other") {
+		t.Skip("the file system distinguishes case: Other is not other")
+	}
+	e.mustRun(ExitOK, "profile", "switch", "Other")
+	if e.enabled(e.home) != "other" {
+		t.Fatalf("enabled: %s", e.enabled(e.home))
+	}
+	e.mustRun(ExitOK, "profile", "enable", "DEFAULT")
+	if e.enabled(e.home) != "other,default" {
+		t.Fatalf("enabled: %s", e.enabled(e.home))
+	}
+}
+
+func TestQuotedHintsAndGitNote(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init", "-u", "-a", "standard")
+	project := e.mkdir(filepath.Join(e.home, "My Projects", "p"))
+	e.mustRun(ExitOK, "init", project, "-a", "standard")
+	out, _ := e.mustRun(ExitOK, "list", project)
+	if !strings.Contains(out, `'cd "`+project+`" && aiplam add`) {
+		t.Fatalf("unexpected hint:\n%s", out)
+	}
+	if got := shellPath("~/a$b", `/h/a$b"c`); got != `"/h/a\$b\"c"` {
+		t.Fatalf("shellPath = %s", got)
+	}
+
+	// A home folder in a git repository (dotfiles) on Windows: no .gitignore lines for %APPDATA%.
+	w := newEnv(t)
+	w.app.GOOS, w.app.AppData = "windows", w.mkdir(filepath.Join(w.root, "appdata"))
+	w.mkdir(filepath.Join(w.home, ".git"))
+	out, _ = w.mustRun(ExitOK, "init", "-u", "-a", "devin")
+	if !strings.Contains(out, "'/.devin/rules/<name>-*'") || strings.Contains(out, "APPDATA%/devin/skills/<name>") {
+		t.Fatalf("unexpected git note:\n%s", out)
+	}
+	e.mustFail(ExitUsage, []string{"unknown command: nope", "Run 'aiplam --help' for the commands."}, "help", "nope")
+	_, errOut := e.mustRun(ExitUsage, "help", "nope")
+	if strings.Contains(errOut, "Getting started") {
+		t.Fatalf("the whole help was printed: %s", errOut)
+	}
 }

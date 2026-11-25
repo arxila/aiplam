@@ -160,7 +160,7 @@ func init() {
 			run: (*App).cmdUpdate, profiles: true},
 		{name: "remove", summary: "unlink a playbook's artifacts and unregister it", usage: removeUsage,
 			run: (*App).cmdRemove, profiles: true},
-		{name: "profile", summary: "manage profiles: list, add, remove, enable, disable, switch", usage: profileUsage,
+		{name: "profile", summary: "manage profiles: list, show, add, remove, enable, disable, switch", usage: profileUsage,
 			run: (*App).cmdProfile},
 	}
 }
@@ -259,7 +259,7 @@ func (a *App) Run(args []string) int {
 				}
 			}
 			a.errorf("unknown command: %s", args[1])
-			fmt.Fprint(a.Stderr, "\n"+a.mainUsage())
+			fmt.Fprint(a.Stderr, "\nRun 'aiplam --help' for the commands.\n")
 			return ExitUsage
 		}
 		fmt.Fprint(a.Stdout, a.mainUsage())
@@ -527,9 +527,19 @@ func (a *App) hint(command string) string {
 	case a.user || (a.elsewhere && a.isUser()):
 		return "aiplam " + command + " --user"
 	case a.elsewhere:
-		return "cd " + a.pretty(a.Managed) + " && aiplam " + command
+		return "cd " + shellPath(a.pretty(a.Managed), a.Managed) + " && aiplam " + command
 	}
 	return "aiplam " + command
+}
+
+// shellPath returns a path to paste in a shell: pretty (the path, shortened with "~") when it needs no quoting, or else
+// the absolute path in double quotes ("~" is not expanded inside quotes).
+func shellPath(pretty, abs string) string {
+	if !strings.ContainsAny(pretty, " \t'\"$`\\;&|()<>*?[]#!{}") {
+		return pretty
+	}
+	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "$", `\$`, "`", "\\`")
+	return `"` + r.Replace(abs) + `"`
 }
 
 // loadConfig loads the aiplam configuration and fails when it does not exist or is not valid.
@@ -604,7 +614,6 @@ func groups(profiles []*profileState) []playbook.Group {
 type state struct {
 	conf    *config.Config
 	enabled []*profileState // the enabled profiles (those whose file exists)
-	missing []string        // the enabled profiles whose file is missing (only with skipMissing)
 }
 
 // profile returns the enabled profile named name, or nil.
@@ -623,8 +632,7 @@ func (a *App) profileFile(profile string) string {
 }
 
 // loadState loads the aiplam configuration and every enabled profile. An enabled profile whose file is missing makes
-// it fail, unless skipMissing is set: it is then left out, with a warning, and recorded in the state's missing
-// profiles.
+// it fail, unless skipMissing is set: it is then left out, with a warning.
 func (a *App) loadState(skipMissing bool) (*state, error) {
 	conf, err := a.loadConfig()
 	if err != nil {
@@ -640,7 +648,6 @@ func (a *App) loadState(skipMissing bool) (*state, error) {
 				return nil, errors.New(missing)
 			}
 			a.warnf("%s.", missing)
-			st.missing = append(st.missing, name)
 			continue
 		}
 		s, err := a.loadProfileState(name, true)
@@ -950,14 +957,40 @@ func (a *App) conflictText(c playbook.Action) string {
 // checkPlaybookFolders returns an error when a playbook folder is missing, or when one of its folders for the kinds
 // of its profile's targets lies outside the playbook folder (through a link).
 func (a *App) checkPlaybookFolders(e playbook.Entry, targets []playbook.Target) error {
+	if _, err := os.Stat(e.Dir); err == nil && !fsutil.IsDir(e.Dir) {
+		return fmt.Errorf("playbook %s: playbook folder '%s' is not a folder", e.Label(), a.pretty(e.Dir))
+	}
 	if !fsutil.IsDir(e.Dir) {
 		return fmt.Errorf("playbook %s: playbook folder '%s' does not exist; restore it, or unregister the playbook",
 			e.Label(), a.pretty(e.Dir))
 	}
 	for _, t := range targets {
-		if dir := e.SourceDir(t.Kind); fsutil.IsDir(dir) && !fsutil.Within(dir, e.Dir) {
+		dir := e.SourceDir(t.Kind)
+		if _, err := os.Stat(dir); err == nil && !fsutil.IsDir(dir) {
+			return fmt.Errorf("playbook %s: its %s folder '%s' is not a folder", e.Label(), t.Kind, a.pretty(dir))
+		}
+		if fsutil.IsDir(dir) && !fsutil.Within(dir, e.Dir) {
 			return fmt.Errorf("playbook %s: its %s folder '%s' is outside the playbook folder '%s' (through a link)",
 				e.Label(), t.Kind, a.pretty(dir), a.pretty(e.Dir))
+		}
+	}
+	return nil
+}
+
+// checkTargetFolders returns an error when a target folder of a profile, or one of its parents up to the managed folder
+// (or %APPDATA%), exists and is not a folder, so that nothing can be linked there.
+func (a *App) checkTargetFolders(s *profileState) error {
+	for _, t := range s.targets {
+		for dir := t.Dir; fsutil.Within(dir, t.Stop) && !fsutil.SamePath(dir, t.Stop); dir = filepath.Dir(dir) {
+			info, err := os.Stat(dir)
+			if err != nil {
+				continue // missing: created when the first artifact is linked
+			}
+			if !info.IsDir() {
+				return fmt.Errorf("profile '%s': target folder '%s' cannot be used: '%s' exists and is not a folder",
+					s.name, t.Folder, a.pretty(dir))
+			}
+			break
 		}
 	}
 	return nil
