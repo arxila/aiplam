@@ -293,14 +293,12 @@ func TestInit(t *testing.T) {
 	}
 	e.mustFail(ExitFailure, []string{"already exists, from an earlier setup"}, "init", leftover, "-a", "claude")
 
-	// In a git repository, init says what to ignore.
-	if _, err := exec.LookPath("git"); err == nil {
-		repo := e.mkdir(filepath.Join(e.root, "repo"))
-		e.mkdir(filepath.Join(repo, ".git"))
-		out, _ = e.mustRun(ExitOK, "init", repo, "-a", "junie:standard")
-		if !strings.Contains(out, "'/.agents/skills/<name>-*', '/.junie/agents/<name>-*'") {
-			t.Fatalf("unexpected git note:\n%s", out)
-		}
+	// In a git repository, init says that the links must be ignored.
+	repo := e.mkdir(filepath.Join(e.root, "repo"))
+	e.mkdir(filepath.Join(repo, ".git"))
+	out, _ = e.mustRun(ExitOK, "init", repo, "-a", "junie:standard")
+	if !strings.Contains(out, "links aiplam makes belong to each machine and must be ignored by git") {
+		t.Fatalf("unexpected git note:\n%s", out)
 	}
 }
 
@@ -1125,14 +1123,6 @@ func TestQuotedHintsAndGitNote(t *testing.T) {
 		t.Fatalf("shellPath = %s", got)
 	}
 
-	// A home folder in a git repository (dotfiles) on Windows: no .gitignore lines for %APPDATA%.
-	w := newEnv(t)
-	w.app.GOOS, w.app.AppData = "windows", w.mkdir(filepath.Join(w.root, "appdata"))
-	w.mkdir(filepath.Join(w.home, ".git"))
-	out, _ = w.mustRun(ExitOK, "init", "-u", "-a", "devin")
-	if !strings.Contains(out, "'/.devin/rules/<name>-*'") || strings.Contains(out, "APPDATA%/devin/skills/<name>") {
-		t.Fatalf("unexpected git note:\n%s", out)
-	}
 	e.mustFail(ExitUsage, []string{"unknown command: nope", "Run 'aiplam --help' for the commands."}, "help", "nope")
 	_, errOut := e.mustRun(ExitUsage, "help", "nope")
 	if strings.Contains(errOut, "Getting started") {
@@ -1238,5 +1228,103 @@ func TestFileLinksCheckedOnlyWhenWanted(t *testing.T) {
 	e.mustRun(ExitOK, "update", "x")
 	if checks != 1 {
 		t.Fatalf("checked %d time(s) for one update with a link to a file to make, want 1", checks)
+	}
+}
+
+// git runs git in dir for a test, failing it on error.
+func (e *env) git(dir string, args ...string) {
+	e.t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		e.t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+}
+
+// TestUnignoredLinks checks that, in a git repository, the links that git does not ignore are reported (as warnings,
+// with the lines to add to .gitignore, and those already committed), and that .gitignore is never written.
+func TestUnignoredLinks(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not available")
+	}
+	e := newEnv(t)
+	project := e.mkdir(filepath.Join(e.root, "project"))
+	e.git(project, "init", "-q")
+	pb := e.playbook("pb", "x-a")
+	e.file("pb/subagents/x-rev.md")
+	e.mustRun(ExitOK, "init", project, "-a", "claude")
+	e.app.Cwd = project
+	gitignore := filepath.Join(project, ".gitignore")
+
+	// add: warns, with the lines for this playbook's kinds.
+	e.mustFail(ExitOK, []string{"2 links that aiplam made are not ignored by git",
+		"(aiplam never changes it):\n  /.claude/skills/x-*\n  /.claude/agents/x-*", "Added x."}, "add", "x", pb)
+	e.assertMissing(gitignore)
+
+	// status: the same, without counting it.
+	e.mustFail(ExitOK, []string{"2 links that aiplam made are not ignored by git", "Everything else is up to date."},
+		"status")
+
+	// update: warns about the links it creates.
+	e.skill(filepath.Join(pb, "skills"), "x-c")
+	e.mustFail(ExitOK, []string{"1 link that aiplam made is not ignored by git", "\n  /.claude/skills/x-*"},
+		"update", "x")
+
+	// Only the lines still missing.
+	if err := os.WriteFile(gitignore, []byte("/.claude/skills/x-*\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, errOut := e.mustRun(ExitOK, "status")
+	if !strings.Contains(errOut, "1 link that aiplam made is not ignored by git") ||
+		!strings.Contains(errOut, "\n  /.claude/agents/x-*") || strings.Contains(errOut, "/.claude/skills/x-*") {
+		t.Fatalf("unexpected warning:\n%s%s", out, errOut)
+	}
+
+	// All ignored: nothing to say, and new links (update) stay quiet.
+	if err := os.WriteFile(gitignore, []byte("/.claude/skills/x-*\n/.claude/agents/x-*\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e.mustFail(ExitOK, []string{"Everything is up to date."}, "status")
+	e.skill(filepath.Join(pb, "skills"), "x-b")
+	if out, errOut := e.mustRun(ExitOK, "update", "x"); strings.Contains(out+errOut, "not ignored") {
+		t.Fatalf("unexpected warning:\n%s%s", out, errOut)
+	}
+
+	// A link committed anyway: git never ignores tracked files, so it is reported, as committed.
+	e.git(project, "add", "-f", ".claude/skills/x-a")
+	e.mustFail(ExitOK, []string{"1 link that aiplam made is not ignored by git",
+		"1 link is already committed: stop tracking it with 'git rm --cached'",
+		"\n  " + filepath.Join(project, ".claude", "skills", "x-a")}, "status")
+	e.git(project, "rm", "-q", "--cached", ".claude/skills/x-a")
+
+	// profile enable: warns about the links it creates, of another playbook.
+	e.mustRun(ExitOK, "profile", "add", "other", "-a", "claude")
+	e.mustRun(ExitOK, "add", "y", e.playbook("pb2", "y-a"), "-p", "other")
+	e.mustFail(ExitOK, []string{"1 link that aiplam made is not ignored by git", "\n  /.claude/skills/y-*"},
+		"profile", "enable", "other")
+	data, err := os.ReadFile(gitignore)
+	if err != nil || string(data) != "/.claude/skills/x-*\n/.claude/agents/x-*\n" {
+		t.Fatalf(".gitignore was changed: %q", data)
+	}
+
+	// A home folder in a git repository (dotfiles) on Windows: links under %APPDATA% are outside it, so not reported.
+	w := newEnv(t)
+	w.app.GOOS, w.app.AppData = "windows", w.mkdir(filepath.Join(w.root, "appdata"))
+	w.git(w.home, "init", "-q")
+	w.mustRun(ExitOK, "init", "-u", "-a", "devin")
+	wpb := w.playbook("pb", "x-a")
+	w.file("pb/rules/x-style.md")
+	out, errOut = w.mustRun(ExitOK, "add", "x", wpb)
+	if !strings.Contains(errOut, "1 link that aiplam made is not ignored by git") ||
+		!strings.Contains(errOut, "\n  /.devin/rules/x-*") || strings.Contains(errOut, "APPDATA") {
+		t.Fatalf("unexpected warning:\n%s%s", out, errOut)
+	}
+}
+
+func TestGitignorePattern(t *testing.T) {
+	for format, want := range map[string]string{"x-*": "x-*", "*.agent.md": "*.agent.md", `a?[b]\c*`: `a\?\[b\]\\c*`} {
+		if got := gitignorePattern(format); got != want {
+			t.Errorf("gitignorePattern(%q) = %q, want %q", format, got, want)
+		}
 	}
 }

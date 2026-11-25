@@ -463,6 +463,7 @@ func (a *App) changeProfiles(updated *config.Config, removed, added, stay []*pro
 	}
 	a.cleanup(plan)
 	a.warnSkipped(plan)
+	a.warnUnignoredCreated(plan, to)
 	if len(updated.Enabled) == 0 {
 		a.printf("No profile is enabled now.\n")
 	} else {

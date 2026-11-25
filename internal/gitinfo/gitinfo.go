@@ -21,8 +21,11 @@
 package gitinfo
 
 import (
+	"bytes"
+	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -95,6 +98,78 @@ func (r *Reader) Read(folder string) Version {
 		v.Branch = branch
 	}
 	return v
+}
+
+// Unignored returns, among paths (absolute paths inside the work tree whose top folder is repo), those that git does
+// not ignore, and, among those, the ones it tracks (a tracked path is never ignored; a folder counts as tracked when
+// files inside it are). ok is false when git is not available or fails.
+func (r *Reader) Unignored(repo string, paths []string) (unignored []string, tracked map[string]bool, ok bool) {
+	if !r.Available() || len(paths) == 0 {
+		return nil, nil, r.Available()
+	}
+	rels := make([]string, len(paths))
+	for i, p := range paths {
+		rel, err := filepath.Rel(repo, p)
+		if err != nil {
+			return nil, nil, false
+		}
+		rels[i] = filepath.ToSlash(rel)
+	}
+	// check-ignore lists the paths that are ignored; it exits with 1 when none is.
+	out, err := r.command(repo, strings.Join(rels, "\x00"), "check-ignore", "--stdin", "-z")
+	var exit *exec.ExitError
+	if err != nil && !(errors.As(err, &exit) && exit.ExitCode() == 1) {
+		return nil, nil, false
+	}
+	ignored := map[string]bool{}
+	for _, rel := range strings.Split(string(out), "\x00") {
+		ignored[rel] = true
+	}
+	var dirs []string
+	seen := map[string]bool{}
+	for i, rel := range rels {
+		if ignored[rel] {
+			continue
+		}
+		unignored = append(unignored, paths[i])
+		if dir := filepath.ToSlash(filepath.Dir(filepath.FromSlash(rel))); !seen[dir] {
+			seen[dir] = true
+			dirs = append(dirs, ":(literal)"+dir) // names are not patterns
+		}
+	}
+	if len(unignored) == 0 {
+		return nil, nil, true
+	}
+	// The tracked files in the folders of the unignored paths.
+	out, err = r.command(repo, "", append([]string{"ls-files", "-z", "--"}, dirs...)...)
+	if err != nil {
+		return nil, nil, false
+	}
+	files := strings.Split(string(out), "\x00")
+	tracked = map[string]bool{}
+	for i, rel := range rels {
+		if ignored[rel] {
+			continue
+		}
+		for _, f := range files {
+			if f == rel || strings.HasPrefix(f, rel+"/") {
+				tracked[paths[i]] = true
+				break
+			}
+		}
+	}
+	return unignored, tracked, true
+}
+
+// command runs git in folder with stdin as its input, and returns its output.
+func (r *Reader) command(folder, stdin string, args ...string) ([]byte, error) {
+	cmd := exec.Command(r.git, append([]string{"-C", folder}, args...)...)
+	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0")
+	cmd.Stdin = strings.NewReader(stdin)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	err := cmd.Run()
+	return out.Bytes(), err
 }
 
 func (r *Reader) run(folder string, args ...string) (string, bool) {

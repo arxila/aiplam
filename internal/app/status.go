@@ -47,8 +47,10 @@ Then it reports everything that needs attention, and exits with 1 if there is an
     must be removed by hand, even if you made them yourself;
   - target folders (or their parents) and playbook subfolders that are files, not folders.
 It also warns, without counting them, about the profiles that are not enabled and not valid (they cannot be enabled
-until they are fixed), and about the artifacts that cannot be linked because they are files and, on Windows, links to
-files need developer mode or administrator rights.
+until they are fixed), about the artifacts that cannot be linked because they are files and, on Windows, links to
+files need developer mode or administrator rights, and, when the managed folder is in a git repository, about the
+links that git does not ignore: links belong to each machine and must not be committed, so it gives the lines to add
+to .gitignore (aiplam never changes it), and lists the links already committed.
 
 Examples:
   aiplam status
@@ -275,12 +277,14 @@ func (a *App) cmdStatus(args []string) error {
 	if len(plan.Skipped()) > 0 {
 		a.warnf("%s", a.skippedText(plan, "cannot be linked"))
 	}
+	// Links that git does not ignore: reported, but not counted (committing them is a choice, if a bad one).
+	unignored := a.warnUnignored(ownedLinks(st.enabled, nil))
 
 	if attention > 0 {
 		a.printf("\n%d item(s) need attention; see the warnings above.\n", attention)
 		return errSilent
 	}
-	if len(plan.Skipped()) > 0 {
+	if len(plan.Skipped()) > 0 || unignored {
 		a.printf("\nEverything else is up to date.\n")
 		return nil
 	}

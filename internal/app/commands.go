@@ -194,18 +194,11 @@ func (a *App) cmdInit(args []string) (err error) {
 				"configuration.\n", a.pretty(a.Managed), a.pretty(above), a.pretty(a.Managed))
 		}
 	}
-	if repo := config.GitRepository(a.Managed); repo != "" {
-		var lines []string
-		for _, t := range targets {
-			if !strings.HasPrefix(t.Folder, config.AppData+"/") { // not in the managed folder, so not in its repository
-				lines = append(lines, "'/"+t.Folder+"/<name>-*'")
-			}
-		}
-		a.printf("Note: '%s' is inside a git repository. The %s folder can be committed to share the configuration "+
-			"(playbook folders are stored relative to '%s'), but the links aiplam makes in the target folders belong to "+
-			"each machine (and cannot be committed on Windows): add them to '%s', with lines such as %s for each "+
-			"playbook name (or matching the format given to 'aiplam add').\n", a.pretty(a.Managed), config.DirName,
-			a.pretty(a.Managed), a.pretty(filepath.Join(a.Managed, ".gitignore")), strings.Join(lines, ", "))
+	if config.GitRepository(a.Managed) != "" {
+		a.printf("Note: '%s' is inside a git repository. Its %s folder can be committed to share the configuration "+
+			"(playbook folders are stored relative to it), but the links aiplam makes belong to each machine and must "+
+			"be ignored by git: aiplam warns about those that are not, with the lines to add to .gitignore.\n",
+			a.pretty(a.Managed), config.DirName)
 	}
 	next := "add <name> <playbookfolder>"
 	if len(profiles) > 1 {
@@ -236,6 +229,9 @@ profile enabled.
 
 On Windows without developer mode or administrator rights, the artifacts that are files (subagents, rules...) are
 not linked, with a warning: links to files need either. The rest is linked, and the playbook is registered.
+
+In a git repository, it warns about the links it makes that git does not ignore, with the lines to add to
+.gitignore: links belong to each machine and must not be committed.
 
 Every link belongs to a single playbook of a single profile, so nothing is registered or linked if:
   - something is already where a link must go, even a link to the same artifact that aiplam did not make for this
@@ -387,6 +383,7 @@ func (a *App) cmdAdd(args []string) error {
 		a.reportRenamedIDs(selected[i].entries, u.entries)
 	}
 	a.warnSkipped(plan)
+	a.warnUnignoredCreated(plan, replaceProfiles(st.enabled, updated...))
 	a.printf("Added %s.\n", name)
 	return nil
 }
@@ -503,6 +500,7 @@ func (a *App) cmdUpdate(args []string) error {
 	}
 	a.cleanup(plan)
 	a.warnSkipped(plan)
+	a.warnUnignoredCreated(plan, st.enabled)
 	return nil
 }
 

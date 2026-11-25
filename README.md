@@ -68,6 +68,10 @@ git checkout v1.3.0                                 # later: another version...
 aiplam update                                       # ...and its new or removed artifacts are linked or unlinked
 ```
 
+In a project that is a git repository, the links aiplam makes must not be committed: aiplam warns about any that
+git does not ignore, with the lines to add to `.gitignore` (see [Sharing a project's
+configuration](#sharing-a-projects-configuration)).
+
 `aiplam add` shows what it finds and links:
 
 ```text
@@ -416,9 +420,21 @@ aiplam does not check what other managed folders link, nor which of them an agen
 - Playbook folders are stored relative to the managed folder, so a project's `.aiplam` folder can be committed and
   shared, as long as everyone keeps the playbooks at the same place relative to the project (on Windows, a playbook
   must be on the same drive as the managed folder).
-- The links themselves are specific to each machine (and on Windows, links to folders are junctions, which git cannot
-  store as links). When the managed folder is in a git repository, `init` suggests lines for `.gitignore` that leave
-  them out (such as `/.claude/skills/<name>-*`).
+- **The links must never be committed.** They are specific to each machine: they lead to where each developer keeps
+  the playbooks, a Windows clone cannot use links committed elsewhere, and on Windows, links to folders are junctions,
+  which git does not store as links at all. Add them to the project's `.gitignore` (aiplam never changes it).
+- When the managed folder is in a git repository, aiplam checks with git that its links are ignored. `status`, and
+  `add`, `update`, `profile enable` and `profile switch` (for the links they create), warn about those that are not,
+  with the exact lines to add, and list those already committed, to untrack with `git rm --cached`. These are
+  warnings: `status` does not count them as problems.
+
+  ```text
+  WARNING: 2 links that aiplam made are not ignored by git, so they could be committed; but links belong to each
+  machine (they lead to where each one keeps its playbooks, and a Windows clone cannot use them). Add these lines to
+  '~/Workspace/acme/webshop/.gitignore' (aiplam never changes it):
+    /.claude/skills/acme-*
+    /.claude/agents/acme-*
+  ```
 - After cloning a project with a shared configuration, `aiplam status` shows what is not linked yet, naming the
   `aiplam update` command that links it.
 
@@ -564,7 +580,8 @@ Run `aiplam <command> --help` for the full details of each command.
   target folders, enabled;
 - `-a`, `--agent A`: take the target folders from an agent template (`claude`, `junie:standard`, ...);
 - `-f`, `--folder K:F,...`: or give them by hand, as `<kind>:<target folder>` (`skills:.agents/skills`);
-- when the folder is in a git repository, it suggests `.gitignore` lines for the links.
+- when the folder is in a git repository, it notes that the links must be ignored by git (see [Sharing a project's
+  configuration](#sharing-a-projects-configuration)).
 
 **`aiplam status [<folder> | --user]`** shows the managed folder and its enabled profiles, and reports everything
 that needs attention, exiting with 1 if there is anything:
@@ -573,7 +590,8 @@ that needs attention, exiting with 1 if there is anything:
 - the links `update` would create or remove, or why it would refuse to;
 - links left behind (see [Editing the configuration by hand](#editing-the-configuration-by-hand));
 - target folders, or playbook subfolders, that are files instead of folders;
-- without counting them, the artifacts that cannot be linked on Windows without developer mode.
+- without counting them, the artifacts that cannot be linked on Windows without developer mode, and the links that
+  git does not ignore (with the lines to add to `.gitignore`).
 
 **`aiplam list [<folder> | --user]`** lists the links of the enabled profiles, by profile and kind, with the playbook
 and version of each, the version a skill declares, and broken links:
