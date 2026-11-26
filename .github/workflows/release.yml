@@ -1,0 +1,77 @@
+#
+# =========================================================================
+#
+#   Copyright (c) 2026 Arxila OSS (https://arxila.io)
+#
+#   Licensed under the Apache License, Version 2.0 (the "License");
+#   you may not use this file except in compliance with the License.
+#   You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+#   Unless required by applicable law or agreed to in writing, software
+#   distributed under the License is distributed on an "AS IS" BASIS,
+#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+#   implied. See the License for the specific language governing
+#   permissions and limitations under the License.
+#
+# =========================================================================
+#
+
+# Builds the release archives of a pushed v* tag, attests their build provenance, and creates a draft release with
+# them. The release is then signed and published from a maintainer's machine ('make release-sign', which checks the
+# attestations, then signs SHA256SUMS with the Arxila release GPG key): this workflow never holds that key.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions: {}
+
+# Releases never cancel each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # The 'release' environment requires a maintainer's approval, and only accepts v* tags.
+    environment: release
+    permissions:
+      contents: write      # creating the draft release
+      id-token: write      # the identity that signs the attestations
+      attestations: write  # storing the attestations
+    steps:
+      # Actions are pinned to commit SHAs (the comments give their versions).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # No cache: release builds start from nothing that an earlier run could have left.
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: stable
+          check-latest: true
+          cache: false
+      - name: Check the version
+        run: |
+          version=$(sed -n 's/^const sourceVersion = "\(.*\)"$/\1/p' internal/app/app.go)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "the tag is $GITHUB_REF_NAME, but the version in internal/app/app.go is $version"; exit 1
+          fi
+      # Unsigned: SHA256SUMS is signed afterwards, with GPG, on a maintainer's machine. It runs check-dist.sh too.
+      - name: Build
+        run: make SIGN_KEY= dist
+      # SLSA build provenance (the default when no predicate is given).
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/aiplam-*
+            dist/SHA256SUMS
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/aiplam-* dist/SHA256SUMS --repo "$GITHUB_REPOSITORY" \
+            --draft --verify-tag --title "aiplam ${GITHUB_REF_NAME#v}" --notes ""

@@ -76,10 +76,41 @@ updates and security patches.
 
 ## Verifying downloads
 
-Each [GitHub release][releases] includes a `SHA256SUMS` file with the checksums of its archives; the archives
-themselves are not signed. Homebrew and winget check these checksums when they install aiplam, and `go install`
-checks the module against the Go checksum database.
+Each [GitHub release][releases] includes a `SHA256SUMS` file with the checksums of its archives, and `SHA256SUMS.asc`,
+its signature with the GPG key of Arxila releases (`releases@arxila.io`), whose fingerprint is published at the
+[Arxila organization repository][gpg-keys]. To verify an archive you downloaded, get the key once:
+
+```bash
+gpg --keyserver keys.openpgp.org --recv-keys 49E0B07D4209B610E1CA35ECF2E549DCAE5A5AB4
+```
+
+Then, in the folder holding the archive, `SHA256SUMS` and `SHA256SUMS.asc`, check the signature:
+
+```bash
+gpg --verify SHA256SUMS.asc SHA256SUMS
+```
+
+gpg must report a good signature made with the key `49E0B07D4209B610E1CA35ECF2E549DCAE5A5AB4` (check the fingerprint,
+not only the name and email address, which anyone can give to a key of their own). It also warns that the key is not
+certified with a trusted signature, unless you have certified it yourself: that is expected. Then check the archive's
+checksum (`shasum -a 256` instead of `sha256sum` on macOS; on Windows, compare the output of `Get-FileHash <archive>`
+in PowerShell with the archive's line in `SHA256SUMS`):
+
+```bash
+sha256sum -c --ignore-missing SHA256SUMS
+```
+
+The archives and `SHA256SUMS` are built by aiplam's [release workflow][release-workflow] on GitHub Actions, which
+also attests their build provenance: where and from which commit each file was built. With the
+[GitHub CLI](https://cli.github.com), you can check it too: it confirms that an archive was built by that workflow,
+and shows the tag and commit it was built from:
+
+```bash
+gh attestation verify <archive> --repo arxila/aiplam --signer-workflow arxila/aiplam/.github/workflows/release.yml
+```
 
 [security-email]: mailto:security@arxila.io
 [releases]: https://github.com/arxila/aiplam/releases
+[gpg-keys]: https://github.com/arxila/arxila-org/blob/main/GPG-KEYS-arxila.txt
+[release-workflow]: .github/workflows/release.yml
 [advisories]: https://github.com/arxila/aiplam/security/advisories

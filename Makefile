@@ -25,6 +25,10 @@ VERSION ?= $(shell sed -n 's/^const sourceVersion = "\(.*\)"$$/\1/p' internal/ap
 # Without a version (it could not be read), builds keep the one in the code; dist refuses to run.
 LDFLAGS := -s -w $(if $(VERSION),-X $(PKG)/internal/app.Version=$(VERSION))
 DIST    := dist
+# The GPG key that signs SHA256SUMS: Arxila Releases <releases@arxila.io>, the key of every Arxila release (its
+# fingerprint is in arxila-org's GPG-KEYS-arxila.txt). 'make SIGN_KEY= dist' leaves SHA256SUMS unsigned: the Release
+# workflow builds this way, and 'make release-sign' then signs its draft release.
+SIGN_KEY ?= 49E0B07D4209B610E1CA35ECF2E549DCAE5A5AB4
 
 # tar options that keep the archives free of the building machine's details: owner names, and on macOS, extended
 # attributes and AppleDouble ("._") files, which would show up as junk files when extracted elsewhere.
@@ -35,7 +39,7 @@ TARFLAGS := $(shell if tar --version 2>/dev/null | grep -q bsdtar; then \
 # OS/architecture pairs for release binaries.
 PLATFORMS := darwin/arm64 darwin/amd64 linux/amd64 linux/arm64 windows/amd64 windows/arm64
 
-.PHONY: build test vet dist clean sandbox
+.PHONY: build test vet dist release-sign clean sandbox
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/aiplam
@@ -48,9 +52,9 @@ vet:
 	GOOS=windows go vet ./...
 
 # Release archives: a .tar.gz (a .zip for Windows) per platform, holding the executable with the README and the license
-# files (which the Apache License requires to go with every copy), and a SHA256SUMS file. When HEAD is tagged, the tag
-# must match the version. scripts/check-dist.sh then checks that the archives hold exactly these files, and nothing of
-# the machine that built them.
+# files (which the Apache License requires to go with every copy), a SHA256SUMS file, and its detached signature
+# SHA256SUMS.asc. When HEAD is tagged, the tag must match the version. scripts/check-dist.sh then checks that the
+# archives hold exactly these files, and nothing of the machine that built them, and that SIGN_KEY signed SHA256SUMS.
 dist: clean
 	@[ -n "$(VERSION)" ] || { echo "cannot read the version from internal/app/app.go: run 'make VERSION=x.y.z dist'" >&2; exit 1; }
 	@for tag in $$(git tag --points-at HEAD 'v*' 2>/dev/null); do \
@@ -58,6 +62,9 @@ dist: clean
 	done
 	@command -v sha256sum >/dev/null || command -v shasum >/dev/null || \
 		{ echo "sha256sum or shasum is needed" >&2; exit 1; }
+	@[ -z "$(SIGN_KEY)" ] || gpg --list-secret-keys "$(SIGN_KEY)" >/dev/null 2>&1 || \
+		{ echo "cannot sign: gpg is not installed, or has no secret key $(SIGN_KEY)" >&2; \
+		echo "(for a build that is not going to be published, run 'make SIGN_KEY= dist')" >&2; exit 1; }
 	@mkdir -p $(DIST)
 	@for p in $(PLATFORMS); do \
 		os=$${p%/*}; arch=$${p#*/}; ext=; [ $$os = windows ] && ext=.exe; \
@@ -75,7 +82,20 @@ dist: clean
 	done
 	@cd $(DIST) && { command -v sha256sum >/dev/null && sha256sum $(BINARY)-* || shasum -a 256 $(BINARY)-*; } > SHA256SUMS
 	@echo "written $(DIST)/SHA256SUMS"
-	@./scripts/check-dist.sh $(DIST) $(BINARY) $(VERSION)
+	@if [ -n "$(SIGN_KEY)" ]; then \
+		gpg --batch --yes --local-user "$(SIGN_KEY)" --armor --detach-sign \
+			--output $(DIST)/SHA256SUMS.asc $(DIST)/SHA256SUMS || exit 1; \
+		echo "written $(DIST)/SHA256SUMS.asc"; \
+	else \
+		echo "SHA256SUMS is not signed (SIGN_KEY is empty): it must be signed before it is published"; \
+	fi
+	@./scripts/check-dist.sh $(DIST) $(BINARY) $(VERSION) $(SIGN_KEY)
+
+# Signs the draft release that the Release workflow created for VERSION, after checking its attestations and archives
+# (see scripts/sign-release.sh). Publishing the draft is left to the maintainer.
+release-sign:
+	@[ -n "$(VERSION)" ] && [ -n "$(SIGN_KEY)" ] || { echo "release-sign needs VERSION and SIGN_KEY" >&2; exit 1; }
+	./scripts/sign-release.sh $(VERSION) $(SIGN_KEY)
 
 clean:
 	rm -rf $(DIST) $(BINARY)

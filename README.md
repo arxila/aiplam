@@ -48,16 +48,19 @@ Windows. `git` is optional: without it, playbook versions are shown as `unknown`
 - **macOS and Linux, with [Homebrew](https://brew.sh):** `brew install arxila/tap/aiplam`
 - **Windows, with winget:** `winget install Arxila.aiplam`
 - **From the [releases](https://github.com/arxila/aiplam/releases):** download the archive for your system, and put
-  `aiplam` (or `aiplam.exe`) in your `PATH`. `SHA256SUMS` holds the archives' checksums. On macOS, the executable is
-  not signed, so a copy downloaded with a browser is blocked: allow it with `xattr -d com.apple.quarantine aiplam`.
+  `aiplam` (or `aiplam.exe`) in your `PATH`. `SHA256SUMS` holds the archives' checksums, signed in `SHA256SUMS.asc`
+  (see [Verifying downloads](SECURITY.md#verifying-downloads)). On macOS, the executable is not signed with an Apple
+  certificate, so a copy downloaded with a browser is blocked: allow it with `xattr -d com.apple.quarantine aiplam`.
 - **With Go 1.26 or later:** `go install arxila.io/aiplam/cmd/aiplam@latest` builds it into `$(go env GOPATH)/bin`.
 
 To build it from a clone:
 
 ```bash
 make build      # ./aiplam for this machine
-make dist       # dist/aiplam-<version>-<os>-<arch>.tar.gz (.zip for Windows) per platform, and SHA256SUMS
+make dist       # dist/aiplam-<version>-<os>-<arch>.tar.gz (.zip for Windows) per platform, SHA256SUMS and its signature
 ```
+
+Signing `SHA256SUMS` needs the Arxila release key: without it, run `make SIGN_KEY= dist` for an unsigned build.
 
 ## Quick start
 
