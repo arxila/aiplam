@@ -60,7 +60,12 @@ func Resolve(path string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		path = cwd + string(filepath.Separator) + path // not filepath.Join, which would apply '..' as text
+		switch {
+		case filepath.VolumeName(path) == "" && path != "" && os.IsPathSeparator(path[0]):
+			path = filepath.VolumeName(cwd) + path // on Windows, rooted on the current drive
+		default:
+			path = cwd + string(filepath.Separator) + path // not filepath.Join, which would apply '..' as text
+		}
 	}
 	volume := filepath.VolumeName(path)
 	// resolved exists and holds no links; missing holds the names below it that do not exist (yet).

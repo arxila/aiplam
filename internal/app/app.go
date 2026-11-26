@@ -1030,8 +1030,12 @@ func (a *App) restoreProfiles(saved []*config.Profile, state string) string {
 	if len(failed) == 0 {
 		return state
 	}
-	return fmt.Sprintf("putting back profile %s also failed, so it keeps the change: run '%s' to see what is left",
-		strings.Join(failed, ", "), a.hint("status"))
+	which, keeps := "profile", "it keeps"
+	if len(failed) > 1 {
+		which, keeps = "profiles", "they keep"
+	}
+	return fmt.Sprintf("putting back %s %s also failed, so %s the change: run '%s' to see what is left", which,
+		strings.Join(failed, ", "), keeps, a.hint("status"))
 }
 
 // undo reverts the link changes of an applied plan after saving the configuration failed.

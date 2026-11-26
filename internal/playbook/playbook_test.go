@@ -608,3 +608,24 @@ func TestAliasedTargetFolders(t *testing.T) {
 		t.Fatalf("conflicts: %+v; creations: %q", c, actions(plan, Create))
 	}
 }
+
+// TestTargetFoldersInAnotherCase checks that, on a disk that ignores case, target folders spelled in another case
+// collide as the same folder.
+func TestTargetFoldersInAnotherCase(t *testing.T) {
+	s := newSandbox(t)
+	s.skill("x-a")
+	if err := os.MkdirAll(s.link(".agents/skills"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(s.link(".AGENTS/skills")); err != nil {
+		t.Skip("the disk does not ignore case")
+	}
+	p := s.group("p", pb("x", nil))
+	q := Group{Profile: "q", Entries: Entries("q", []config.Playbook{pb("y", map[string]config.Mapping{
+		"skills": {Folder: "skills", Format: "x-*"}})}, s.managed),
+		Targets: []Target{{Kind: "skills", Folder: ".AGENTS/skills", Dir: s.link(".AGENTS/skills"), Stop: s.managed}}}
+	plan := s.transition(nil, []Group{p, q}, scopeOf(p, q))
+	if c := plan.Conflicts(); len(c) != 1 || c[0].Cause != Duplicate {
+		t.Fatalf("conflicts: %+v; creations: %q", c, actions(plan, Create))
+	}
+}

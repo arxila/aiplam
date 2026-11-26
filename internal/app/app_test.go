@@ -823,9 +823,14 @@ func TestRestoreProfilesReportsFailures(t *testing.T) {
 	// A folder where the temporary file of b's save must go makes saving b fail.
 	e.mkdir(filepath.Join(fmt.Sprintf("%s.%d.tmp", config.ProfileFile(e.home, "b"), os.Getpid()), "x"))
 	got := e.app.restoreProfiles([]*config.Profile{a, b}, "nothing changed")
-	if !strings.Contains(got, "putting back profile 'b'") || strings.Contains(got, "'a'") ||
-		strings.Contains(got, "nothing changed") {
+	if !strings.Contains(got, "putting back profile 'b'") || !strings.Contains(got, "so it keeps the change") ||
+		strings.Contains(got, "'a'") || strings.Contains(got, "nothing changed") {
 		t.Errorf("b not put back: %q", got)
+	}
+	e.mkdir(filepath.Join(fmt.Sprintf("%s.%d.tmp", config.ProfileFile(e.home, "a"), os.Getpid()), "x"))
+	if got := e.app.restoreProfiles([]*config.Profile{a, b}, "nothing changed"); !strings.Contains(got,
+		"putting back profiles 'a'") || !strings.Contains(got, "so they keep the change") {
+		t.Errorf("a and b not put back: %q", got)
 	}
 }
 

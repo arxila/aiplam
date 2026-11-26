@@ -347,13 +347,32 @@ func Transition(from, to []Group, scope map[Key]bool) (Plan, error) {
 
 	// Links are told apart by where they are once the links on the way to them are resolved (see linkKey), so that
 	// target folders that are the same folder through a link collide.
+	// Existing folders are also compared as the system does, so that two spellings of one folder (in another case, on
+	// a disk that ignores it) count as one: the first spelling seen stands for both.
 	resolved := map[string]string{}
+	type seenDir struct {
+		path string
+		info os.FileInfo
+	}
+	var seen []seenDir
 	key := func(dir, name string) string {
 		r, ok := resolved[dir]
 		if !ok {
 			r = dir
 			if res, err := fsutil.Resolve(dir); err == nil {
 				r = res
+			}
+			if info, err := os.Stat(r); err == nil {
+				same := false
+				for _, s := range seen {
+					if os.SameFile(s.info, info) {
+						r, same = s.path, true
+						break
+					}
+				}
+				if !same {
+					seen = append(seen, seenDir{r, info})
+				}
 			}
 			resolved[dir] = r
 		}

@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -193,6 +194,13 @@ func TestResolve(t *testing.T) {
 		}
 	}
 	if runtime.GOOS == "windows" {
+		// A path rooted on the current drive, without a drive letter.
+		if cwd, err := os.Getwd(); err == nil && strings.EqualFold(filepath.VolumeName(cwd), filepath.VolumeName(real)) {
+			rooted := real[len(filepath.VolumeName(real)):]
+			if got, err := Resolve(rooted); err != nil || !SamePath(got, real) {
+				t.Errorf("Resolve(%q) = %q, %v; want %q", rooted, got, err, real)
+			}
+		}
 		return // symbolic links need developer mode
 	}
 	if err := os.Symlink(filepath.Join(root, "gone"), filepath.Join(root, "broken")); err != nil {
