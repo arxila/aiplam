@@ -43,12 +43,15 @@ only creates and removes links, and the folders that hold them (see [Safety](#sa
 ## Install
 
 `aiplam` is a single executable with no dependencies (`aiplam`, or `aiplam.exe` on Windows), for Linux, macOS and
-Windows:
+Windows. `git` is optional: without it, playbook versions are shown as `unknown`.
 
-- put it in your `PATH`;
-- `git` is optional: without it, playbook versions are shown as `unknown`.
+- **macOS and Linux, with [Homebrew](https://brew.sh):** `brew install arxila/tap/aiplam`
+- **Windows, with winget:** `winget install Arxila.aiplam`
+- **From the [releases](https://github.com/arxila/aiplam/releases):** download the archive for your system, and put
+  `aiplam` (or `aiplam.exe`) in your `PATH`. `SHA256SUMS` holds the archives' checksums. On macOS, the executable is
+  not signed, so a copy downloaded with a browser is blocked: allow it with `xattr -d com.apple.quarantine aiplam`.
+- **With Go 1.26 or later:** `go install arxila.io/aiplam/cmd/aiplam@latest` builds it into `$(go env GOPATH)/bin`.
 
-With Go 1.26 or later installed, `go install arxila.io/aiplam/cmd/aiplam@latest` builds it into `$(go env GOPATH)/bin`.
 To build it from a clone:
 
 ```bash
@@ -425,7 +428,7 @@ aiplam does not check what other managed folders link, nor which of them an agen
   which git does not store as links at all. Add them to the project's `.gitignore` (aiplam never changes it).
 - When the managed folder is in a git repository, aiplam checks with git that its links are ignored. `status`, and
   `add`, `update`, `profile enable` and `profile switch` (for the links they create), warn about those that are not,
-  with the exact lines to add, and list those already committed, to untrack with `git rm --cached`. These are
+  with the exact lines to add, and list those already committed, to untrack with `git rm -r --cached`. These are
   warnings: `status` does not count them as problems. When git is not in the PATH (as when it only comes with an IDE),
   or fails, `status` warns that it cannot check them.
 

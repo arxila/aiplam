@@ -49,7 +49,8 @@ vet:
 
 # Release archives: a .tar.gz (a .zip for Windows) per platform, holding the executable with the README and the license
 # files (which the Apache License requires to go with every copy), and a SHA256SUMS file. When HEAD is tagged, the tag
-# must match the version.
+# must match the version. scripts/check-dist.sh then checks that the archives hold exactly these files, and nothing of
+# the machine that built them.
 dist: clean
 	@[ -n "$(VERSION)" ] || { echo "cannot read the version from internal/app/app.go: run 'make VERSION=x.y.z dist'" >&2; exit 1; }
 	@for tag in $$(git tag --points-at HEAD 'v*' 2>/dev/null); do \
@@ -74,6 +75,7 @@ dist: clean
 	done
 	@cd $(DIST) && { command -v sha256sum >/dev/null && sha256sum $(BINARY)-* || shasum -a 256 $(BINARY)-*; } > SHA256SUMS
 	@echo "written $(DIST)/SHA256SUMS"
+	@./scripts/check-dist.sh $(DIST) $(BINARY) $(VERSION)
 
 clean:
 	rm -rf $(DIST) $(BINARY)
