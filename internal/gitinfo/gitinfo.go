@@ -102,16 +102,19 @@ func (r *Reader) Read(folder string) Version {
 
 // Unignored returns, among paths (absolute paths inside the work tree whose top folder is repo), those that git does
 // not ignore, and, among those, the ones it tracks (a tracked path is never ignored; a folder counts as tracked when
-// files inside it are). ok is false when git is not available or fails.
-func (r *Reader) Unignored(repo string, paths []string) (unignored []string, tracked map[string]bool, ok bool) {
-	if !r.Available() || len(paths) == 0 {
-		return nil, nil, r.Available()
+// files inside it are). It fails with ErrNotFound when git is not available, or with git's error.
+func (r *Reader) Unignored(repo string, paths []string) (unignored []string, tracked map[string]bool, err error) {
+	if !r.Available() {
+		return nil, nil, ErrNotFound
+	}
+	if len(paths) == 0 {
+		return nil, nil, nil
 	}
 	rels := make([]string, len(paths))
 	for i, p := range paths {
 		rel, err := filepath.Rel(repo, p)
 		if err != nil {
-			return nil, nil, false
+			return nil, nil, err
 		}
 		rels[i] = filepath.ToSlash(rel)
 	}
@@ -119,7 +122,7 @@ func (r *Reader) Unignored(repo string, paths []string) (unignored []string, tra
 	out, err := r.command(repo, strings.Join(rels, "\x00"), "check-ignore", "--stdin", "-z")
 	var exit *exec.ExitError
 	if err != nil && !(errors.As(err, &exit) && exit.ExitCode() == 1) {
-		return nil, nil, false
+		return nil, nil, err
 	}
 	ignored := map[string]bool{}
 	for _, rel := range strings.Split(string(out), "\x00") {
@@ -138,12 +141,12 @@ func (r *Reader) Unignored(repo string, paths []string) (unignored []string, tra
 		}
 	}
 	if len(unignored) == 0 {
-		return nil, nil, true
+		return nil, nil, nil
 	}
 	// The tracked files in the folders of the unignored paths.
 	out, err = r.command(repo, "", append([]string{"ls-files", "-z", "--"}, dirs...)...)
 	if err != nil {
-		return nil, nil, false
+		return nil, nil, err
 	}
 	files := strings.Split(string(out), "\x00")
 	tracked = map[string]bool{}
@@ -158,19 +161,37 @@ func (r *Reader) Unignored(repo string, paths []string) (unignored []string, tra
 			}
 		}
 	}
-	return unignored, tracked, true
+	return unignored, tracked, nil
 }
 
-// command runs git in folder with stdin as its input, and returns its output.
+// ErrNotFound is returned when the git command was not found.
+var ErrNotFound = errors.New("git was not found in the PATH")
+
+// command runs git in folder with stdin as its input, and returns its output. When git fails, the error is git's own
+// message (its first line), or how it failed.
 func (r *Reader) command(folder, stdin string, args ...string) ([]byte, error) {
 	cmd := exec.Command(r.git, append([]string{"-C", folder}, args...)...)
 	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0")
 	cmd.Stdin = strings.NewReader(stdin)
-	var out bytes.Buffer
-	cmd.Stdout = &out
+	var out, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &stderr
 	err := cmd.Run()
+	if exit := (*exec.ExitError)(nil); errors.As(err, &exit) && exit.ExitCode() != 1 {
+		if msg, _, _ := strings.Cut(strings.TrimSpace(stderr.String()), "\n"); msg != "" {
+			return out.Bytes(), &gitError{msg: msg, err: err}
+		}
+	}
 	return out.Bytes(), err
 }
+
+// gitError is a failure of git, with its message.
+type gitError struct {
+	msg string
+	err error
+}
+
+func (e *gitError) Error() string { return e.msg }
+func (e *gitError) Unwrap() error { return e.err }
 
 func (r *Reader) run(folder string, args ...string) (string, bool) {
 	cmd := exec.Command(r.git, append([]string{"-C", folder}, args...)...)

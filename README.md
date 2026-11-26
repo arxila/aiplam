@@ -426,7 +426,8 @@ aiplam does not check what other managed folders link, nor which of them an agen
 - When the managed folder is in a git repository, aiplam checks with git that its links are ignored. `status`, and
   `add`, `update`, `profile enable` and `profile switch` (for the links they create), warn about those that are not,
   with the exact lines to add, and list those already committed, to untrack with `git rm --cached`. These are
-  warnings: `status` does not count them as problems.
+  warnings: `status` does not count them as problems. When git is not in the PATH (as when it only comes with an IDE),
+  or fails, `status` warns that it cannot check them.
 
   ```text
   WARNING: 2 links that aiplam made are not ignored by git, so they could be committed; but links belong to each

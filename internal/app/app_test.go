@@ -1307,6 +1307,23 @@ func TestUnignoredLinks(t *testing.T) {
 		t.Fatalf(".gitignore was changed: %q", data)
 	}
 
+	// When git cannot check them: status says so (once, not counted); add and update stay quiet about it.
+	e.app.Git = &gitinfo.Reader{}
+	e.mustFail(ExitOK, []string{"cannot check whether the links that aiplam made are ignored by git (git was not " +
+		"found in the PATH)", "Everything else is up to date."}, "status")
+	e.skill(filepath.Join(pb, "skills"), "x-d")
+	if out, errOut := e.mustRun(ExitOK, "update", "x", "-p", "default"); strings.Contains(out+errOut, "cannot check") {
+		t.Fatalf("unexpected warning:\n%s%s", out, errOut)
+	}
+	e.app.Git = gitinfo.NewReader()
+	broken := e.mkdir(filepath.Join(e.root, "broken"))
+	e.mkdir(filepath.Join(broken, ".git")) // not a repository git can use
+	e.mustRun(ExitOK, "init", broken, "-a", "claude")
+	e.app.Cwd = broken
+	e.mustRun(ExitOK, "add", "x", pb)
+	e.mustFail(ExitOK, []string{"cannot check whether the links that aiplam made are ignored by git (fatal: "},
+		"status")
+
 	// A home folder in a git repository (dotfiles) on Windows: links under %APPDATA% are outside it, so not reported.
 	w := newEnv(t)
 	w.app.GOOS, w.app.AppData = "windows", w.mkdir(filepath.Join(w.root, "appdata"))

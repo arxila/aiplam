@@ -65,12 +65,13 @@ func ownedLinks(profiles []*profileState, only map[string]bool) []ownedLink {
 }
 
 // warnUnignored warns about the links, among links, that the git repository holding the managed folder does not
-// ignore (none when the managed folder is not in a git repository, or git is not available): links belong to each
-// machine, so they must not be committed. The warning gives the lines to add to the managed folder's .gitignore (aiplam
-// never writes it) and lists the links already committed. It reports whether it warned.
-func (a *App) warnUnignored(links []ownedLink) bool {
+// ignore (none when the managed folder is not in a git repository): links belong to each machine, so they must not be
+// committed. The warning gives the lines to add to the managed folder's .gitignore (aiplam never writes it) and lists
+// the links already committed. When git cannot check them (it is not in the PATH, or it fails), it says so only with
+// failures set. It reports whether it warned.
+func (a *App) warnUnignored(links []ownedLink, failures bool) bool {
 	repo := config.GitRepository(a.Managed)
-	if repo == "" || !a.Git.Available() {
+	if repo == "" {
 		return false
 	}
 	var inRepo []string
@@ -81,8 +82,18 @@ func (a *App) warnUnignored(links []ownedLink) bool {
 			byPath[l.path] = l
 		}
 	}
-	unignored, tracked, ok := a.Git.Unignored(repo, inRepo)
-	if !ok || len(unignored) == 0 {
+	if len(inRepo) == 0 {
+		return false
+	}
+	unignored, tracked, err := a.Git.Unignored(repo, inRepo)
+	if err != nil {
+		if failures {
+			a.warnf("cannot check whether the links that aiplam made are ignored by git (%s), so they could be "+
+				"committed by mistake: links belong to each machine, and must be ignored by git.", err)
+		}
+		return failures
+	}
+	if len(unignored) == 0 {
 		return false
 	}
 	var lines []string
@@ -128,7 +139,7 @@ func (a *App) warnUnignoredCreated(plan playbook.Plan, profiles []*profileState)
 		}
 	}
 	if len(created) > 0 {
-		a.warnUnignored(ownedLinks(profiles, created))
+		a.warnUnignored(ownedLinks(profiles, created), false)
 	}
 }
 

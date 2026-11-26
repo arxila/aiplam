@@ -50,7 +50,8 @@ It also warns, without counting them, about the profiles that are not enabled an
 until they are fixed), about the artifacts that cannot be linked because they are files and, on Windows, links to
 files need developer mode or administrator rights, and, when the managed folder is in a git repository, about the
 links that git does not ignore: links belong to each machine and must not be committed, so it gives the lines to add
-to .gitignore (aiplam never changes it), and lists the links already committed.
+to .gitignore (aiplam never changes it), and lists the links already committed (or says that it cannot check them,
+when git is not in the PATH or fails).
 
 Examples:
   aiplam status
@@ -278,7 +279,7 @@ func (a *App) cmdStatus(args []string) error {
 		a.warnf("%s", a.skippedText(plan, "cannot be linked"))
 	}
 	// Links that git does not ignore: reported, but not counted (committing them is a choice, if a bad one).
-	unignored := a.warnUnignored(ownedLinks(st.enabled, nil))
+	unignored := a.warnUnignored(ownedLinks(st.enabled, nil), true)
 
 	if attention > 0 {
 		a.printf("\n%d item(s) need attention; see the warnings above.\n", attention)
