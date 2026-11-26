@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode"
 
 	"arxila.io/aiplam/internal/config"
 )
@@ -183,6 +184,9 @@ func parseTargets(values []string, user bool, goos string) (config.Targets, erro
 	}
 	var targets config.Targets
 	for _, parts := range items {
+		if path, ok := drivePath(parts); ok {
+			return nil, usagef("--folder %s: target folder '%s' must be a relative path", parts[0], path)
+		}
 		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 			return nil, usagef("--folder '%s' must be <kind>:<targetfolder>, as in 'skills:.agents/skills'",
 				strings.Join(parts, ":"))
@@ -210,6 +214,9 @@ func parseMappings(values []string) (map[string]config.Mapping, error) {
 	}
 	mappings := map[string]config.Mapping{}
 	for _, parts := range items {
+		if path, ok := drivePath(parts); ok {
+			return nil, usagef("--folder %s: playbook subfolder '%s' must be a relative path", parts[0], path)
+		}
 		if len(parts) < 2 || len(parts) > 3 || parts[0] == "" {
 			return nil, usagef("--folder '%s' must be <kind>:<subfolder>[:<format>], as in 'skills:.' or "+
 				"'subagents:agents:*.md'", strings.Join(parts, ":"))
@@ -235,6 +242,16 @@ func parseMappings(values []string) (map[string]config.Mapping, error) {
 		mappings[kind] = m
 	}
 	return mappings, nil
+}
+
+// drivePath reports whether the parts of a --folder item, after the kind, are an absolute Windows path, split at its
+// drive letter's colon ("skills:C:\x" gives "skills", "C" and "\x"), and returns it whole.
+func drivePath(parts []string) (string, bool) {
+	if len(parts) < 3 || len(parts[1]) != 1 || !unicode.IsLetter(rune(parts[1][0])) ||
+		!strings.HasPrefix(parts[2], `\`) && !strings.HasPrefix(parts[2], "/") {
+		return "", false
+	}
+	return strings.Join(parts[1:], ":"), true
 }
 
 // profileNameList parses profile names given as arguments, each possibly a comma-separated list, dropping repetitions.

@@ -40,7 +40,7 @@ import (
 )
 
 // sourceVersion is the version of this source code. The Makefile reads it from here.
-const sourceVersion = "0.1.0"
+const sourceVersion = "1.0.0"
 
 // Version is aiplam's version: the one set at build time with -ldflags "-X arxila.io/aiplam/internal/app.Version=..."
 // (as the Makefile does), or else the module version recorded by the go command (for example, by 'go install
@@ -572,14 +572,23 @@ func (a *App) hint(command string) string {
 	case a.user || (a.elsewhere && a.isUser()):
 		return "aiplam " + command + " --user"
 	case a.elsewhere:
-		return "cd " + shellPath(a.pretty(a.Managed), a.Managed) + " && aiplam " + command
+		return "cd " + shellPath(runtime.GOOS, a.pretty(a.Managed), a.Managed) + " && aiplam " + command
 	}
 	return "aiplam " + command
 }
 
-// shellPath returns a path to paste in a shell: pretty (the path, shortened with "~") when it needs no quoting, or else
-// the absolute path in double quotes ("~" is not expanded inside quotes).
-func shellPath(pretty, abs string) string {
+// shellPath returns a path to paste in a shell on the operating system goos. On Windows, it is the absolute path (cmd
+// does not expand "~"), in double quotes when it holds spaces or characters that cmd or PowerShell treat specially
+// (Windows paths cannot hold double quotes, and backslashes are not escapes there). Elsewhere, it is pretty (the path,
+// shortened with "~") when it needs no quoting, or else the absolute path in double quotes, escaped for POSIX shells
+// ("~" is not expanded inside quotes).
+func shellPath(goos, pretty, abs string) string {
+	if goos == "windows" {
+		if strings.ContainsAny(abs, " \t&|()<>^%!;,=`$'@{}#+") {
+			return `"` + abs + `"`
+		}
+		return abs
+	}
 	if !strings.ContainsAny(pretty, " \t'\"$`\\;&|()<>*?[]#!{}") {
 		return pretty
 	}

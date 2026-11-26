@@ -73,12 +73,26 @@ func (e *env) mustRun(want int, args ...string) (string, string) {
 	return out, errOut
 }
 
+// slashed returns s with its backslashes turned into slashes on Windows, where aiplam prints paths with backslashes,
+// so that tests can expect paths written with slashes on every system.
+func slashed(s string) string {
+	if runtime.GOOS == "windows" {
+		return strings.ReplaceAll(s, `\`, "/")
+	}
+	return s
+}
+
+// contains reports whether out contains want, taking slashes and backslashes as the same on Windows (see slashed).
+func contains(out, want string) bool {
+	return strings.Contains(slashed(out), slashed(want))
+}
+
 // mustFail runs aiplam, expects exit code want and a message containing each of msgs (in stdout or stderr).
 func (e *env) mustFail(want int, msgs []string, args ...string) {
 	e.t.Helper()
 	out, errOut := e.mustRun(want, args...)
 	for _, msg := range msgs {
-		if !strings.Contains(out+errOut, msg) {
+		if !contains(out+errOut, msg) {
 			e.t.Fatalf("aiplam %s: missing %q in:\n%s%s", strings.Join(args, " "), msg, out, errOut)
 		}
 	}
@@ -237,11 +251,11 @@ func TestInitUsage(t *testing.T) {
 		{[]string{"init", project, "-g"}, "unknown option: -g"},
 	} {
 		code, _, errOut := e.run(c.args...)
-		if code != ExitUsage || !strings.Contains(errOut, c.msg) {
+		if code != ExitUsage || !contains(errOut, c.msg) {
 			t.Errorf("%v: exit %d, %q; want a usage error with %q", c.args, code, errOut, c.msg)
 		}
 		// Usage errors show the synopsis only.
-		if code == ExitUsage && (!strings.Contains(errOut, "--help' for") || strings.Contains(errOut, "Examples:")) {
+		if code == ExitUsage && (!contains(errOut, "--help' for") || contains(errOut, "Examples:")) {
 			t.Errorf("%v: unexpected usage text: %s", c.args, errOut)
 		}
 	}
@@ -254,7 +268,7 @@ func TestInit(t *testing.T) {
 	out, _ := e.mustRun(ExitOK, "init", "--user", "--agent", "copilot")
 	for _, want := range []string{"Managed folder: ~ (user managed folder)", "Created profile 'default'",
 		"skills: .copilot/skills", "instructions: .copilot/instructions"} {
-		if !strings.Contains(out, want) {
+		if !contains(out, want) {
 			t.Fatalf("missing %q in:\n%s", want, out)
 		}
 	}
@@ -282,7 +296,7 @@ func TestInit(t *testing.T) {
 		prof.Targets[2].Kind != "notes" {
 		t.Fatalf("profile b: %+v", prof)
 	}
-	if !strings.Contains(out, "is inside managed folder '~'") || strings.Contains(out, "git repository") {
+	if !contains(out, "is inside managed folder '~'") || contains(out, "git repository") {
 		t.Fatalf("unexpected notes:\n%s", out)
 	}
 	// A leftover profile file without configuration is not overwritten.
@@ -297,7 +311,7 @@ func TestInit(t *testing.T) {
 	repo := e.mkdir(filepath.Join(e.root, "repo"))
 	e.mkdir(filepath.Join(repo, ".git"))
 	out, _ = e.mustRun(ExitOK, "init", repo, "-a", "junie:standard")
-	if !strings.Contains(out, "links aiplam makes belong to each machine and must be ignored by git") {
+	if !contains(out, "links aiplam makes belong to each machine and must be ignored by git") {
 		t.Fatalf("unexpected git note:\n%s", out)
 	}
 }
@@ -316,7 +330,7 @@ func TestAddAndMappings(t *testing.T) {
 	out, _ := e.mustRun(ExitOK, "add", "x", pb)
 	for _, want := range []string{"skills: " + filepath.Join(pb, "skills") + ", format 'x-*': 2 artifact(s)",
 		"commands: " + filepath.Join(pb, "commands") + ", format 'x-*': not found", "Added x."} {
-		if !strings.Contains(out, strings.ReplaceAll(want, e.home, "~")) {
+		if !contains(out, strings.ReplaceAll(want, e.home, "~")) {
 			t.Fatalf("missing %q in:\n%s", want, out)
 		}
 	}
@@ -356,7 +370,7 @@ func TestAddAndMappings(t *testing.T) {
 		{[]string{"-f", "skills:a:b:c"}, "must be <kind>:<subfolder>[:<format>]"},
 	} {
 		code, _, errOut := e.run(append([]string{"add", "x", pb}, c.args...)...)
-		if code != ExitUsage || !strings.Contains(errOut, c.msg) {
+		if code != ExitUsage || !contains(errOut, c.msg) {
 			t.Errorf("%v: exit %d, %q; want %q", c.args, code, errOut, c.msg)
 		}
 	}
@@ -366,7 +380,7 @@ func TestAddAndMappings(t *testing.T) {
 	// Subfolders that do not exist yet are fine: what appears is linked by update.
 	empty := e.mkdir(filepath.Join(e.root, "empty"))
 	_, errOut := e.mustRun(ExitOK, "add", "z", empty)
-	if !strings.Contains(errOut, "no artifacts were found") {
+	if !contains(errOut, "no artifacts were found") {
 		t.Fatalf("want a warning: %s", errOut)
 	}
 	e.skill(filepath.Join(empty, "skills"), "z-new")
@@ -386,7 +400,7 @@ func TestProfilesToActOn(t *testing.T) {
 	e.mustRun(ExitOK, "add", "x", pb, "-p", "a")
 	// Several profiles at once, enabled or not: registered in each, linked in the enabled ones.
 	out, _ := e.mustRun(ExitOK, "add", "y", pb, "-p", "b,off")
-	if !strings.Contains(out, "Nothing was linked in profile 'off'") {
+	if !contains(out, "Nothing was linked in profile 'off'") {
 		t.Fatalf("unexpected output:\n%s", out)
 	}
 	e.assertLink(filepath.Join(e.homeSkills(), "y-b"), filepath.Join(pb, "skills", "y-b"))
@@ -399,7 +413,7 @@ func TestProfilesToActOn(t *testing.T) {
 	e.mustFail(ExitFailure, []string{"no playbook of profile 'b' is registered with name, id or playbook folder 'x'"},
 		"update", "x", "-p", "a,b")
 	out, _ = e.mustRun(ExitOK, "update", "y", "-p", "b,off")
-	if !strings.Contains(out, "Nothing to update for playbook y (profile off)") {
+	if !contains(out, "Nothing to update for playbook y (profile off)") {
 		t.Fatalf("unexpected output:\n%s", out)
 	}
 	e.mustRun(ExitOK, "remove", "y", "-p", "b,off")
@@ -448,7 +462,7 @@ func TestCollisions(t *testing.T) {
 		t.Fatal("the enabled profiles changed")
 	}
 	out, _ := e.mustRun(ExitOK, "profile", "switch", "second")
-	if strings.Contains(out, "x-a") { // kept, moved from default to second
+	if contains(out, "x-a") { // kept, moved from default to second
 		t.Fatalf("unexpected changes:\n%s", out)
 	}
 	e.assertLink(filepath.Join(e.homeSkills(), "x-a"), filepath.Join(pb, "skills", "x-a"))
@@ -485,18 +499,18 @@ func TestUpdateAndRemove(t *testing.T) {
 	out, _ := e.mustRun(ExitOK, "update")
 	for _, want := range []string{"Updating playbook x of profile 'default'", "+ ~/project/ai/agents/skills/x-c",
 		"- ~/project/ai/agents/skills/x-b (broken link: its artifact no longer exists)", "Managed folder: ~/project"} {
-		if !strings.Contains(out, want) {
+		if !contains(out, want) {
 			t.Fatalf("missing %q in:\n%s", want, out)
 		}
 	}
 	e.app.Cwd = project
 	out, _ = e.mustRun(ExitOK, "update", "x")
-	if !strings.Contains(out, "up to date") {
+	if !contains(out, "up to date") {
 		t.Fatalf("unexpected output:\n%s", out)
 	}
 	// Removing unlinks, and removes the folders left empty up to the managed folder; hand-added files stay.
 	out, _ = e.mustRun(ExitOK, "remove", pb)
-	if !strings.Contains(out, "~/project/ai/notes (empty folder removed)") || !strings.Contains(out, "Removed x") {
+	if !contains(out, "~/project/ai/notes (empty folder removed)") || !contains(out, "Removed x") {
 		t.Fatalf("unexpected output:\n%s", out)
 	}
 	e.assertMissing(filepath.Join(project, "ai", "notes"))
@@ -516,7 +530,7 @@ func TestStatus(t *testing.T) {
 	out, _ := e.mustRun(ExitOK, "status")
 	for _, want := range []string{"Managed folder: ~\n", "user managed folder (the home folder): yes",
 		"git repository: none", "default: agent claude (~/.aiplam/default.yaml)", "Everything is up to date."} {
-		if !strings.Contains(out, want) {
+		if !contains(out, want) {
 			t.Fatalf("missing %q in:\n%s", want, out)
 		}
 	}
@@ -548,7 +562,7 @@ func TestStatus(t *testing.T) {
 	}
 	e.mustFail(ExitFailure, []string{"the enabled profile 'default' does not exist"}, "status")
 	_, errOut := e.mustRun(ExitOK, "list")
-	if !strings.Contains(errOut, "the enabled profile 'default' does not exist") {
+	if !contains(errOut, "the enabled profile 'default' does not exist") {
 		t.Fatalf("want a warning: %s", errOut)
 	}
 }
@@ -562,7 +576,7 @@ func TestList(t *testing.T) {
 		t.Fatal(err)
 	}
 	out, _ := e.mustRun(ExitOK, "list")
-	if !strings.Contains(out, "no playbooks are registered") {
+	if !contains(out, "no playbooks are registered") {
 		t.Fatalf("unexpected list:\n%s", out)
 	}
 	e.mustRun(ExitOK, "add", "x", pb)
@@ -576,11 +590,11 @@ func TestList(t *testing.T) {
 	out, _ = e.mustRun(ExitOK, "list")
 	for _, want := range []string{"Profile default (agent standard)", "skills (~/.agents/skills):",
 		"x-a  playbook x (unknown), skill version 2.0", "x-b  playbook x (unknown)  BROKEN LINK"} {
-		if !strings.Contains(out, want) {
+		if !contains(out, want) {
 			t.Fatalf("missing %q in:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "mine") || strings.Contains(out, "other") {
+	if contains(out, "mine") || contains(out, "other") {
 		t.Fatalf("unexpected entries:\n%s", out)
 	}
 
@@ -589,20 +603,20 @@ func TestList(t *testing.T) {
 	e.mustRun(ExitOK, "init", filepath.Dir(project), "-f", "skills:s")
 	e.app.Cwd = e.root
 	out, _ = e.mustRun(ExitOK, "list", project)
-	if !strings.Contains(out, "Managed folder: "+filepath.Dir(project)) || !strings.Contains(out, "nothing is linked") &&
-		!strings.Contains(out, "no playbooks are registered") {
+	if !contains(out, "Managed folder: "+filepath.Dir(project)) || !contains(out, "nothing is linked") &&
+		!contains(out, "no playbooks are registered") {
 		t.Fatalf("unexpected list:\n%s", out)
 	}
 	e.app.Cwd = project
 	out, _ = e.mustRun(ExitOK, "list", "--user")
-	if !strings.Contains(out, "Managed folder: ~\n") {
+	if !contains(out, "Managed folder: ~\n") {
 		t.Fatalf("unexpected list:\n%s", out)
 	}
 	e.mustFail(ExitUsage, []string{"give either a folder or --user"}, "list", project, "--user")
 	e.mustFail(ExitFailure, []string{"folder 'nope' does not exist"}, "status", "nope")
 	e.mustRun(ExitOK, "profile", "disable", "default", "-u")
 	out, _ = e.mustRun(ExitOK, "list", "-u")
-	if !strings.Contains(out, "No profile is enabled") {
+	if !contains(out, "No profile is enabled") {
 		t.Fatalf("unexpected list:\n%s", out)
 	}
 }
@@ -617,32 +631,32 @@ func TestManagedFolderDiscovery(t *testing.T) {
 
 	e.app.Cwd = deep
 	out, _ := e.mustRun(ExitOK, "status")
-	if !strings.Contains(out, "Managed folder: ~/w/project\n") {
+	if !contains(out, "Managed folder: ~/w/project\n") {
 		t.Fatalf("unexpected status:\n%s", out)
 	}
 	// Outside home, with nothing managed up to the root: the home folder.
 	e.app.Cwd = outside
 	out, _ = e.mustRun(ExitOK, "status")
-	if !strings.Contains(out, "Managed folder: ~\n") {
+	if !contains(out, "Managed folder: ~\n") {
 		t.Fatalf("unexpected status:\n%s", out)
 	}
 	// A managed folder above the home folder is never used from inside it.
 	e.mustRun(ExitOK, "init", e.root, "-a", "claude")
 	e.app.Cwd = filepath.Join(e.home, "w")
 	out, _ = e.mustRun(ExitOK, "status")
-	if !strings.Contains(out, "Managed folder: ~\n") {
+	if !contains(out, "Managed folder: ~\n") {
 		t.Fatalf("unexpected status:\n%s", out)
 	}
 	e.app.Cwd = outside
 	out, _ = e.mustRun(ExitOK, "status")
-	if !strings.Contains(out, "Managed folder: "+e.root+"\n") {
+	if !contains(out, "Managed folder: "+e.root+"\n") {
 		t.Fatalf("unexpected status:\n%s", out)
 	}
 	// A git repository whose root is above the managed folder.
 	e.mkdir(filepath.Join(e.home, "w", ".git"))
 	e.app.Cwd = deep
 	out, _ = e.mustRun(ExitOK, "status")
-	if !strings.Contains(out, "git repository: yes, with its root at ~/w") {
+	if !contains(out, "git repository: yes, with its root at ~/w") {
 		t.Fatalf("unexpected status:\n%s", out)
 	}
 }
@@ -659,19 +673,19 @@ func TestProfileCommands(t *testing.T) {
 		"claude")
 	e.mustFail(ExitUsage, []string{"unknown profile subcommand: agent"}, "profile", "agent", "default", "claude")
 	out, _ := e.mustRun(ExitOK, "profile", "add", "work", "-a", "devin")
-	if !strings.Contains(out, "skills: .config/devin/skills") || !strings.Contains(out, "not enabled") {
+	if !contains(out, "skills: .config/devin/skills") || !contains(out, "not enabled") {
 		t.Fatalf("unexpected output:\n%s", out)
 	}
 	e.mustFail(ExitFailure, []string{"profile 'work' already exists"}, "profile", "add", "work", "-a", "devin")
 	e.mustRun(ExitOK, "add", "y", pb, "-p", "work")
 	out, _ = e.mustRun(ExitOK, "profile", "list")
-	if !strings.Contains(out, "* default") || !strings.Contains(out, "  work                 devin") {
+	if !contains(out, "* default") || !contains(out, "  work                 devin") {
 		t.Fatalf("unexpected list:\n%s", out)
 	}
 	e.mustRun(ExitOK, "profile", "enable", "work")
 	e.assertLink(filepath.Join(e.home, ".config", "devin", "skills", "y-b"), filepath.Join(pb, "skills", "y-b"))
 	out, _ = e.mustRun(ExitOK, "profile", "switch", "default,work")
-	if !strings.Contains(out, "unchanged") {
+	if !contains(out, "unchanged") {
 		t.Fatalf("unexpected output:\n%s", out)
 	}
 	e.mustFail(ExitFailure, []string{"not enabled: nope"}, "profile", "disable", "nope")
@@ -679,7 +693,7 @@ func TestProfileCommands(t *testing.T) {
 
 	// Removing an enabled profile removes its links first, and the folders left empty, up to the home folder.
 	out, _ = e.mustRun(ExitOK, "profile", "remove", "work")
-	if !strings.Contains(out, "Removed profile 'work' and its 1 playbook registration(s)") {
+	if !contains(out, "Removed profile 'work' and its 1 playbook registration(s)") {
 		t.Fatalf("unexpected output:\n%s", out)
 	}
 	e.assertMissing(filepath.Join(e.home, ".config"))
@@ -689,7 +703,7 @@ func TestProfileCommands(t *testing.T) {
 	e.mustRun(ExitOK, "profile", "disable", "default")
 	e.assertMissing(filepath.Join(e.home, ".agents"))
 	out, _ = e.mustRun(ExitOK, "profile", "list")
-	if !strings.Contains(out, "No profile is enabled") {
+	if !contains(out, "No profile is enabled") {
 		t.Fatalf("unexpected list:\n%s", out)
 	}
 }
@@ -750,7 +764,7 @@ func TestPlaybookBehindSymlink(t *testing.T) {
 		t.Skipf("cannot create symbolic links: %v", err)
 	}
 	out, _ := e.mustRun(ExitOK, "update", "x")
-	if !strings.Contains(out, "up to date") {
+	if !contains(out, "up to date") {
 		t.Fatalf("unexpected output: %s", out)
 	}
 	e.mustRun(ExitOK, "status")
@@ -768,7 +782,7 @@ func TestProfileNameCase(t *testing.T) {
 	}
 	pb := e.playbook("p", "x-a")
 	out, _ := e.mustRun(ExitOK, "add", "x", pb, "-p", "Work")
-	if strings.Contains(out, "not enabled") {
+	if contains(out, "not enabled") {
 		t.Fatalf("Work is the enabled profile work: %s", out)
 	}
 	e.assertLink(filepath.Join(e.homeSkills(), "x-a"), filepath.Join(pb, "skills", "x-a"))
@@ -826,7 +840,7 @@ func TestHelpAndVersion(t *testing.T) {
 		}
 	}
 	_, errOut := e.mustRun(ExitUsage)
-	if !strings.Contains(errOut, "aiplam "+Version+" - AI Playbook Manager\n"+Copyright) {
+	if !contains(errOut, "aiplam "+Version+" - AI Playbook Manager\n"+Copyright) {
 		t.Fatalf("unexpected help: %s", errOut)
 	}
 	for _, c := range commands {
@@ -841,12 +855,12 @@ func TestHelpAndVersion(t *testing.T) {
 		}
 	}
 	out, _ := e.mustRun(ExitOK, "--help")
-	if !strings.Contains(out, "list, show, add, remove, enable, disable, switch") {
+	if !contains(out, "list, show, add, remove, enable, disable, switch") {
 		t.Fatalf("unexpected main help:\n%s", out)
 	}
 	out, _ = e.mustRun(ExitOK, "profile", "--help")
-	if !strings.Contains(out, "devin (and devin:standard): Devin") ||
-		!strings.Contains(out, "~/.config/devin/skills (Windows: %APPDATA%/devin/skills)") {
+	if !contains(out, "devin (and devin:standard): Devin") ||
+		!contains(out, "~/.config/devin/skills (Windows: %APPDATA%/devin/skills)") {
 		t.Fatalf("unexpected profile help:\n%s", out)
 	}
 	e.mustFail(ExitUsage, []string{"unknown command: check"}, "check")
@@ -928,11 +942,11 @@ func TestStatusReportsLeftoverLinks(t *testing.T) {
 	}
 	e.writeProfile(e.home, "broken", "name: other\n")
 	_, errOut := e.mustRun(ExitOK, "status")
-	if !strings.Contains(errOut, "the profile cannot be enabled until it is fixed") || strings.Contains(errOut, "mine") {
+	if !contains(errOut, "the profile cannot be enabled until it is fixed") || contains(errOut, "mine") {
 		t.Fatalf("unexpected warnings: %s", errOut)
 	}
 	out, _ := e.mustRun(ExitOK, "profile", "list")
-	if !strings.Contains(out, "broken") || !strings.Contains(out, "problem(s) to fix by hand") {
+	if !contains(out, "broken") || !contains(out, "problem(s) to fix by hand") {
 		t.Fatalf("unexpected list:\n%s", out)
 	}
 }
@@ -961,18 +975,22 @@ func TestHintsNameTheManagedFolder(t *testing.T) {
 	// Listing another managed folder: suggested commands are run from inside it.
 	e.app.Cwd = e.home
 	out, _ := e.mustRun(ExitOK, "list", project)
-	if !strings.Contains(out, "'cd ~/project && aiplam add <name> <playbookfolder>'") {
+	want := "'cd ~/project && aiplam add <name> <playbookfolder>'"
+	if runtime.GOOS == "windows" { // cmd does not expand "~": the absolute path
+		want = "'cd " + project + " && aiplam add <name> <playbookfolder>'"
+	}
+	if !contains(out, want) {
 		t.Fatalf("unexpected hint:\n%s", out)
 	}
 	// Listing the user managed folder from elsewhere: with --user.
 	e.app.Cwd = project
 	out, _ = e.mustRun(ExitOK, "list", e.home)
-	if !strings.Contains(out, "'aiplam add <name> <playbookfolder> --user'") {
+	if !contains(out, "'aiplam add <name> <playbookfolder> --user'") {
 		t.Fatalf("unexpected hint:\n%s", out)
 	}
 	// The managed folder the current folder leads to: plain commands.
 	out, _ = e.mustRun(ExitOK, "list", ".")
-	if !strings.Contains(out, "'aiplam add <name> <playbookfolder>'") {
+	if !contains(out, "'aiplam add <name> <playbookfolder>'") {
 		t.Fatalf("unexpected hint:\n%s", out)
 	}
 }
@@ -982,12 +1000,12 @@ func TestInitNotesManagedFolderAbove(t *testing.T) {
 	e.mustRun(ExitOK, "init", "-u", "-a", "standard")
 	outside := e.mkdir(filepath.Join(e.root, "outside"))
 	out, _ := e.mustRun(ExitOK, "init", outside, "-a", "standard")
-	if strings.Contains(out, "is inside managed folder") { // the home folder applies outside it, but does not hold it
+	if contains(out, "is inside managed folder") { // the home folder applies outside it, but does not hold it
 		t.Fatalf("unexpected note:\n%s", out)
 	}
 	inside := e.mkdir(filepath.Join(e.home, "w", "inside"))
 	out, _ = e.mustRun(ExitOK, "init", inside, "-a", "standard")
-	if !strings.Contains(out, "'~/w/inside' is inside managed folder '~'") {
+	if !contains(out, "'~/w/inside' is inside managed folder '~'") {
 		t.Fatalf("missing note:\n%s", out)
 	}
 }
@@ -1003,7 +1021,7 @@ func TestBrokenProfileCanBeDisabled(t *testing.T) {
 	e.mustRun(ExitOK, "profile", "add", "c", "-a", "standard")
 	e.mustFail(ExitFailure, []string{"it must be 'b'"}, "profile", "enable", "c")
 	_, errOut := e.mustRun(ExitOK, "profile", "disable", "b")
-	if !strings.Contains(errOut, "profile 'b' cannot be loaded") {
+	if !contains(errOut, "profile 'b' cannot be loaded") {
 		t.Fatalf("want a warning: %s", errOut)
 	}
 	e.assertLink(filepath.Join(e.homeSkills(), "x-a"), filepath.Join(pb, "skills", "x-a"))
@@ -1026,13 +1044,13 @@ func TestProfileShow(t *testing.T) {
 		"    skills: " + filepath.Join(pb, "skills") + ", format 'x-*': 1 artifact(s)",
 		"    subagents: " + filepath.Join(pb, "agents") + ", format '*.md': 1 artifact(s)",
 		"    rules: " + filepath.Join(pb, "rules") + ", format 'x-*': not found"} {
-		if !strings.Contains(out, want) {
+		if !contains(out, want) {
 			t.Fatalf("missing %q in:\n%s", want, out)
 		}
 	}
 	e.mustRun(ExitOK, "profile", "add", "empty", "-a", "standard")
 	out, _ = e.mustRun(ExitOK, "profile", "show", "empty")
-	if !strings.Contains(out, "not enabled, agent standard") || !strings.Contains(out, "No playbooks are registered") {
+	if !contains(out, "not enabled, agent standard") || !contains(out, "No playbooks are registered") {
 		t.Fatalf("unexpected output:\n%s", out)
 	}
 	e.mustFail(ExitFailure, []string{"profile 'nope' does not exist"}, "profile", "show", "nope")
@@ -1088,7 +1106,7 @@ func TestFilesWhereFoldersMustBe(t *testing.T) {
 	}
 	e.mustFail(ExitFailure, []string{"is not a folder", "1 item(s)"}, "status")
 	out, _ := e.mustRun(ExitOK, "profile", "show", "default")
-	if !strings.Contains(out, "format 'y-*': not a folder") {
+	if !contains(out, "format 'y-*': not a folder") {
 		t.Fatalf("unexpected output:\n%s", out)
 	}
 }
@@ -1116,16 +1134,24 @@ func TestQuotedHintsAndGitNote(t *testing.T) {
 	project := e.mkdir(filepath.Join(e.home, "My Projects", "p"))
 	e.mustRun(ExitOK, "init", project, "-a", "standard")
 	out, _ := e.mustRun(ExitOK, "list", project)
-	if !strings.Contains(out, `'cd "`+project+`" && aiplam add`) {
+	if !contains(out, `'cd "`+project+`" && aiplam add`) {
 		t.Fatalf("unexpected hint:\n%s", out)
 	}
-	if got := shellPath("~/a$b", `/h/a$b"c`); got != `"/h/a\$b\"c"` {
-		t.Fatalf("shellPath = %s", got)
+	for _, c := range []struct{ goos, pretty, abs, want string }{
+		{"linux", "~/p", "/h/p", "~/p"},
+		{"linux", "~/a$b", `/h/a$b"c`, `"/h/a\$b\"c"`},
+		{"windows", `~\p`, `C:\h\p`, `C:\h\p`}, // backslashes are not escapes, and cmd does not expand "~"
+		{"windows", `~\My P`, `C:\h\My P`, `"C:\h\My P"`},
+		{"windows", `~\a&b`, `C:\h\a&b`, `"C:\h\a&b"`},
+	} {
+		if got := shellPath(c.goos, c.pretty, c.abs); got != c.want {
+			t.Errorf("shellPath(%s, %q) = %s, want %s", c.goos, c.abs, got, c.want)
+		}
 	}
 
 	e.mustFail(ExitUsage, []string{"unknown command: nope", "Run 'aiplam --help' for the commands."}, "help", "nope")
 	_, errOut := e.mustRun(ExitUsage, "help", "nope")
-	if strings.Contains(errOut, "Getting started") {
+	if contains(errOut, "Getting started") {
 		t.Fatalf("the whole help was printed: %s", errOut)
 	}
 }
@@ -1193,13 +1219,13 @@ func TestFileLinksNotAllowed(t *testing.T) {
 	allowed = true
 	e.mustFail(ExitFailure, []string{"'aiplam update x' would link ~/.claude/agents/x-rev.md", "2 item(s)"}, "status")
 	out, errOut := e.mustRun(ExitOK, "update", "x")
-	if strings.Contains(out+errOut, "not linked") {
+	if contains(out+errOut, "not linked") {
 		t.Fatalf("unexpected warning:\n%s%s", out, errOut)
 	}
 	e.assertLink(agent, filepath.Join(pb, "subagents", "x-rev.md"))
 	e.assertLink(rule, filepath.Join(pb, "rules", "x-style.md"))
 	e.mustFail(ExitOK, []string{"Everything is up to date."}, "status")
-	if out, _ := e.mustRun(ExitOK, "list"); strings.Contains(out, "are not linked") {
+	if out, _ := e.mustRun(ExitOK, "list"); contains(out, "are not linked") {
 		t.Fatalf("list mentions skipped artifacts:\n%s", out)
 	}
 
@@ -1275,8 +1301,8 @@ func TestUnignoredLinks(t *testing.T) {
 		t.Fatal(err)
 	}
 	out, errOut := e.mustRun(ExitOK, "status")
-	if !strings.Contains(errOut, "1 link that aiplam made is not ignored by git") ||
-		!strings.Contains(errOut, "\n  /.claude/agents/x-*") || strings.Contains(errOut, "/.claude/skills/x-*") {
+	if !contains(errOut, "1 link that aiplam made is not ignored by git") ||
+		!contains(errOut, "\n  /.claude/agents/x-*") || contains(errOut, "/.claude/skills/x-*") {
 		t.Fatalf("unexpected warning:\n%s%s", out, errOut)
 	}
 
@@ -1286,16 +1312,16 @@ func TestUnignoredLinks(t *testing.T) {
 	}
 	e.mustFail(ExitOK, []string{"Everything is up to date."}, "status")
 	e.skill(filepath.Join(pb, "skills"), "x-b")
-	if out, errOut := e.mustRun(ExitOK, "update", "x"); strings.Contains(out+errOut, "not ignored") {
+	if out, errOut := e.mustRun(ExitOK, "update", "x"); contains(out+errOut, "not ignored") {
 		t.Fatalf("unexpected warning:\n%s%s", out, errOut)
 	}
 
 	// A link committed anyway: git never ignores tracked files, so it is reported, as committed.
 	e.git(project, "add", "-f", ".claude/skills/x-a")
 	e.mustFail(ExitOK, []string{"1 link that aiplam made is not ignored by git",
-		"1 link is already committed: stop tracking it with 'git rm --cached'",
+		"1 link is already committed: stop tracking it with 'git rm -r --cached'",
 		"\n  " + filepath.Join(project, ".claude", "skills", "x-a")}, "status")
-	e.git(project, "rm", "-q", "--cached", ".claude/skills/x-a")
+	e.git(project, "rm", "-q", "-r", "--cached", ".claude/skills/x-a") // -r: on Windows, git takes junctions for folders
 
 	// profile enable: warns about the links it creates, of another playbook.
 	e.mustRun(ExitOK, "profile", "add", "other", "-a", "claude")
@@ -1312,7 +1338,7 @@ func TestUnignoredLinks(t *testing.T) {
 	e.mustFail(ExitOK, []string{"cannot check whether the links that aiplam made are ignored by git (git was not " +
 		"found in the PATH)", "Everything else is up to date."}, "status")
 	e.skill(filepath.Join(pb, "skills"), "x-d")
-	if out, errOut := e.mustRun(ExitOK, "update", "x", "-p", "default"); strings.Contains(out+errOut, "cannot check") {
+	if out, errOut := e.mustRun(ExitOK, "update", "x", "-p", "default"); contains(out+errOut, "cannot check") {
 		t.Fatalf("unexpected warning:\n%s%s", out, errOut)
 	}
 	e.app.Git = gitinfo.NewReader()
@@ -1332,8 +1358,8 @@ func TestUnignoredLinks(t *testing.T) {
 	wpb := w.playbook("pb", "x-a")
 	w.file("pb/rules/x-style.md")
 	out, errOut = w.mustRun(ExitOK, "add", "x", wpb)
-	if !strings.Contains(errOut, "1 link that aiplam made is not ignored by git") ||
-		!strings.Contains(errOut, "\n  /.devin/rules/x-*") || strings.Contains(errOut, "APPDATA") {
+	if !contains(errOut, "1 link that aiplam made is not ignored by git") ||
+		!contains(errOut, "\n  /.devin/rules/x-*") || contains(errOut, "APPDATA") {
 		t.Fatalf("unexpected warning:\n%s%s", out, errOut)
 	}
 }
@@ -1344,4 +1370,18 @@ func TestGitignorePattern(t *testing.T) {
 			t.Errorf("gitignorePattern(%q) = %q, want %q", format, got, want)
 		}
 	}
+}
+
+// TestDrivePathsInFolder checks that an absolute Windows path in --folder, split at its drive letter's colon, is
+// reported as not relative.
+func TestDrivePathsInFolder(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init", "-u", "-a", "claude")
+	pb := e.playbook("pb", "x-a")
+	e.mustFail(ExitUsage, []string{`--folder skills: playbook subfolder 'C:\x' must be a relative path`},
+		"add", "x", pb, "-f", `skills:C:\x`)
+	e.mustFail(ExitUsage, []string{`--folder skills: target folder 'D:/x' must be a relative path`},
+		"profile", "add", "p", "-f", "skills:D:/x")
+	// A one-letter subfolder followed by a format is not a drive.
+	e.mustRun(ExitOK, "add", "x", pb, "-f", "skills:s:x-*")
 }

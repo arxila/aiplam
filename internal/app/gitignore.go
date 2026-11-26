@@ -121,7 +121,8 @@ func (a *App) warnUnignored(links []ownedLink, failures bool) bool {
 	}
 	if len(committed) > 0 {
 		b.WriteString("\n" + plural(len(committed), "link is", "links are") + " already committed: stop tracking " +
-			verb(len(committed), "it", "them") + " with 'git rm --cached' (the links stay in place):")
+			verb(len(committed), "it", "them") + " with 'git rm -r --cached' (the links stay in place; '-r' is needed on " +
+			"Windows, where git takes junctions for folders):")
 		for _, p := range committed {
 			b.WriteString("\n  " + a.pretty(p))
 		}

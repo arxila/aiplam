@@ -26,6 +26,12 @@ VERSION ?= $(shell sed -n 's/^const sourceVersion = "\(.*\)"$$/\1/p' internal/ap
 LDFLAGS := -s -w $(if $(VERSION),-X $(PKG)/internal/app.Version=$(VERSION))
 DIST    := dist
 
+# tar options that keep the archives free of the building machine's details: owner names, and on macOS, extended
+# attributes and AppleDouble ("._") files, which would show up as junk files when extracted elsewhere.
+TARFLAGS := $(shell if tar --version 2>/dev/null | grep -q bsdtar; then \
+	echo "--no-xattrs --no-mac-metadata --uid 0 --gid 0 --uname root --gname root"; \
+	else echo "--owner=0 --group=0 --numeric-owner"; fi)
+
 # OS/architecture pairs for release binaries.
 PLATFORMS := darwin/arm64 darwin/amd64 linux/amd64 linux/arm64 windows/amd64 windows/arm64
 
@@ -62,7 +68,7 @@ dist: clean
 		if [ $$os = windows ]; then \
 			(cd $(DIST) && zip -q -r -X $$name.zip $$name) || exit 1; \
 		else \
-			tar -C $(DIST) -czf $(DIST)/$$name.tar.gz $$name || exit 1; \
+			COPYFILE_DISABLE=1 tar $(TARFLAGS) -C $(DIST) -czf $(DIST)/$$name.tar.gz $$name || exit 1; \
 		fi; \
 		rm $$dir/* && rmdir $$dir || exit 1; \
 	done

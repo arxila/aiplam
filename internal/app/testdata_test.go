@@ -76,7 +76,7 @@ func TestTestdataPlaybooks(t *testing.T) {
 
 	// The same name from a fork, with its skills in ai/skills: ids get the folder's last segment.
 	out, _ := e.mustRun(ExitOK, "add", "aiplam-lettuce", fork, "-f", "skills:ai/skills")
-	if !strings.Contains(out, "aiplam-lettuce of profile 'default' is now identified as "+
+	if !contains(out, "aiplam-lettuce of profile 'default' is now identified as "+
 		"aiplam-lettuce@aiplam-lettuce-playbook") {
 		t.Fatalf("unexpected output: %s", out)
 	}
@@ -130,7 +130,7 @@ func TestTestdataPlaybooks(t *testing.T) {
 		filepath.Join(lettuce, "rules", "aiplam-lettuce-style.md"))
 	expect(skills, all...)
 	out, _ = e.mustRun(ExitOK, "list")
-	if !strings.Contains(out, "Profile greens (agent claude)") || !strings.Contains(out, "subagents (~/.claude/agents):") {
+	if !contains(out, "Profile greens (agent claude)") || !contains(out, "subagents (~/.claude/agents):") {
 		t.Fatalf("unexpected list: %s", out)
 	}
 	e.mustRun(ExitOK, "profile", "disable", "greens")
@@ -151,7 +151,7 @@ func TestTestdataPlaybooks(t *testing.T) {
 	}
 	e.app.Cwd = filepath.Join(project, "module")
 	out, _ = e.mustRun(ExitOK, "list")
-	if !strings.Contains(out, "Managed folder: ~/projects/demo\n") || strings.Contains(out, "aiplam-tomato-style") {
+	if !contains(out, "Managed folder: ~/projects/demo\n") || contains(out, "aiplam-tomato-style") {
 		t.Fatalf("unexpected list: %s", out)
 	}
 	e.mustRun(ExitOK, "status")
