@@ -453,6 +453,9 @@ func (a *App) lock() (func(), error) {
 	if !fsutil.IsDir(dir) {
 		return func() {}, nil
 	}
+	if err := a.checkInside(dir, a.Managed, config.DirName, "its configuration"); err != nil {
+		return nil, err
+	}
 	unlock, err := fsutil.Lock(filepath.Join(dir, lockName))
 	if errors.Is(err, fsutil.ErrLocked) {
 		return nil, fmt.Errorf("another aiplam command is changing managed folder '%s': try again when it ends",
@@ -647,12 +650,39 @@ func (a *App) newProfileState(prof *config.Profile, enabled bool) (*profileState
 		entries: playbook.Entries(prof.Name, prof.Playbooks, a.Managed)}
 	for _, t := range prof.Targets {
 		dir, stop, err := config.TargetDir(a.Managed, t.Folder, a.AppData)
+		if err == nil {
+			err = a.checkInside(dir, stop, "target folder '"+t.Folder+"'", "links")
+		}
 		if err != nil {
 			return nil, fmt.Errorf("profile '%s': %w", prof.Name, err)
 		}
 		s.targets = append(s.targets, playbook.Target{Kind: t.Kind, Folder: t.Folder, Dir: dir, Stop: stop})
 	}
 	return s, nil
+}
+
+// checkInside fails when dir, once the links on its way are resolved, does not lead inside top (the managed folder, or
+// %APPDATA%), where aiplam keeps everything it writes. what names dir in the error, and writes what aiplam would write
+// in it.
+func (a *App) checkInside(dir, top, what, writes string) error {
+	name := "managed folder '" + a.pretty(top) + "'"
+	if !fsutil.SamePath(top, a.Managed) {
+		name = "%APPDATA%"
+	}
+	resolved, err := fsutil.Resolve(dir)
+	if err != nil {
+		return fmt.Errorf("%s ('%s'): %w", what, a.pretty(dir), err)
+	}
+	resolvedTop, err := fsutil.Resolve(top)
+	if err != nil {
+		return fmt.Errorf("%s: %w", name, err)
+	}
+	if !fsutil.Within(resolved, resolvedTop) {
+		return fmt.Errorf("%s ('%s') leads outside %s, to '%s', through a link: aiplam only writes %s inside it; "+
+			"replace the link with a folder, or move what it leads to inside %s", what, a.pretty(dir), name,
+			a.pretty(resolved), writes, name)
+	}
+	return nil
 }
 
 // transition plans the link changes from the profiles in from to those in to for the playbooks in scope (see

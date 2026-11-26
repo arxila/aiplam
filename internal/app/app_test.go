@@ -1111,6 +1111,82 @@ func TestFilesWhereFoldersMustBe(t *testing.T) {
 	}
 }
 
+// TestLinkedFoldersLeadingOutside checks that target folders and the .aiplam folder are refused when a link on their
+// way leads outside the managed folder (nothing is written there), and accepted when it leads inside it.
+func TestLinkedFoldersLeadingOutside(t *testing.T) {
+	e := newEnv(t)
+	project := e.mkdir(filepath.Join(e.root, "project"))
+	outside := e.mkdir(filepath.Join(e.root, "outside"))
+	pb := e.playbook("pb", "x-a")
+	e.mustRun(ExitOK, "init", project, "-a", "claude")
+	e.app.Cwd = project
+	link := func(link, target string) {
+		t.Helper()
+		if err := fsutil.CreateLink(link, target); err != nil {
+			t.Fatal(err)
+		}
+	}
+	empty := func(dir string) {
+		t.Helper()
+		if items, err := os.ReadDir(dir); err != nil || len(items) > 0 {
+			t.Fatalf("%s: %v, %d item(s)", dir, err, len(items))
+		}
+	}
+
+	// A target folder's parent linked outside: refused by every command that uses it, with nothing written there.
+	link(filepath.Join(project, ".claude"), outside)
+	msg := "target folder '.claude/skills' ('" + filepath.Join(project, ".claude", "skills") +
+		"') leads outside managed folder"
+	e.mustFail(ExitFailure, []string{msg, "through a link: aiplam only writes links inside it"}, "add", "x", pb)
+	e.mustFail(ExitFailure, []string{msg}, "status")
+	empty(outside)
+	if n := len(e.profile(project, "default").Playbooks); n != 0 {
+		t.Fatalf("%d playbooks registered", n)
+	}
+
+	// The same link leading inside the managed folder: accepted.
+	if err := fsutil.RemoveLink(filepath.Join(project, ".claude")); err != nil {
+		t.Fatal(err)
+	}
+	inside := e.mkdir(filepath.Join(project, "agent-folders"))
+	link(filepath.Join(project, ".claude"), inside)
+	e.mustRun(ExitOK, "add", "x", pb)
+	e.assertLink(filepath.Join(inside, "skills", "x-a"), filepath.Join(pb, "skills", "x-a"))
+
+	// The .aiplam folder linked outside: refused before anything is written in it.
+	other := e.mkdir(filepath.Join(e.root, "other"))
+	e.mustRun(ExitOK, "init", other, "-a", "claude")
+	moved := filepath.Join(outside, "config")
+	if err := os.Rename(filepath.Join(other, config.DirName), moved); err != nil {
+		t.Fatal(err)
+	}
+	link(filepath.Join(other, config.DirName), moved)
+	before, err := os.ReadFile(filepath.Join(moved, "default.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.app.Cwd = other
+	e.mustFail(ExitFailure, []string{config.DirName + " ('" + filepath.Join(other, config.DirName) +
+		"') leads outside managed folder", "aiplam only writes its configuration inside it"}, "add", "x", pb)
+	if after, err := os.ReadFile(filepath.Join(moved, "default.yaml")); err != nil || string(after) != string(before) {
+		t.Fatalf("the profile was changed: %v\n%s", err, after)
+	}
+	if fsutil.IsDir(filepath.Join(other, ".claude")) {
+		t.Fatal("links were made")
+	}
+
+	// The .aiplam folder linked inside the managed folder: accepted.
+	if err := fsutil.RemoveLink(filepath.Join(other, config.DirName)); err != nil {
+		t.Fatal(err)
+	}
+	kept := filepath.Join(other, "kept-config")
+	if err := os.Rename(moved, kept); err != nil {
+		t.Fatal(err)
+	}
+	link(filepath.Join(other, config.DirName), kept)
+	e.mustRun(ExitOK, "add", "x", pb)
+}
+
 func TestSwitchStoresFileNames(t *testing.T) {
 	e := newEnv(t)
 	e.mustRun(ExitOK, "init", "-u", "-a", "standard")

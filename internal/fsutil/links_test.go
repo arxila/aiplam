@@ -146,3 +146,97 @@ func TestExpandHome(t *testing.T) {
 		}
 	}
 }
+
+func TestResolve(t *testing.T) {
+	root := Canonical(t.TempDir())
+	real := filepath.Join(root, "real")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := CreateLink(filepath.Join(root, "linked"), real); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "file"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]string{
+		real:                                    real,
+		filepath.Join(real, "a", "b"):           filepath.Join(real, "a", "b"),
+		filepath.Join(root, "linked", "a", "b"): filepath.Join(real, "a", "b"),
+		filepath.Join(root, "file", "a"):        filepath.Join(root, "file", "a"),
+	} {
+		if got, err := Resolve(path); err != nil || got != want {
+			t.Errorf("Resolve(%q) = %q, %v; want %q", path, got, err, want)
+		}
+	}
+	// Names with characters whose code is a path separator's plus a multiple of 256 ('į' is U+012F, 'Ŝ' is U+015C).
+	for _, name := range []string{"dirį", "Ŝdir"} {
+		dir := filepath.Join(real, name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := Resolve(filepath.Join(root, "linked", name, "a")); err != nil || got != filepath.Join(dir, "a") {
+			t.Errorf("Resolve(linked/%s/a) = %q, %v; want %q", name, got, err, filepath.Join(dir, "a"))
+		}
+	}
+	if runtime.GOOS == "windows" {
+		return // symbolic links need developer mode
+	}
+	if err := os.Symlink(filepath.Join(root, "gone"), filepath.Join(root, "broken")); err != nil {
+		t.Fatal(err)
+	}
+	// A broken link: where it would lead.
+	if got, err := Resolve(filepath.Join(root, "broken", "a")); err != nil || got != filepath.Join(root, "gone", "a") {
+		t.Errorf("Resolve(broken/a) = %q, %v; want %q", got, err, filepath.Join(root, "gone", "a"))
+	}
+	// A relative target going up, reached through a link: '..' applies to where the link really is.
+	if err := os.MkdirAll(filepath.Join(root, "deep"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := CreateLink(filepath.Join(root, "deep", "inner"), real); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("..", filepath.Join(real, "up")); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(root, "a")
+	if got, err := Resolve(filepath.Join(root, "deep", "inner", "up", "a")); err != nil || got != want {
+		t.Errorf("Resolve(deep/inner/up/a) = %q, %v; want %q", got, err, want)
+	}
+	if err := os.Symlink("loop", filepath.Join(root, "loop")); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Resolve(filepath.Join(root, "loop", "a")); err == nil {
+		t.Errorf("Resolve through a loop of links = %q, want an error", got)
+	}
+}
+
+// TestResolveShortNames checks that, on Windows, a path written with short (8.3) names and the target of a link
+// leading into it, written with long names, resolve to the same spelling.
+func TestResolveShortNames(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("short names only exist on Windows")
+	}
+	short, err := os.MkdirTemp(os.TempDir(), "short-names-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(short) })
+	long := Canonical(short)
+	if long == short {
+		t.Skip("the temporary folder has no short names: " + short)
+	}
+	if err := os.MkdirAll(filepath.Join(long, "real"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := CreateLink(filepath.Join(short, "linked"), filepath.Join(long, "real")); err != nil {
+		t.Fatal(err)
+	}
+	top, err := Resolve(short)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Resolve(filepath.Join(short, "linked", "a")); err != nil || !Within(got, top) {
+		t.Errorf("Resolve(linked/a) = %q, %v; want it inside %q", got, err, top)
+	}
+}

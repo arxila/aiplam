@@ -39,8 +39,8 @@ const targetOptions = `Target folders (exactly one of):
                                  each kind are linked. Kinds are any names (skills, subagents, my-prompts...); by
                                  default, they match the playbooks' subfolders of the same name. Repeat the option or
                                  separate the items with commas; quote folders holding commas or colons ("my,
-                                 folder"). Folders cannot contain '..'; in the user managed folder, they can start with
-                                 %APPDATA% (Windows)`
+                                 folder"). Folders cannot contain '..', nor lead outside the managed folder through a
+                                 link; in the user managed folder, they can start with %APPDATA% (Windows)`
 
 // targetsFromOptions returns the agent and the targets given with --agent or --folder, for the user managed folder when
 // user is set.

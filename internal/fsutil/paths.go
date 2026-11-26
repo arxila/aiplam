@@ -21,10 +21,15 @@
 package fsutil
 
 import (
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
+	"unicode/utf8"
 )
 
 // Canonical returns the absolute, cleaned form of path with symbolic links resolved. When the path does not exist
@@ -38,6 +43,72 @@ func Canonical(path string) string {
 		return resolved
 	}
 	return abs
+}
+
+// maxLinkHops is how many links Resolve follows before giving up (a loop of links never ends).
+const maxLinkHops = 255
+
+// Resolve returns the absolute, cleaned form of path with the symbolic links (and, on Windows, junctions) of the part
+// of it that exists resolved: where the path would lead, once the missing folders are created. It follows the links
+// itself, one path element at a time, as filepath.EvalSymlinks does not follow junctions since Go 1.23. It fails when
+// an existing part cannot be resolved (a link it cannot read, a loop of links, or a folder it cannot read).
+func Resolve(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	hops := 0
+	for {
+		volume := filepath.VolumeName(abs)
+		resolved := volume + string(filepath.Separator)
+		elems := strings.FieldsFunc(abs[len(volume):], func(r rune) bool {
+			return r < utf8.RuneSelf && os.IsPathSeparator(uint8(r))
+		})
+		restart := false
+		for i, elem := range elems {
+			next := filepath.Join(resolved, elem)
+			fi, err := os.Lstat(next)
+			if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+				// Missing, or below a file (which the missing folders cannot be created under anyway).
+				return filepath.Join(append([]string{normalized(resolved)}, elems[i:]...)...), nil
+			}
+			if err != nil {
+				return "", fmt.Errorf("cannot resolve '%s': %w", next, err)
+			}
+			if !isLinkMode(fi.Mode()) {
+				resolved = next
+				continue
+			}
+			target, err := os.Readlink(next)
+			if err != nil {
+				if runtime.GOOS == "windows" && fi.Mode()&os.ModeSymlink == 0 {
+					resolved = next // an irregular file that is not a readable reparse point (see Inspect)
+					continue
+				}
+				return "", fmt.Errorf("cannot resolve '%s': %w", next, err)
+			}
+			if hops++; hops > maxLinkHops {
+				return "", fmt.Errorf("cannot resolve '%s': too many links", next)
+			}
+			if !filepath.IsAbs(target) {
+				target = filepath.Join(resolved, target) // resolved holds no links, so '..' can be applied as text
+			}
+			abs, restart = filepath.Join(append([]string{target}, elems[i+1:]...)...), true
+			break
+		}
+		if !restart {
+			return normalized(resolved), nil
+		}
+	}
+}
+
+// normalized returns path, which exists and holds no links, as the system spells it: on Windows, with long names
+// instead of short (8.3) ones, as link targets are spelled; elsewhere, as it is.
+func normalized(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return path
 }
 
 // SamePath reports whether two paths are equal after cleaning, ignoring case on Windows.
