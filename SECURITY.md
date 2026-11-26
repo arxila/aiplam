@@ -1,0 +1,82 @@
+# Security Policy
+
+## Reporting vulnerabilities
+
+Thank you for your collaboration keeping aiplam safe and secure. If you believe you have found a security issue in
+aiplam, please notify us so that we can work with you in its prompt resolution.
+
+### Disclosure policy
+
+- Let us know as soon as possible by sending an email to [security@arxila.io][security-email].
+- Provide us a reasonable amount of time to resolve the issue before any disclosure to the public or a third party.
+  Especially, **do not** create a GitHub issue yourself talking about the vulnerability. We may publicly disclose the
+  issue _before_ resolving it, but only if appropriate.
+
+### What to include in a report
+
+Before reporting, please make sure that the issue reproduces with a supported version (see
+[Supported versions](#supported-versions)), and that it is not among the things that
+[aiplam is never responsible for](#what-aiplam-is-never-responsible-for). Then, please include in your report:
+
+- the affected versions of aiplam, and your operating system;
+- a description of the issue, and the steps to reproduce it (ideally, a minimal set of folders and commands);
+- its potential impact;
+- how you would like to be credited, if the vulnerability is confirmed (see [Credit](#credit)).
+
+### Credit
+
+We will credit the reporter of a confirmed vulnerability in the GitHub security advisory created for publishing it
+(typically once it is fixed). If a report is the result of a joint effort, please say so when reporting it: additional
+contributors can be credited, each with the credit type that reflects their actual role in that specific report (for
+example finder, analyst or tool). Credits are granted at the maintainers' discretion.
+
+### Publication
+
+Confirmed vulnerabilities are fixed in a new release of aiplam, and published, once that release is available, as
+[GitHub security advisories][advisories] in aiplam's repository, with a CVE identifier requested for them.
+
+## What aiplam is never responsible for
+
+aiplam links the artifacts of the playbooks that the user chooses into the folders that coding agents read. Deciding
+what to link, and what to let agents do with it, is always the user's responsibility. We reserve the right to consider
+out of the scope of aiplam's security, and aiplam will never be considered responsible for:
+
+- **The content of playbooks.** aiplam does not check or filter what skills, subagents, commands, rules or any other
+  artifacts say. Registering a playbook means trusting it, and whoever writes it.
+- **What coding agents do.** Agents act on the artifacts that aiplam links with whatever permissions the user gave
+  them. A playbook that makes an agent do something harmful is not a vulnerability in aiplam. Issues in the agents
+  themselves should be reported to their vendors.
+- **The configurations the user decides to use.** A configuration shared in a project's repository, or written by
+  someone else, decides which folders are linked as playbooks, and where: using it means trusting whoever wrote it, as
+  much as registering those playbooks by hand. `aiplam status` and `aiplam profile show` show what a configuration
+  links, before `aiplam update` links it.
+- **Running git in untrusted folders.** aiplam runs git to read information from playbook folders and from the
+  project's repository. Like any program that runs git, it relies on git being safe to run there: a folder whose git
+  configuration comes from an untrusted source (for example, a playbook copied together with its `.git` folder, rather
+  than cloned) is unsafe for git itself, as git documents.
+- **What gets committed.** aiplam warns about links that git does not ignore, but never changes `.gitignore` nor
+  anything in git: what a repository commits and publishes is the user's decision.
+- **Attacks requiring physical access to the machine**, or an attacker who can already change the user's files
+  directly.
+- **Issues in aiplam's dependencies** (the Go standard library, `golang.org/x/sys`, `go.yaml.in/yaml`) or in the
+  services and package managers that distribute it (GitHub, Homebrew, winget), which should be reported to their
+  maintainers.
+- **Unsupported versions** (see [Supported versions](#supported-versions)).
+
+## Supported versions
+
+Versions of aiplam look like X.Y.Z, meaning X = major, Y = minor and Z = patch. We recommend keeping aiplam upgraded to
+the latest patch version.
+
+Also please note that, in general, only the latest minor version will be considered supported and will receive timely
+updates and security patches.
+
+## Verifying downloads
+
+Each [GitHub release][releases] includes a `SHA256SUMS` file with the checksums of its archives; the archives
+themselves are not signed. Homebrew and winget check these checksums when they install aiplam, and `go install`
+checks the module against the Go checksum database.
+
+[security-email]: mailto:security@arxila.io
+[releases]: https://github.com/arxila/aiplam/releases
+[advisories]: https://github.com/arxila/aiplam/security/advisories
