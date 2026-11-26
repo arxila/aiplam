@@ -464,9 +464,13 @@ func (a *App) lock() (func(), error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot lock managed folder '%s': %w", a.pretty(a.Managed), err)
 	}
-	if ignore := filepath.Join(dir, ignoreName); !fsutil.IsFile(ignore) {
-		_ = os.WriteFile(ignore, []byte("# aiplam's lock file, and temporary files of interrupted saves.\n/"+lockName+
-			"\n/*.tmp\n"), 0o644)
+	// Only when nothing is there: never through a link, which could lead outside the managed folder.
+	if ignore := filepath.Join(dir, ignoreName); !exists(ignore) {
+		if f, err := os.OpenFile(ignore, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644); err == nil {
+			_, _ = f.WriteString("# aiplam's lock file, and temporary files of interrupted saves.\n/" + lockName +
+				"\n/*.tmp\n")
+			_ = f.Close()
+		}
 	}
 	interrupted := make(chan os.Signal, 1)
 	signal.Notify(interrupted, os.Interrupt, syscall.SIGTERM)
@@ -488,6 +492,12 @@ func (a *App) lock() (func(), error) {
 			a.warnf("interrupted: the command was completed first, so that links and configuration stay consistent.")
 		}
 	}, nil
+}
+
+// exists reports whether something (even a broken link) is at path.
+func exists(path string) bool {
+	_, err := os.Lstat(path)
+	return err == nil
 }
 
 // errSilent signals a failure whose messages have already been printed.
@@ -1006,6 +1016,22 @@ func (a *App) printAction(act playbook.Action) {
 // cleanup removes the folders that the removals of an applied plan left empty, printing each one.
 func (a *App) cleanup(plan playbook.Plan) {
 	playbook.Cleanup(plan, func(dir string) { a.printf("  - %s (empty folder removed)\n", a.pretty(dir)) })
+}
+
+// restoreProfiles saves back the profiles that a command had already saved when saving another one failed, and returns
+// the state to report: state when they were all put back, or else which ones could not be.
+func (a *App) restoreProfiles(saved []*config.Profile, state string) string {
+	var failed []string
+	for _, prof := range saved {
+		if err := config.SaveProfile(a.Managed, prof); err != nil {
+			failed = append(failed, fmt.Sprintf("'%s' (%v)", prof.Name, err))
+		}
+	}
+	if len(failed) == 0 {
+		return state
+	}
+	return fmt.Sprintf("putting back profile %s also failed, so it keeps the change: run '%s' to see what is left",
+		strings.Join(failed, ", "), a.hint("status"))
 }
 
 // undo reverts the link changes of an applied plan after saving the configuration failed.

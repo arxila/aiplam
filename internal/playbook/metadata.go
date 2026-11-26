@@ -31,8 +31,12 @@ const maxFrontmatter = 64 << 10
 
 // MetadataVersion returns the version that a file, such as a SKILL.md, declares in its YAML frontmatter as
 // metadata.version (as in the Agent Skills specification), exactly as written ("1.0" stays "1.0"), or "" when it
-// declares none, or its frontmatter cannot be read. It is informational only.
+// declares none, or its frontmatter cannot be read. It is informational only, so it only reads regular files: never
+// something that could keep it waiting, such as a named pipe.
 func MetadataVersion(file string) string {
+	if info, err := os.Stat(file); err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
 	f, err := os.Open(file)
 	if err != nil {
 		return ""

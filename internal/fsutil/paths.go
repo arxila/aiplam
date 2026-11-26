@@ -50,56 +50,86 @@ const maxLinkHops = 255
 
 // Resolve returns the absolute, cleaned form of path with the symbolic links (and, on Windows, junctions) of the part
 // of it that exists resolved: where the path would lead, once the missing folders are created. It follows the links
-// itself, one path element at a time, as filepath.EvalSymlinks does not follow junctions since Go 1.23. It fails when
-// an existing part cannot be resolved (a link it cannot read, a loop of links, or a folder it cannot read).
+// itself, one path element at a time, as filepath.EvalSymlinks does not follow junctions since Go 1.23, and applies
+// each '..' (in path, or in a link's target) to the folder reached so far, which holds no links, as the system does:
+// never to the text of the path, where it would cancel a link before it. It fails when an existing part cannot be
+// resolved (a link it cannot read, a loop of links, or a folder it cannot read).
 func Resolve(path string) (string, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return "", err
+	if !filepath.IsAbs(path) {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", err
+		}
+		path = cwd + string(filepath.Separator) + path // not filepath.Join, which would apply '..' as text
 	}
+	volume := filepath.VolumeName(path)
+	// resolved exists and holds no links; missing holds the names below it that do not exist (yet).
+	resolved := volume + string(filepath.Separator)
+	var missing []string
+	pending := splitPath(path[len(volume):])
 	hops := 0
-	for {
-		volume := filepath.VolumeName(abs)
-		resolved := volume + string(filepath.Separator)
-		elems := strings.FieldsFunc(abs[len(volume):], func(r rune) bool {
-			return r < utf8.RuneSelf && os.IsPathSeparator(uint8(r))
-		})
-		restart := false
-		for i, elem := range elems {
-			next := filepath.Join(resolved, elem)
-			fi, err := os.Lstat(next)
-			if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
-				// Missing, or below a file (which the missing folders cannot be created under anyway).
-				return filepath.Join(append([]string{normalized(resolved)}, elems[i:]...)...), nil
+	for len(pending) > 0 {
+		elem := pending[0]
+		pending = pending[1:]
+		switch {
+		case elem == ".":
+			continue
+		case elem == "..":
+			if len(missing) > 0 {
+				missing = missing[:len(missing)-1]
+			} else {
+				resolved = filepath.Dir(resolved) // the root stays the root
 			}
-			if err != nil {
-				return "", fmt.Errorf("cannot resolve '%s': %w", next, err)
-			}
-			if !isLinkMode(fi.Mode()) {
-				resolved = next
+			continue
+		case len(missing) > 0:
+			missing = append(missing, elem) // below a missing folder, nothing exists
+			continue
+		}
+		next := filepath.Join(resolved, elem)
+		fi, err := os.Lstat(next)
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+			// Missing, or below a file (which the missing folders cannot be created under anyway).
+			missing = append(missing, elem)
+			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("cannot resolve '%s': %w", next, err)
+		}
+		if !isLinkMode(fi.Mode()) {
+			resolved = next
+			continue
+		}
+		target, err := os.Readlink(next)
+		if err != nil {
+			if runtime.GOOS == "windows" && fi.Mode()&os.ModeSymlink == 0 {
+				resolved = next // an irregular file that is not a readable reparse point (see Inspect)
 				continue
 			}
-			target, err := os.Readlink(next)
-			if err != nil {
-				if runtime.GOOS == "windows" && fi.Mode()&os.ModeSymlink == 0 {
-					resolved = next // an irregular file that is not a readable reparse point (see Inspect)
-					continue
-				}
-				return "", fmt.Errorf("cannot resolve '%s': %w", next, err)
-			}
-			if hops++; hops > maxLinkHops {
-				return "", fmt.Errorf("cannot resolve '%s': too many links", next)
-			}
-			if !filepath.IsAbs(target) {
-				target = filepath.Join(resolved, target) // resolved holds no links, so '..' can be applied as text
-			}
-			abs, restart = filepath.Join(append([]string{target}, elems[i+1:]...)...), true
-			break
+			return "", fmt.Errorf("cannot resolve '%s': %w", next, err)
 		}
-		if !restart {
-			return normalized(resolved), nil
+		if hops++; hops > maxLinkHops {
+			return "", fmt.Errorf("cannot resolve '%s': too many links", next)
 		}
+		// The target replaces the link: an absolute target (or, on Windows, one rooted on the link's drive) starts
+		// again from its root, and its elements are resolved before the rest of the path.
+		targetVolume := filepath.VolumeName(target)
+		rest := target[len(targetVolume):]
+		if targetVolume != "" || (rest != "" && os.IsPathSeparator(rest[0])) {
+			if targetVolume == "" {
+				targetVolume = filepath.VolumeName(resolved)
+			}
+			resolved = targetVolume + string(filepath.Separator)
+		}
+		pending = append(splitPath(rest), pending...)
 	}
+	return filepath.Join(append([]string{normalized(resolved)}, missing...)...), nil
+}
+
+// splitPath returns the elements of path, without its volume name, as written (with '.' and '..' kept).
+func splitPath(path string) []string {
+	return strings.FieldsFunc(path, func(r rune) bool {
+		return r < utf8.RuneSelf && os.IsPathSeparator(uint8(r))
+	})
 }
 
 // normalized returns path, which exists and holds no links, as the system spells it: on Windows, with long names

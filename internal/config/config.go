@@ -110,6 +110,9 @@ func (t *Targets) UnmarshalYAML(node *yaml.Node) error {
 		if k.Kind != yaml.ScalarNode || v.Kind != yaml.ScalarNode {
 			return fmt.Errorf("line %d: targets must be a mapping from artifact kinds to target folders", k.Line)
 		}
+		if v.Tag == "!!null" { // 'kind:', 'kind: null' or 'kind: ~': not a folder named "null"
+			return fmt.Errorf("line %d: kind '%s' has no target folder", k.Line, k.Value)
+		}
 		*t = append(*t, Target{Kind: k.Value, Folder: v.Value})
 	}
 	return nil
@@ -260,6 +263,7 @@ func RelFolder(managed, dir string) (string, error) {
 // aiplam never removes empty folders after unlinking (managed, or appData for a folder under AppData). appData is the
 // value of the APPDATA environment variable.
 func TargetDir(managed, folder, appData string) (dir, stop string, err error) {
+	folder = toSlash(folder) // as CleanTarget reads it: a folder written by hand may have backslashes on Windows
 	if rest, ok := strings.CutPrefix(folder, AppData+"/"); ok {
 		if appData == "" {
 			return "", "", fmt.Errorf("target folder '%s' needs the APPDATA environment variable, which is not set",
@@ -497,7 +501,8 @@ func LoadProfile(managed, profile string) (*Profile, error) {
 
 var errEmpty = errors.New("the file is empty")
 
-// parse decodes a configuration file into v, rejecting unknown fields.
+// parse decodes a configuration file into v, rejecting unknown fields, and files with more than one YAML document
+// (saving the file would lose those after the first).
 func parse(data []byte, v any) error {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
@@ -507,7 +512,25 @@ func parse(data []byte, v any) error {
 		}
 		return fmt.Errorf("invalid file format: %w", err)
 	}
-	return nil
+	for {
+		var more yaml.Node
+		err := dec.Decode(&more)
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil || !emptyDocument(&more) {
+			return errors.New("invalid file format: the file holds more than one YAML document ('---' starts another)")
+		}
+	}
+}
+
+// emptyDocument reports whether a decoded YAML document holds nothing, as after a final '---'.
+func emptyDocument(doc *yaml.Node) bool {
+	if len(doc.Content) == 0 {
+		return true
+	}
+	n := doc.Content[0]
+	return len(doc.Content) == 1 && n.Kind == yaml.ScalarNode && n.Tag == "!!null" && n.Value == ""
 }
 
 // SaveConfig writes the aiplam configuration file, replacing it atomically.
@@ -565,15 +588,21 @@ func save(file string, v any, header string) error {
 	}
 	// The new content goes to a file next to it, which then replaces it: a crash leaves either the old file or the new
 	// one, complete. The temporary file is created with the usual permissions (0644 minus the umask), unlike
-	// os.CreateTemp's 0600, and its name includes the process id, so that concurrent runs do not share it. A file with
-	// that name can only be left by a process that crashed (with a process id since reused): it is replaced.
+	// os.CreateTemp's 0600, and then given those of the file it replaces, if any, so that a file made private stays
+	// so. Its name includes the process id, so that concurrent runs do not share it. A file with that name can only be
+	// left by a process that crashed (with a process id since reused): it is replaced.
 	tmpName := fmt.Sprintf("%s.%d.tmp", file, os.Getpid())
 	_ = os.Remove(tmpName)
 	tmp, err := os.OpenFile(tmpName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		return err
 	}
-	_, err = tmp.Write(buf.Bytes())
+	if old, serr := os.Stat(file); serr == nil && old.Mode().IsRegular() {
+		err = tmp.Chmod(old.Mode().Perm())
+	}
+	if err == nil {
+		_, err = tmp.Write(buf.Bytes())
+	}
 	if err == nil {
 		err = tmp.Sync()
 	}

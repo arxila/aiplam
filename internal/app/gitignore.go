@@ -116,7 +116,7 @@ func (a *App) warnUnignored(links []ownedLink, failures bool) bool {
 	seen := map[string]bool{}
 	for _, p := range unignored {
 		l := byPath[p]
-		if line := "/" + l.folder + "/" + gitignoreLine(l); !seen[line] {
+		if line := "/" + gitignoreFolder(l.folder) + "/" + gitignoreLine(l); !seen[line] {
 			seen[line] = true
 			lines = append(lines, line)
 		}
@@ -183,6 +183,16 @@ func matchesAny(pattern string, names []string) bool {
 		}
 	}
 	return false
+}
+
+// gitignoreFolder returns a gitignore pattern matching only folder (a target folder, in slash form): each of its
+// names escaped (see gitignoreName).
+func gitignoreFolder(folder string) string {
+	names := strings.Split(folder, "/")
+	for i, name := range names {
+		names[i] = gitignoreName(name)
+	}
+	return strings.Join(names, "/")
 }
 
 // gitignoreName returns a gitignore pattern matching only name: the characters that are special in gitignore patterns

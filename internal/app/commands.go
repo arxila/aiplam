@@ -130,22 +130,28 @@ func (a *App) cmdInit(args []string) (err error) {
 		profiles = []string{config.DefaultProfile}
 	}
 	dir := config.Dir(a.Managed)
-	if _, serr := os.Lstat(dir); errors.Is(serr, os.ErrNotExist) {
-		// A failed init removes the .aiplam folder it created, so that the folder does not become a managed folder
-		// without configuration (which would shadow the managed folders above it). Deferred before the lock is taken,
-		// it runs after the lock is released.
-		defer func() {
-			if err != nil {
-				removeNewConfigDir(dir)
-			}
-		}()
-	}
+	_, serr := os.Lstat(dir)
+	created := errors.Is(serr, os.ErrNotExist)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	unlock, err := a.lock()
 	if err != nil {
+		if created {
+			_ = os.Remove(dir) // only if empty: when another init holds the lock, its files are left alone
+		}
 		return err
+	}
+	if created {
+		// A failed init removes the .aiplam folder it created, so that the folder does not become a managed folder
+		// without configuration (which would shadow the managed folders above it). Only the init that holds the lock
+		// does it, so that a concurrent one never removes the files of another. Deferred before unlock, it runs after
+		// the lock is released (on Windows, an open file cannot be removed).
+		defer func() {
+			if err != nil {
+				removeNewConfigDir(dir)
+			}
+		}()
 	}
 	defer unlock()
 	file := config.ConfigFile(a.Managed)
@@ -365,11 +371,11 @@ func (a *App) cmdAdd(args []string) error {
 	}
 	for i, u := range updated {
 		if err := config.SaveProfile(a.Managed, u.prof); err != nil {
-			// Put back the profiles already saved.
+			var saved []*config.Profile
 			for _, s := range selected[:i] {
-				_ = config.SaveProfile(a.Managed, s.prof)
+				saved = append(saved, s.prof)
 			}
-			return a.undo(plan, err, "the playbook was not registered")
+			return a.undo(plan, err, a.restoreProfiles(saved, "the playbook was not registered"))
 		}
 	}
 	if total == 0 {
@@ -603,10 +609,11 @@ func (a *App) cmdRemove(args []string) error {
 	}
 	for i, u := range updated {
 		if err := config.SaveProfile(a.Managed, u.prof); err != nil {
+			var saved []*config.Profile
 			for _, sel := range st.selections[:i] {
-				_ = config.SaveProfile(a.Managed, sel.profile.prof)
+				saved = append(saved, sel.profile.prof)
 			}
-			return a.undo(plan, err, "the playbook is still registered")
+			return a.undo(plan, err, a.restoreProfiles(saved, "the playbook is still registered"))
 		}
 	}
 	a.cleanup(plan)

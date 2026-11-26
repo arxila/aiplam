@@ -20,6 +20,7 @@ package app
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -809,6 +810,25 @@ func TestFailedAddIsUndone(t *testing.T) {
 	}
 }
 
+// TestRestoreProfilesReportsFailures checks that profiles that cannot be put back, after a failed change, are
+// reported instead of the change being said undone.
+func TestRestoreProfilesReportsFailures(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init", "-u", "-a", "standard", "-p", "a,b")
+	e.app.Managed = e.home
+	a, b := e.profile(e.home, "a"), e.profile(e.home, "b")
+	if got := e.app.restoreProfiles([]*config.Profile{a, b}, "nothing changed"); got != "nothing changed" {
+		t.Errorf("all put back: %q", got)
+	}
+	// A folder where the temporary file of b's save must go makes saving b fail.
+	e.mkdir(filepath.Join(fmt.Sprintf("%s.%d.tmp", config.ProfileFile(e.home, "b"), os.Getpid()), "x"))
+	got := e.app.restoreProfiles([]*config.Profile{a, b}, "nothing changed")
+	if !strings.Contains(got, "putting back profile 'b'") || strings.Contains(got, "'a'") ||
+		strings.Contains(got, "nothing changed") {
+		t.Errorf("b not put back: %q", got)
+	}
+}
+
 func TestSandbox(t *testing.T) {
 	e := newEnv(t)
 	outside := e.mkdir(filepath.Join(e.root, "outside"))
@@ -1185,6 +1205,24 @@ func TestLinkedFoldersLeadingOutside(t *testing.T) {
 	}
 	link(filepath.Join(other, config.DirName), kept)
 	e.mustRun(ExitOK, "add", "x", pb)
+
+	// Links in the .aiplam folder are never written through, even broken ones: a .gitignore that is a link is left
+	// as it is, and a lock file that is a link makes commands fail.
+	brokenLink := func(path, target string) {
+		t.Helper()
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	brokenLink(filepath.Join(kept, ".gitignore"), filepath.Join(outside, "ignore"))
+	e.mustRun(ExitOK, "update", "x")
+	e.assertMissing(filepath.Join(outside, "ignore"))
+	brokenLink(filepath.Join(kept, ".lock"), filepath.Join(outside, "lock"))
+	e.mustFail(ExitFailure, []string{"cannot lock managed folder", "not a regular file"}, "update", "x")
+	e.assertMissing(filepath.Join(outside, "lock"))
 }
 
 func TestSwitchStoresFileNames(t *testing.T) {
@@ -1485,10 +1523,37 @@ func TestUnignoredLinksOwnNames(t *testing.T) {
 	e.mustFail(ExitOK, []string{"\n  /.claude/skills/x-*\n  /.claude/agents/x-*"}, "add", "x", x)
 }
 
+// TestUnignoredLinksSpecialFolders checks that the suggested line for a target folder whose name has characters that
+// are special in gitignore patterns does make git ignore the link.
+func TestUnignoredLinksSpecialFolders(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not available")
+	}
+	e := newEnv(t)
+	project := e.mkdir(filepath.Join(e.root, "project"))
+	e.git(project, "init", "-q")
+	e.mustRun(ExitOK, "init", project, "-f", "skills:[ai]/skills")
+	e.app.Cwd = project
+	line := `/\[ai\]/skills/x-*`
+	e.mustFail(ExitOK, []string{"\n  " + line + "\n"}, "add", "x", e.playbook("pb", "x-a"))
+	if err := os.WriteFile(filepath.Join(project, ".gitignore"), []byte(line+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	check := exec.Command("git", "-C", project, "check-ignore", "-q", filepath.Join("[ai]", "skills", "x-a"))
+	if err := check.Run(); err != nil {
+		t.Fatalf("the suggested line does not make git ignore the link: %v", err)
+	}
+}
+
 func TestGitignoreName(t *testing.T) {
 	for name, want := range map[string]string{"invoice": "invoice", `a*?[b]\c`: `a\*\?\[b\]\\c`, "a b  ": `a b\ \ `} {
 		if got := gitignoreName(name); got != want {
 			t.Errorf("gitignoreName(%q) = %q, want %q", name, got, want)
+		}
+	}
+	for folder, want := range map[string]string{".claude/skills": ".claude/skills", "[ai]/x*": `\[ai\]/x\*`} {
+		if got := gitignoreFolder(folder); got != want {
+			t.Errorf("gitignoreFolder(%q) = %q, want %q", folder, got, want)
 		}
 	}
 	for _, c := range []struct {

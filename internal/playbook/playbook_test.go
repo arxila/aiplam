@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -151,6 +152,11 @@ func TestItemsFormats(t *testing.T) {
 	}
 	if err := os.Symlink(filepath.Join(s.root, "elsewhere", "x-far"),
 		filepath.Join(s.pb, "skills", "x-far")); err != nil {
+		t.Fatal(err)
+	}
+	// A broken link counts as leading where it would lead once its target exists.
+	if err := os.Symlink(filepath.Join(s.root, "elsewhere", "x-later"),
+		filepath.Join(s.pb, "skills", "x-later")); err != nil {
 		t.Fatal(err)
 	}
 	names := func(e Entry, kind string) string {
@@ -387,6 +393,9 @@ func TestRevert(t *testing.T) {
 	if _, err := os.Lstat(link); !os.IsNotExist(err) {
 		t.Fatal("the creation was not reverted")
 	}
+	if _, err := os.Lstat(s.link(".agents")); !os.IsNotExist(err) {
+		t.Fatal("the folders made for the link were left")
+	}
 	removal := []Action{{Kind: Remove, Link: link, Source: filepath.Join(s.pb, "skills", "x-a")}}
 	if err := Revert(removal); err != nil {
 		t.Fatal(err)
@@ -481,5 +490,121 @@ func TestSkipFileLinks(t *testing.T) {
 	plan.SkipFileLinks()
 	if len(plan.Conflicts()) != 1 || plan.Conflicts()[0].Name != "x-b" || plan.Conflicts()[0].Cause != NotLink {
 		t.Fatalf("folder in the way: %+v", plan.Conflicts())
+	}
+}
+
+// TestItemsUnreadable checks that a playbook subfolder that cannot be read is an error, not an empty folder: its links
+// must not be planned for removal.
+func TestItemsUnreadable(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs file permissions that the user cannot bypass")
+	}
+	s := newSandbox(t)
+	s.file("pb/inner/skills/x-a/SKILL.md")
+	g := s.group("p", pb("x", map[string]config.Mapping{"skills": {Folder: "inner/skills"}}))
+	s.apply(s.transition(nil, []Group{g}, scopeOf(g)))
+	inner := filepath.Join(s.pb, "inner")
+	if err := os.Chmod(inner, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(inner, 0o755) })
+	if plan, err := Transition([]Group{g}, []Group{g}, scopeOf(g)); err == nil {
+		t.Errorf("Transition with an unreadable subfolder succeeded; removals: %q", actions(plan, Remove))
+	}
+}
+
+// TestLinkedArtifacts checks that an artifact that is a link inside the playbook folder (to another name) is linked
+// under its own name, and that its link then belongs to the playbook: kept by an update, removed with the playbook.
+func TestLinkedArtifacts(t *testing.T) {
+	s := newSandbox(t)
+	s.file("pb/shared/x-real/SKILL.md")
+	if err := os.MkdirAll(filepath.Join(s.pb, "skills"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..", "shared", "x-real"), filepath.Join(s.pb, "skills", "x-alias")); err != nil {
+		t.Fatal(err)
+	}
+	g := s.group("p", pb("x", nil))
+	s.apply(s.transition(nil, []Group{g}, scopeOf(g)))
+	link := s.link(".agents/skills/x-alias")
+	if state, current, err := fsutil.Inspect(link); err != nil || state != fsutil.Link ||
+		current != filepath.Join(s.pb, "skills", "x-alias") {
+		t.Fatalf("link = %v %q %v, want a link to the artifact by its own name", state, current, err)
+	}
+	if plan := s.transition([]Group{g}, []Group{g}, scopeOf(g)); len(plan.Conflicts()) > 0 ||
+		actions(plan, Keep) != "x-alias" {
+		t.Errorf("update: conflicts %v, kept %q", plan.Conflicts(), actions(plan, Keep))
+	}
+	if plan := s.transition([]Group{g}, nil, scopeOf(g)); actions(plan, Remove) != "x-alias" {
+		t.Errorf("removal: removed %q", actions(plan, Remove))
+	}
+}
+
+// TestFailedApplyRemovesItsFolders checks that a failed Apply removes the folders it made for its links.
+func TestFailedApplyRemovesItsFolders(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a folder the current user cannot write to")
+	}
+	s := newSandbox(t)
+	s.skill("x-a")
+	s.file("pb/subagents/x-r.md")
+	locked := s.link(".claude/agents")
+	if err := os.MkdirAll(locked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	g := s.group("p", pb("x", nil))
+	if err := Apply(s.transition(nil, []Group{g}, scopeOf(g)), nil); err == nil {
+		t.Fatal("Apply succeeded")
+	}
+	if _, err := os.Lstat(s.link(".agents")); !os.IsNotExist(err) {
+		t.Fatal("the folders made for the links were left")
+	}
+}
+
+// TestRevertKeepsLinkType checks that undoing the removal of a broken link to a file makes a symbolic link again
+// (on Windows, not a junction).
+func TestRevertKeepsLinkType(t *testing.T) {
+	s := newSandbox(t)
+	artifact := s.file("pb/subagents/x-r.md")
+	g := s.group("p", pb("x", nil))
+	s.apply(s.transition(nil, []Group{g}, scopeOf(g)))
+	if err := os.Remove(artifact); err != nil {
+		t.Fatal(err)
+	}
+	plan := s.transition([]Group{g}, []Group{g}, scopeOf(g))
+	s.apply(plan)
+	if err := Revert(plan.Changes()); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Lstat(s.link(".claude/agents/x-r.md")); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("restored link: %v, %v", info, err)
+	}
+}
+
+// TestAliasedTargetFolders checks that target folders that are the same folder through a link collide: two playbooks
+// linking the same name there is a conflict, not two creations of which the second would fail.
+func TestAliasedTargetFolders(t *testing.T) {
+	s := newSandbox(t)
+	s.skill("x-a")
+	if err := os.MkdirAll(s.link(".agents/skills"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(s.link(".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..", ".agents", "skills"), s.link(".claude/skills")); err != nil {
+		t.Fatal(err)
+	}
+	p := s.group("p", pb("x", nil))
+	q := Group{Profile: "q", Entries: Entries("q", []config.Playbook{pb("y", map[string]config.Mapping{
+		"skills": {Folder: "skills", Format: "x-*"}})}, s.managed),
+		Targets: []Target{{Kind: "skills", Folder: ".claude/skills", Dir: s.link(".claude/skills"), Stop: s.managed}}}
+	plan := s.transition(nil, []Group{p, q}, scopeOf(p, q))
+	if c := plan.Conflicts(); len(c) != 1 || c[0].Cause != Duplicate || c[0].Name != "x-a" {
+		t.Fatalf("conflicts: %+v; creations: %q", c, actions(plan, Create))
 	}
 }

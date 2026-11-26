@@ -19,6 +19,7 @@
 package fsutil
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -130,6 +131,18 @@ func TestLock(t *testing.T) {
 	if _, err := Lock(filepath.Join(path, "missing", ".lock")); err == nil {
 		t.Fatal("locked a file in a missing folder")
 	}
+	// A link is never followed, even a broken one.
+	link := filepath.Join(filepath.Dir(path), "link.lock")
+	target := filepath.Join(filepath.Dir(path), "target")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Lock(link); err == nil {
+		t.Fatal("locked through a link")
+	}
+	if _, err := os.Lstat(target); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the link's target was created: %v", err)
+	}
 }
 
 func TestExpandHome(t *testing.T) {
@@ -202,6 +215,34 @@ func TestResolve(t *testing.T) {
 	want := filepath.Join(root, "a")
 	if got, err := Resolve(filepath.Join(root, "deep", "inner", "up", "a")); err != nil || got != want {
 		t.Errorf("Resolve(deep/inner/up/a) = %q, %v; want %q", got, err, want)
+	}
+	// '..' after a link, in a link's target or in the path: it applies to where that link leads, as the system does.
+	deep := filepath.Join(root, "other", "deep")
+	inside := filepath.Join(root, "inside")
+	for _, dir := range []string{deep, inside} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(deep, filepath.Join(inside, "hop")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("hop/../x", filepath.Join(inside, "relative")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(inside+"/hop/../y", filepath.Join(inside, "absolute")); err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]string{
+		filepath.Join(inside, "relative"):            filepath.Join(root, "other", "x"),
+		filepath.Join(inside, "absolute", "a"):       filepath.Join(root, "other", "y", "a"),
+		inside + "/hop/../z":                         filepath.Join(root, "other", "z"),
+		inside + "/missing/../hop/../z":              filepath.Join(root, "other", "z"),
+		inside + "/missing/more/../../relative/../w": filepath.Join(root, "other", "w"),
+	} {
+		if got, err := Resolve(path); err != nil || got != want {
+			t.Errorf("Resolve(%q) = %q, %v; want %q", path, got, err, want)
+		}
 	}
 	if err := os.Symlink("loop", filepath.Join(root, "loop")); err != nil {
 		t.Fatal(err)

@@ -28,8 +28,12 @@ var ErrLocked = errors.New("locked by another process")
 
 // Lock takes an exclusive lock on the file at path, creating it when needed, without waiting: it fails with ErrLocked
 // when another process holds it. The operating system releases the lock when the process ends, even if it crashes, so
-// a lock is never left behind. The returned function releases it; the file itself is kept.
+// a lock is never left behind. The returned function releases it; the file itself is kept. It fails when something
+// else than a regular file is at path, such as a link, which it never follows.
 func Lock(path string) (unlock func(), err error) {
+	if fi, err := os.Lstat(path); err == nil && !fi.Mode().IsRegular() {
+		return nil, &os.PathError{Op: "lock", Path: path, Err: errors.New("not a regular file")}
+	}
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
 		return nil, err

@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -356,6 +357,62 @@ func TestConfigFiles(t *testing.T) {
 	}
 }
 
+// TestFileContents checks what configuration files may hold: one YAML document (a final '---' is harmless), and a
+// folder for every target kind.
+func TestFileContents(t *testing.T) {
+	managed := fsutil.Canonical(t.TempDir())
+	write := func(file, content string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(file, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for content, ok := range map[string]bool{
+		"enabled: [a]\n":                    true,
+		"enabled: [a]\n---\n":               true,
+		"enabled: [a]\n---\nenabled: [b]\n": false,
+	} {
+		write(ConfigFile(managed), content)
+		if _, err := LoadConfig(managed); (err == nil) != ok {
+			t.Errorf("LoadConfig(%q): %v", content, err)
+		}
+	}
+	for _, folder := range []string{"", "null", "~"} {
+		write(ProfileFile(managed, "p"), "name: p\ntargets:\n  skills: "+folder+"\n")
+		if _, err := LoadProfile(managed, "p"); err == nil || !strings.Contains(err.Error(), "has no target folder") {
+			t.Errorf("target folder %q: %v", folder, err)
+		}
+	}
+	write(ProfileFile(managed, "p"), "name: p\ntargets:\n  skills: 'null'\n")
+	if prof, err := LoadProfile(managed, "p"); err != nil || prof.Targets[0].Folder != "null" {
+		t.Errorf("a folder named null, quoted: %+v, %v", prof, err)
+	}
+}
+
+// TestSaveKeepsPermissions checks that saving a file keeps the permissions it had.
+func TestSaveKeepsPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows has no such permissions")
+	}
+	managed := fsutil.Canonical(t.TempDir())
+	if err := SaveProfile(managed, &Profile{Name: "p"}); err != nil {
+		t.Fatal(err)
+	}
+	file := ProfileFile(managed, "p")
+	if err := os.Chmod(file, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveProfile(managed, &Profile{Name: "p", Agent: CustomAgent}); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(file); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("permissions after saving: %v, %v", info.Mode(), err)
+	}
+}
+
 func TestNames(t *testing.T) {
 	for name, want := range map[string]bool{"x": true, "x.y_z-1": true, "-x": false, "x@y": false, "x/y": false,
 		"": false} {
@@ -434,6 +491,12 @@ func TestTargetDir(t *testing.T) {
 	}
 	if _, _, err := TargetDir("/m", "%APPDATA%/devin/skills", ""); err == nil {
 		t.Errorf("want an error without APPDATA")
+	}
+	if runtime.GOOS == "windows" { // written with backslashes, as CleanTarget accepts them there
+		dir, stop, err = TargetDir(`C:\m`, `%APPDATA%\devin\skills`, `C:\appdata`)
+		if err != nil || dir != `C:\appdata\devin\skills` || stop != `C:\appdata` {
+			t.Errorf("TargetDir with backslashes = %s, %s, %v", dir, stop, err)
+		}
 	}
 }
 

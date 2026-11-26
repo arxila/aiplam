@@ -42,6 +42,13 @@ func createLink(link, target string) error {
 	return createJunction(link, target)
 }
 
+func restoreLink(link, target string, symlink bool) error {
+	if _, err := os.Stat(target); err != nil && symlink {
+		return createFileLink(link, target)
+	}
+	return createLink(link, target)
+}
+
 func fileLinksAllowed() bool {
 	dir, err := os.MkdirTemp("", "aiplam-")
 	if err != nil {
@@ -58,7 +65,7 @@ func fileLinksAllowed() bool {
 
 // createFileLink creates a symbolic link to a file, with a target relative to the link's folder when possible.
 func createFileLink(link, target string) error {
-	if rel, err := filepath.Rel(Canonical(filepath.Dir(link)), Canonical(target)); err == nil {
+	if rel, err := filepath.Rel(Canonical(filepath.Dir(link)), linkTarget(target)); err == nil {
 		target = rel
 	}
 	if err := os.Symlink(target, link); err != nil {

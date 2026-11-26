@@ -82,6 +82,20 @@ func CreateLink(link, target string) error {
 	return createLink(link, target)
 }
 
+// RestoreLink creates again a link that was removed, as CreateLink does; symlink says whether it was a symbolic link
+// (not a junction). On Windows, a link whose target no longer exists is then made a symbolic link again, as it was:
+// CreateLink, unable to tell a missing folder from a missing file, would make it a junction.
+func RestoreLink(link, target string, symlink bool) error {
+	return restoreLink(link, target, symlink)
+}
+
+// linkTarget returns the path a link to target must hold: target's folder with links resolved, and target's own name,
+// so that a link to an artifact that is itself a link still names the artifact (and its playbook folder), as
+// ownership is decided by the name and the folder a link leads to.
+func linkTarget(target string) string {
+	return filepath.Join(Canonical(filepath.Dir(target)), filepath.Base(target))
+}
+
 // FileLinksAllowed reports whether links to files can be created: always on Linux and macOS; on Windows, only with
 // developer mode or administrator rights, which it finds out by trying to create one in a temporary folder (any failure
 // other than missing rights counts as allowed, so that creating the real links reports it).

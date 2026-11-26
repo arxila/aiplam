@@ -24,9 +24,13 @@ package playbook
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"strings"
+	"syscall"
 
 	"arxila.io/aiplam/internal/config"
 	"arxila.io/aiplam/internal/fsutil"
@@ -131,23 +135,38 @@ type Item struct {
 }
 
 // Items returns the artifacts that e provides for kind: the entries of its folder for the kind (files and folders
-// alike) whose names match its format, except hidden ones and links leading outside the playbook folder, sorted by
-// name. A playbook without a folder for the kind (or with something else than a folder there) provides none.
+// alike) whose names match its format, except hidden ones and links leading outside the playbook folder (or that
+// would, for broken links, or that cannot be read), sorted by name. A playbook without a folder for the kind (or with
+// something else than a folder there) provides none; a folder that cannot be read is an error, not an empty folder,
+// so that its links are not taken for gone.
 func Items(e Entry, kind string) ([]Item, error) {
 	dir := e.SourceDir(kind)
-	if !fsutil.IsDir(dir) {
+	info, err := os.Stat(dir)
+	switch {
+	case errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR):
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("playbook %s: cannot read its subfolder for %s: %w", e.Label(), kind, err)
+	case !info.IsDir():
 		return nil, nil
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("playbook %s: cannot read its subfolder for %s: %w", e.Label(), kind, err)
+	}
+	top, err := fsutil.Resolve(e.Dir)
+	if err != nil {
+		return nil, fmt.Errorf("playbook %s: %w", e.Label(), err)
 	}
 	format := e.Format(kind)
 	var items []Item
 	for _, entry := range entries {
 		name := entry.Name()
 		src := filepath.Join(dir, name)
-		if !config.MatchFormat(format, name) || !fsutil.Within(fsutil.Canonical(src), e.Dir) {
+		if !config.MatchFormat(format, name) {
+			continue
+		}
+		if resolved, err := fsutil.Resolve(src); err != nil || !fsutil.Within(resolved, top) {
 			continue
 		}
 		items = append(items, Item{Name: name, Source: src})
@@ -215,6 +234,10 @@ type Action struct {
 	Current string
 	// Others describe the other playbooks of a Duplicate or SamePlaybook conflict.
 	Others []string
+	// madeDirs are the folders that Apply created for a Create's link, deepest first, which undoing it removes again.
+	madeDirs []string
+	// symlink is set for a Remove of a symbolic link (not a junction), so that undoing it makes a symbolic link again.
+	symlink bool
 }
 
 // Plan is a set of link changes.
@@ -260,7 +283,24 @@ func wantsFileLink(a Action) bool {
 
 // Changes returns the actions that would change something (removals, then creations).
 func (p Plan) Changes() []Action {
-	return append(p.filter(Remove), p.filter(Create)...)
+	var out []Action
+	for _, i := range p.changes() {
+		out = append(out, p.Actions[i])
+	}
+	return out
+}
+
+// changes returns the indexes of the actions that would change something, in the order of Changes.
+func (p Plan) changes() []int {
+	var out []int
+	for _, kind := range []ActionKind{Remove, Create} {
+		for i, a := range p.Actions {
+			if a.Kind == kind {
+				out = append(out, i)
+			}
+		}
+	}
+	return out
 }
 
 func (p Plan) filter(kind ActionKind) []Action {
@@ -305,6 +345,21 @@ func Transition(from, to []Group, scope map[Key]bool) (Plan, error) {
 		return its, err
 	}
 
+	// Links are told apart by where they are once the links on the way to them are resolved (see linkKey), so that
+	// target folders that are the same folder through a link collide.
+	resolved := map[string]string{}
+	key := func(dir, name string) string {
+		r, ok := resolved[dir]
+		if !ok {
+			r = dir
+			if res, err := fsutil.Resolve(dir); err == nil {
+				r = res
+			}
+			resolved[dir] = r
+		}
+		return linkKey(filepath.Join(r, name))
+	}
+
 	// What every playbook of to wants linked, by link.
 	wants := map[string][]want{}
 	for _, g := range to {
@@ -315,8 +370,8 @@ func Transition(from, to []Group, scope map[Key]bool) (Plan, error) {
 					return plan, err
 				}
 				for _, it := range its {
-					link := filepath.Join(t.Dir, it.Name)
-					wants[link] = append(wants[link], want{source: it.Source, entry: e})
+					k := key(t.Dir, it.Name)
+					wants[k] = append(wants[k], want{source: it.Source, entry: e})
 				}
 			}
 		}
@@ -379,8 +434,8 @@ func Transition(from, to []Group, scope map[Key]bool) (Plan, error) {
 				}
 				for _, de := range dirEntries {
 					name := de.Name()
-					link := filepath.Join(t.Dir, name)
-					if removed[link] || transferred[link] {
+					link, k := filepath.Join(t.Dir, name), key(t.Dir, name)
+					if removed[k] || transferred[k] {
 						continue
 					}
 					state, current, err := fsutil.Inspect(link)
@@ -388,11 +443,11 @@ func Transition(from, to []Group, scope map[Key]bool) (Plan, error) {
 						continue
 					}
 					keep := false
-					for _, w := range wants[link] {
+					for _, w := range wants[k] {
 						if sameFolder(w.source, current) {
 							keep = true
 							if scope[w.entry.Key()] {
-								transferred[link] = true
+								transferred[k] = true
 							}
 						}
 					}
@@ -410,9 +465,10 @@ func Transition(from, to []Group, scope map[Key]bool) (Plan, error) {
 							reason = "broken link: its artifact no longer exists"
 						}
 					}
-					removed[link] = true
+					removed[k] = true
 					plan.Actions = append(plan.Actions, Action{Kind: Remove, Artifact: t.Kind, Name: name, Link: link,
-						Source: current, Stop: t.Stop, Playbook: e.Label(), ID: e.ID, Profile: e.Profile, Reason: reason})
+						Source: current, Stop: t.Stop, Playbook: e.Label(), ID: e.ID, Profile: e.Profile, Reason: reason,
+						symlink: de.Type()&os.ModeSymlink != 0})
 				}
 			}
 		}
@@ -428,30 +484,35 @@ func Transition(from, to []Group, scope map[Key]bool) (Plan, error) {
 			for _, t := range g.Targets {
 				its, _ := items(e, t.Kind)
 				for _, it := range its {
-					link := filepath.Join(t.Dir, it.Name)
+					link, k := filepath.Join(t.Dir, it.Name), key(t.Dir, it.Name)
 					act := Action{Artifact: t.Kind, Name: it.Name, Link: link, Source: it.Source, Stop: t.Stop,
 						Playbook: e.Label(), ID: e.ID, Profile: e.Profile}
+					// Every other want of the same place: other playbooks, or this one through another target folder
+					// that is the same folder.
 					var others []string
-					for _, w := range wants[link] {
-						if w.entry.Key() != e.Key() {
-							others = append(others, w.entry.Label())
+					self := false
+					for _, w := range wants[k] {
+						if !self && w.entry.Key() == e.Key() && w.source == it.Source {
+							self = true
+							continue
 						}
+						others = append(others, w.entry.Label())
 					}
 					if len(others) > 0 {
-						if !duplicates[link] {
-							duplicates[link] = true
+						if !duplicates[k] {
+							duplicates[k] = true
 							act.Kind, act.Cause, act.Others = Conflict, Duplicate, others
 							plan.Actions = append(plan.Actions, act)
 						}
 						continue
 					}
-					if transferred[link] {
+					if transferred[k] {
 						act.Kind = Keep
 						plan.Actions = append(plan.Actions, act)
 						continue
 					}
 					state, current := fsutil.Missing, ""
-					if !removed[link] {
+					if !removed[k] {
 						var err error
 						if state, current, err = fsutil.Inspect(link); err != nil {
 							return plan, err
@@ -475,6 +536,15 @@ func Transition(from, to []Group, scope map[Key]bool) (Plan, error) {
 	return plan, nil
 }
 
+// linkKey returns the key that tells a link apart from the others: its path (with links resolved), ignoring case on
+// Windows, as fsutil.SamePath does.
+func linkKey(path string) string {
+	if runtime.GOOS == "windows" {
+		return strings.ToLower(path)
+	}
+	return path
+}
+
 // sameFolder reports whether two paths lead to the same place once links are resolved, so that a link made through
 // a path that has since become a link (for example, a playbook moved and linked from its old location) still counts.
 func sameFolder(a, b string) bool {
@@ -482,17 +552,20 @@ func sameFolder(a, b string) bool {
 }
 
 // Apply performs the removals and then the creations of a plan that has no conflicts, creating the folders of the
-// links when needed. It is all-or-nothing: when a change fails, the changes already made are undone (and report has
-// been called for them) before returning the error.
+// links when needed (it records them in the plan's actions, so that Revert removes them too). It is all-or-nothing:
+// when a change fails, the changes already made are undone (and report has been called for them) before returning
+// the error.
 func Apply(plan Plan, report func(Action)) error {
 	if len(plan.Conflicts()) > 0 {
 		return errors.New("the plan has conflicts")
 	}
 	var done []Action
-	for _, a := range plan.Changes() {
+	for _, i := range plan.changes() {
+		a := &plan.Actions[i]
 		var err error
 		switch a.Kind {
 		case Create:
+			a.madeDirs = missingDirs(filepath.Dir(a.Link), a.Stop)
 			if err = os.MkdirAll(filepath.Dir(a.Link), 0o755); err == nil {
 				err = fsutil.CreateLink(a.Link, a.Source)
 			}
@@ -500,6 +573,8 @@ func Apply(plan Plan, report func(Action)) error {
 			err = fsutil.RemoveLink(a.Link)
 		}
 		if err != nil {
+			removeDirs(a.madeDirs)
+			a.madeDirs = nil
 			if rerr := Revert(done); rerr != nil {
 				return fmt.Errorf("%w; undoing the changes already made also failed: %v", err, rerr)
 			}
@@ -508,17 +583,36 @@ func Apply(plan Plan, report func(Action)) error {
 			}
 			return err
 		}
-		done = append(done, a)
+		done = append(done, *a)
 		if report != nil {
-			report(a)
+			report(*a)
 		}
 	}
 	return nil
 }
 
+// missingDirs returns dir and its parents that do not exist, deepest first, up to (and never including) stop.
+func missingDirs(dir, stop string) []string {
+	var dirs []string
+	for ; fsutil.Within(dir, stop) && !fsutil.SamePath(dir, stop); dir = filepath.Dir(dir) {
+		if _, err := os.Lstat(dir); err == nil {
+			break
+		}
+		dirs = append(dirs, dir)
+	}
+	return dirs
+}
+
+// removeDirs removes the folders of dirs (deepest first) that are empty.
+func removeDirs(dirs []string) {
+	for _, dir := range dirs {
+		_ = os.Remove(dir) // fails, leaving it, when something is in it
+	}
+}
+
 // Revert undoes creations and removals applied by Apply, last first: it removes the created links (only if they are
-// still links to their source) and recreates the removed ones (only if nothing has taken their place). It tries every
-// action and returns the first error.
+// still links to their source) and the folders Apply created for them (only if empty), and recreates the removed ones
+// (only if nothing has taken their place). It tries every action and returns the first error.
 func Revert(actions []Action) error {
 	var first error
 	for i := len(actions) - 1; i >= 0; i-- {
@@ -531,12 +625,15 @@ func Revert(actions []Action) error {
 			} else if state == fsutil.Link && sameFolder(current, a.Source) {
 				err = fsutil.RemoveLink(a.Link)
 			}
+			if err == nil {
+				removeDirs(a.madeDirs)
+			}
 		case Remove:
 			if state, _, ierr := fsutil.Inspect(a.Link); ierr != nil {
 				err = ierr
 			} else if state == fsutil.Missing {
 				if err = os.MkdirAll(filepath.Dir(a.Link), 0o755); err == nil {
-					err = fsutil.CreateLink(a.Link, a.Source)
+					err = fsutil.RestoreLink(a.Link, a.Source, a.symlink)
 				}
 			}
 		}

@@ -69,13 +69,16 @@ for archive in $archives; do
 	esac
 done
 
-# SHA256SUMS: one line per archive, with its checksum.
+# SHA256SUMS: one line per archive, each a SHA-256 checksum and a file name, and every checksum checked (--strict:
+# a line in another format fails, instead of being skipped).
+malformed=$(awk 'NF != 2 || length($1) != 64 || $1 ~ /[^0-9a-f]/ { print NR }' "$DIST/SHA256SUMS")
+[ -z "$malformed" ] || fail "SHA256SUMS has lines that are not a checksum and a file name: $(echo $malformed)"
 listed=$(awk '{ sub(/^\*/, "", $2); print $2 }' "$DIST/SHA256SUMS" | sort)
 [ "$listed" = "$(printf '%s\n' $archives | sort)" ] || fail "SHA256SUMS does not list exactly the archives"
 if command -v sha256sum >/dev/null; then
-	(cd "$DIST" && sha256sum -c --quiet SHA256SUMS) || fail "SHA256SUMS does not match the archives"
+	(cd "$DIST" && sha256sum -c --quiet --strict SHA256SUMS) || fail "SHA256SUMS does not match the archives"
 else
-	(cd "$DIST" && shasum -a 256 -c --quiet SHA256SUMS) || fail "SHA256SUMS does not match the archives"
+	(cd "$DIST" && shasum -a 256 -c --quiet --strict SHA256SUMS) || fail "SHA256SUMS does not match the archives"
 fi
 
 # SHA256SUMS.asc: signed with the signing key (gpg reports the fingerprint of the key's primary key last in VALIDSIG).
