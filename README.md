@@ -29,15 +29,15 @@ projects.
 ```
 
 `aiplam` never clones, fetches, pulls or switches a playbook's checkout: choosing versions is the developer's job. It
-only creates and removes links, and the folders that hold them (see [Safety](#safety)).
+only creates and removes links, and the folders that hold them (see [Clean by design](#clean-by-design)).
 
 **Contents:**
 
 - [Install](#install) and [Quick start](#quick-start)
 - [Concepts](#concepts): artifacts, playbooks, target folders, agents, profiles, managed folders
-- [How it works](#how-it-works): linking, Windows, updating, collisions, finding the managed folder, sharing
+- [How it works](#how-it-works): linking, Windows, updating, collisions, finding the managed folder, sharing, monorepos
 - [Agents in detail](#agents-in-detail): the formats each agent reads, and guidelines (`AGENTS.md` and the like)
-- [Safety](#safety)
+- [Clean by design](#clean-by-design)
 - [Reference](#reference): commands, configuration files, exit codes
 
 ## Install
@@ -439,8 +439,37 @@ aiplam does not check what other managed folders link, nor which of them an agen
     /.claude/skills/acme-*
     /.claude/agents/acme-*
   ```
+- Each line covers a playbook's links of one kind, present and future, through its format. But when that would also
+  make git ignore something else in the target folder (the format is only `*`, or it matches something there that is
+  not a playbook's link), the lines name each link instead.
 - After cloning a project with a shared configuration, `aiplam status` shows what is not linked yet, naming the
   `aiplam update` command that links it.
+
+### Monorepos
+
+In a repository with many modules, each module may have agent folders of its own (such as
+`billing-backend/.agents/skills`), used when an agent is started in that module. With the repository's top folder as
+the managed folder, aiplam can link the skills of the modules being worked on into the top folder's target folders,
+registering each module as a playbook, and grouping related modules in profiles:
+
+```bash
+# all run from the monorepo's top folder, ~/Workspace/shop
+aiplam init . --folder skills:.agents/skills --profile finance --profile discovery
+
+# aiplam add <playbook name> <module folder> -p <profile> --folder <kind>:<module's subfolder>:<format>
+aiplam add billing billing-backend -p finance --folder 'skills:.agents/skills:*'
+aiplam add payments payments-gateway -p finance --folder 'skills:.agents/skills:*'
+aiplam add search search-engine -p discovery --folder 'skills:.agents/skills:*'
+
+aiplam profile switch finance      # agents started at the top get the billing and payments skills
+aiplam profile enable discovery    # and now the search skills too
+```
+
+- The format `*` links every skill with its own name, so two modules with a skill of the same name cannot be enabled
+  together (see [One owner per link](#one-owner-per-link)).
+- Skills of the top folder's own are not touched, and the lines aiplam gives for `.gitignore` name each link, so that
+  git does not ignore them either.
+- This selects which skills agents load, not which code they can reach: agents can still read and change every module.
 
 ### Editing the configuration by hand
 
@@ -535,7 +564,7 @@ or when the agent finds them relevant), according to each agent's documentation:
 - A later version may manage a marked block of its own inside the main instructions files, leaving the rest of them
   untouched.
 
-## Safety
+## Clean by design
 
 - **Only links.** aiplam only creates and removes links. It never deletes a real file, nor a folder that holds
   anything: it only removes the folders its unlinking leaves empty, up to the managed folder (or `%APPDATA%`). It never
@@ -546,10 +575,13 @@ or when the agent finds them relevant), according to each agent's documentation:
   link](#one-owner-per-link)), nothing is changed and every problem is reported. If creating or removing a link fails
   midway, the changes already made are undone. The one exception is decided before anything changes: links to files
   that Windows does not allow (see [Windows without developer mode](#windows-without-developer-mode)) are skipped.
-- **Safe to repeat.** Every command can be run again. `status` and `list` change nothing.
+- **Repeatable.** Every command can be run again. `status` and `list` change nothing.
 - **One at a time.** Commands that change a managed folder run one at a time: while one runs, others on the same
   managed folder fail (`status` and `list` still work). Interrupting one (Ctrl+C) takes effect once it has finished its
   changes, which takes milliseconds, so that links and configuration never disagree.
+
+aiplam is not a security tool: it does not check what a playbook contains, and agents act on the skills, subagents
+and rules it links. Link only playbooks you trust.
 
 ## Reference
 
