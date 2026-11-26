@@ -20,6 +20,7 @@ package app
 
 import (
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -31,33 +32,48 @@ import (
 
 // ownedLink is a link in a target folder that belongs to a playbook.
 type ownedLink struct {
-	path   string // the link
-	folder string // its target folder, as configured (relative to the managed folder)
-	format string // the format of its playbook for the kind
+	path   string   // the link
+	folder string   // its target folder, as configured (relative to the managed folder)
+	format string   // the format of its playbook for the kind
+	others []string // the names in its target folder that are not links belonging to a playbook
 }
 
 // ownedLinks returns the links in the target folders of profiles that belong to their playbooks; when only is not nil,
 // just those whose paths are in it.
 func ownedLinks(profiles []*profileState, only map[string]bool) []ownedLink {
 	var links []ownedLink
+	owned := map[string]bool{}
+	names := map[string][]string{} // the names in each target folder
 	for _, s := range profiles {
 		for _, t := range s.targets {
 			items, err := os.ReadDir(t.Dir)
 			if err != nil {
 				continue
 			}
+			_, read := names[t.Dir]
 			for _, item := range items {
-				link := filepath.Join(t.Dir, item.Name())
-				if only != nil && !only[link] {
-					continue
+				if !read {
+					names[t.Dir] = append(names[t.Dir], item.Name())
 				}
+				link := filepath.Join(t.Dir, item.Name())
 				state, current, err := fsutil.Inspect(link)
 				if err != nil || state != fsutil.Link {
 					continue
 				}
 				if e := playbook.Owner(s.entries, t.Kind, item.Name(), current); e != nil {
-					links = append(links, ownedLink{path: link, folder: t.Folder, format: e.Format(t.Kind)})
+					owned[link] = true
+					if only == nil || only[link] {
+						links = append(links, ownedLink{path: link, folder: t.Folder, format: e.Format(t.Kind)})
+					}
 				}
+			}
+		}
+	}
+	for i, l := range links {
+		dir := filepath.Dir(l.path)
+		for _, name := range names[dir] {
+			if !owned[filepath.Join(dir, name)] {
+				links[i].others = append(links[i].others, name)
 			}
 		}
 	}
@@ -100,7 +116,7 @@ func (a *App) warnUnignored(links []ownedLink, failures bool) bool {
 	seen := map[string]bool{}
 	for _, p := range unignored {
 		l := byPath[p]
-		if line := "/" + l.folder + "/" + gitignorePattern(l.format); !seen[line] {
+		if line := "/" + l.folder + "/" + gitignoreLine(l); !seen[line] {
 			seen[line] = true
 			lines = append(lines, line)
 		}
@@ -144,12 +160,49 @@ func (a *App) warnUnignoredCreated(plan playbook.Plan, profiles []*profileState)
 	}
 }
 
+// gitignoreLine returns the pattern, after its target folder, of the .gitignore line that makes git ignore a link: the
+// pattern of its playbook's format, so that one line covers the playbook's links of the kind, present and future;
+// but the link's own name when that pattern would also make git ignore something else in the target folder (something
+// that is not a playbook's link, now or later): when the format is only wildcards, or matches the name of something
+// there that is not a playbook's link.
+func gitignoreLine(l ownedLink) string {
+	pattern := gitignorePattern(l.format)
+	if strings.Trim(l.format, "*") == "" || matchesAny(pattern, l.others) {
+		return gitignoreName(filepath.Base(l.path))
+	}
+	return pattern
+}
+
+// matchesAny reports whether a gitignore pattern (of one name, with no '/') matches any of names. It ignores case, as
+// git may (core.ignoreCase), so that it errs towards matching; an invalid pattern matches.
+func matchesAny(pattern string, names []string) bool {
+	pattern = strings.ToLower(pattern)
+	for _, name := range names {
+		if ok, err := path.Match(pattern, strings.ToLower(name)); ok || err != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// gitignoreName returns a gitignore pattern matching only name: the characters that are special in gitignore patterns
+// are escaped, and so are its trailing spaces, which git would otherwise drop.
+func gitignoreName(name string) string {
+	trimmed := strings.TrimRight(name, " ")
+	return gitignoreEscape(trimmed, `\?[]*`) + strings.Repeat(`\ `, len(name)-len(trimmed))
+}
+
 // gitignorePattern returns a gitignore pattern matching the names a format matches: its '*' stay wildcards, and the
 // characters that are special in gitignore patterns are escaped.
 func gitignorePattern(format string) string {
+	return gitignoreEscape(format, `\?[]`)
+}
+
+// gitignoreEscape returns s with a backslash before each of the special characters.
+func gitignoreEscape(s, special string) string {
 	var b strings.Builder
-	for _, r := range format {
-		if strings.ContainsRune(`\?[]`, r) {
+	for _, r := range s {
+		if strings.ContainsRune(special, r) {
 			b.WriteRune('\\')
 		}
 		b.WriteRune(r)

@@ -1372,6 +1372,61 @@ func TestGitignorePattern(t *testing.T) {
 	}
 }
 
+// TestUnignoredLinksOwnNames checks that the lines to add to .gitignore name each link when the pattern of its format
+// would also make git ignore other things in its target folder: a format of only wildcards (such as the skills of the
+// modules of a monorepo, linked with their own names), or one matching something there that is not a playbook's link.
+func TestUnignoredLinksOwnNames(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not available")
+	}
+	e := newEnv(t)
+	project := e.mkdir(filepath.Join(e.root, "project"))
+	e.git(project, "init", "-q")
+	e.mustRun(ExitOK, "init", project, "-a", "claude")
+	e.app.Cwd = project
+
+	// Only wildcards: one line per link, even with nothing else in the folder.
+	billing := e.playbook("project/billing-backend", "invoice", "refund")
+	e.mustFail(ExitOK, []string{"2 links that aiplam made are not ignored by git",
+		"(aiplam never changes it):\n  /.claude/skills/invoice\n  /.claude/skills/refund\n"},
+		"add", "billing", billing, "--folder", "skills:skills:*")
+
+	// A format matching something of the project's own there: one line per link too.
+	e.skill(filepath.Join(project, ".claude", "skills"), "x-own")
+	x := e.playbook("pb", "x-a")
+	e.file("pb/subagents/x-rev.md")
+	out, errOut := e.mustRun(ExitOK, "add", "x", x)
+	if !contains(errOut, "\n  /.claude/skills/x-a") || !contains(errOut, "\n  /.claude/agents/x-*") ||
+		contains(errOut, "/.claude/skills/x-*") {
+		t.Fatalf("unexpected warning:\n%s%s", out, errOut)
+	}
+
+	// Links of other playbooks do not count as something else: the pattern is enough.
+	e.mustRun(ExitOK, "remove", "x")
+	if err := os.RemoveAll(filepath.Join(project, ".claude", "skills", "x-own")); err != nil {
+		t.Fatal(err)
+	}
+	e.mustFail(ExitOK, []string{"\n  /.claude/skills/x-*\n  /.claude/agents/x-*"}, "add", "x", x)
+}
+
+func TestGitignoreName(t *testing.T) {
+	for name, want := range map[string]string{"invoice": "invoice", `a*?[b]\c`: `a\*\?\[b\]\\c`, "a b  ": `a b\ \ `} {
+		if got := gitignoreName(name); got != want {
+			t.Errorf("gitignoreName(%q) = %q, want %q", name, got, want)
+		}
+	}
+	for _, c := range []struct {
+		pattern string
+		names   []string
+		want    bool
+	}{{"x-*", nil, false}, {"x-*", []string{"y-a", ".x-b"}, false}, {"x-*", []string{"y-a", "X-Own"}, true},
+		{`a\[b`, []string{"a[b"}, true}, {"[", []string{"z"}, true}} {
+		if got := matchesAny(c.pattern, c.names); got != c.want {
+			t.Errorf("matchesAny(%q, %q) = %v, want %v", c.pattern, c.names, got, c.want)
+		}
+	}
+}
+
 // TestDrivePathsInFolder checks that an absolute Windows path in --folder, split at its drive letter's colon, is
 // reported as not relative.
 func TestDrivePathsInFolder(t *testing.T) {
