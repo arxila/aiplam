@@ -177,8 +177,9 @@ acme-ai-playbook/                    registered with: aiplam add acme ~/Workspac
 A **target folder** is a folder where aiplam links the artifacts of a kind, and where agents read them:
 
 - it is relative to the managed folder: `.claude/skills` in the home folder is `~/.claude/skills`;
-- it never leaves the managed folder: `..` is never allowed. The only exception is `%APPDATA%`, which a target folder
-  of the user managed folder can start with, on Windows;
+- it never leaves the managed folder: `..` is never allowed, nor a link on its way that leads elsewhere (see [Clean by
+  design](#clean-by-design)). The only exception is `%APPDATA%`, which a target folder of the user managed folder can
+  start with, on Windows;
 - aiplam only manages the links in it that belong to its playbooks: anything else there (settings, artifacts added by
   hand) is left alone;
 - it is created when the first artifact is linked there, and removed again when unlinking leaves it empty (with its
@@ -575,6 +576,9 @@ or when the agent finds them relevant), according to each agent's documentation:
   link](#one-owner-per-link)), nothing is changed and every problem is reported. If creating or removing a link fails
   midway, the changes already made are undone. The one exception is decided before anything changes: links to files
   that Windows does not allow (see [Windows without developer mode](#windows-without-developer-mode)) are skipped.
+- **Only inside the managed folder.** Target folders, and the `.aiplam` folder, must lead inside the managed folder (or
+  `%APPDATA%`), also when a folder on their way is a link: one linked elsewhere, such as `~/.claude` linked to a
+  dotfiles folder outside the home folder, is refused, naming where it leads. Links leading inside it work as usual.
 - **Repeatable.** Every command can be run again. `status` and `list` change nothing.
 - **One at a time.** Commands that change a managed folder run one at a time: while one runs, others on the same
   managed folder fail (`status` and `list` still work). Interrupting one (Ctrl+C) takes effect once it has finished its
@@ -731,3 +735,7 @@ Paths in the profile files:
 
 aiplam is open-source software by [Arxila OSS](https://arxila.io), distributed under the
 [Apache License 2.0](LICENSE.txt).
+
+To contribute, see the
+[Arxila contribution guidelines](https://github.com/arxila/.github/blob/main/CONTRIBUTING.md). To report a security
+vulnerability, see [SECURITY.md](SECURITY.md): please do not open a public issue for it.
