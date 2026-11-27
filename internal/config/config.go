@@ -646,41 +646,32 @@ func writePath(managed, file string) (string, error) {
 	return target, nil
 }
 
-// linkHops returns the files that the link file leads to in turn, one link after the other, each with the links of its
-// folder resolved, until one that is not a link (which is not returned).
+// linkHops returns the files that the link file leads to in turn, one link after the other, each as the system reads
+// the link (see fsutil.Inspect: its folder resolved, a '..' applied where the system applies it), until one that is
+// not a link (which is not returned).
 func linkHops(file string) ([]string, error) {
 	var hops []string
 	for p := file; len(hops) < 255; {
-		info, err := os.Lstat(p)
-		if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		state, next, err := fsutil.Inspect(p)
+		if err != nil {
+			return nil, err
+		}
+		if state != fsutil.Link {
 			return hops, nil
 		}
-		next, err := os.Readlink(p)
-		if err != nil {
-			return nil, err
-		}
-		if !filepath.IsAbs(next) {
-			next = filepath.Join(filepath.Dir(p), next)
-		}
-		dir, err := fsutil.Resolve(filepath.Dir(next))
-		if err != nil {
-			return nil, err
-		}
-		p = filepath.Join(dir, filepath.Base(next))
+		p = next
 		hops = append(hops, p)
 	}
 	return nil, errors.New("too many links")
 }
 
-// otherConfiguration fails when target lies in the configuration folder of another managed folder (a folder nested in
-// managed, with a configuration file of its own), whose commands use it as theirs. A configuration folder without one
-// is not another managed folder's (a dotfiles folder holding profiles, in GNU Stow's layout), and neither is one whose
-// configuration file is managed's own (the dotfiles folder that managed's configuration files are links to).
+// otherConfiguration fails when target lies in a folder holding another managed folder's configuration file: the
+// configuration folder of a managed folder nested in managed (whatever its name, as its .aiplam folder may be a link to
+// it), whose commands use it as theirs. A folder without a configuration file is no managed folder's (a dotfiles
+// folder holding profiles, in GNU Stow's layout), and neither is one whose configuration file is managed's own (the
+// dotfiles folder that managed's configuration files are links to, or managed's own .aiplam folder).
 func otherConfiguration(managed, target string) error {
 	dir := filepath.Dir(target)
-	if !strings.EqualFold(filepath.Base(dir), DirName) {
-		return nil
-	}
 	otherConf, err := os.Stat(filepath.Join(dir, ConfigName+FileExt))
 	if err != nil {
 		return nil
@@ -688,7 +679,7 @@ func otherConfiguration(managed, target string) error {
 	if ownConf, err := os.Stat(ConfigFile(managed)); err == nil && os.SameFile(ownConf, otherConf) {
 		return nil
 	}
-	return fmt.Errorf("it is a file of the configuration of the managed folder '%s'", filepath.Dir(dir))
+	return fmt.Errorf("it is in '%s', which holds the configuration of another managed folder", dir)
 }
 
 func save(managed, file string, v any, header string) error {

@@ -758,12 +758,24 @@ func Apply(plan Plan, report func(Action)) error {
 			report(*a)
 		}
 	}
+	// Once all are made, each link is checked again: one made later may have changed where an earlier one leads.
+	for i := range done {
+		if done[i].Kind != Create {
+			continue
+		}
+		if err := stillInside(&done[i]); err != nil {
+			if rerr := Revert(done); rerr != nil {
+				return fmt.Errorf("%w; undoing the changes already made also failed: %v", err, rerr)
+			}
+			return fmt.Errorf("%w; the changes already made were undone", err)
+		}
+	}
 	return nil
 }
 
 // stillInside fails when the folder of a Create's link no longer leads inside its Stop folder (the managed folder, or
-// %APPDATA%), or its source no longer inside its playbook folder, once links are resolved: a link made by the plan may
-// lead elsewhere.
+// %APPDATA%), or its source no longer inside its playbook folder, once links are resolved (or cannot be resolved any
+// more, as through a loop): a link made by the plan may lead elsewhere.
 func stillInside(a *Action) error {
 	if a.Stop != "" {
 		if err := leadsInside(filepath.Dir(a.Link), a.Stop, "makes links inside it"); err != nil {

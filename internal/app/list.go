@@ -96,6 +96,7 @@ func (a *App) cmdList(args []string) error {
 	// What cannot be read is reported, never shown as nothing linked (status tells more).
 	failed := false
 	plan, err := a.transition(st.enabled, st.enabled, scope)
+	planFailed := err != nil
 	if err != nil {
 		a.warnf("%s", err)
 		failed = true
@@ -127,6 +128,9 @@ func (a *App) cmdList(args []string) error {
 			for _, item := range items {
 				link := filepath.Join(t.Dir, item.Name())
 				state, current, err := fsutil.Inspect(link)
+				if err != nil && state == fsutil.Link {
+					unread = true // a link that cannot be checked (as when its playbook folder cannot be read)
+				}
 				if err != nil || state != fsutil.Link {
 					continue
 				}
@@ -165,8 +169,8 @@ func (a *App) cmdList(args []string) error {
 		}
 		switch {
 		case linked:
-		case unread:
-			a.printf("  links in target folders that cannot be read are not listed (see above)\n")
+		case unread || planFailed:
+			a.printf("  links that cannot be checked are not listed (see above)\n")
 		case len(s.entries) == 0:
 			a.printf("  no playbooks are registered: register one with '%s'\n",
 				a.withProfile(st, s.name, "add <name> <playbookfolder>"))

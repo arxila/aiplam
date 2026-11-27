@@ -89,7 +89,7 @@ try:
         with zipfile.ZipFile(path) as archive:
             for info in archive.infolist():
                 mode = info.external_attr >> 16
-                is_dir = info.is_dir()
+                is_dir = info.is_dir() and (mode == 0 or stat.S_ISDIR(mode))  # its name and its type agree
                 is_file = not is_dir and (mode == 0 or stat.S_ISREG(mode))
                 if info.filename.rstrip("/") == top and not is_dir or info.filename.rstrip("/") != top and not is_file:
                     print("holds %s as %s" % (info.filename, kind(is_dir, is_file)))

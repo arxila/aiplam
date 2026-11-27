@@ -957,6 +957,34 @@ func TestLinkMadeRedirectsLaterSource(t *testing.T) {
 	e.assertMissing(filepath.Join(managed, ".agents", "skills", "x-b"))
 }
 
+// TestLinkMadeRedirectsEarlierSource checks the same as TestLinkMadeRedirectsLaterSource when it is a later link that
+// leads an earlier one's source outside the playbook folder, or into a loop of links (once made, the link is on its
+// own source's way).
+func TestLinkMadeRedirectsEarlierSource(t *testing.T) {
+	for _, c := range []struct{ name, through string }{
+		{"outside", filepath.Join("..", "m", ".agents", "skills", "x-b", "inner")},
+		{"loop", filepath.Join("..", "m", ".agents", "skills", "x-a")},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e := newEnv(t)
+			pb := e.mkdir(filepath.Join(e.root, "pb"))
+			managed := e.mkdir(filepath.Join(pb, "m"))
+			e.mkdir(filepath.Join(pb, "skills", "x-b"))
+			if err := symlink(t, e.file("outside.md"), filepath.Join(pb, "skills", "x-b", "inner")); err != nil {
+				t.Fatal(err)
+			}
+			if err := symlink(t, c.through, filepath.Join(pb, "skills", "x-a")); err != nil {
+				t.Fatal(err)
+			}
+			e.mustRun(ExitOK, "init", managed, "-a", "standard")
+			e.app.Cwd = managed
+			e.mustFail(ExitFailure, []string{"undone"}, "add", "x", pb)
+			e.assertMissing(filepath.Join(managed, ".agents", "skills", "x-a"))
+			e.assertMissing(filepath.Join(managed, ".agents", "skills", "x-b"))
+		})
+	}
+}
+
 // TestUnreadableMovedPlaybookFolderPlainLink checks the same as TestUnreadableMovedPlaybookFolder for a link whose
 // target holds no '..' (as one made by hand, or for a playbook that was inside its target folder).
 func TestUnreadableMovedPlaybookFolderPlainLink(t *testing.T) {
@@ -1013,7 +1041,8 @@ func TestProfileLinkIntoNestedManagedFolder(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.app.Cwd = parent
-	e.mustFail(ExitFailure, []string{"configuration of the managed folder"}, "add", "x", e.playbook("pb", "x-a"))
+	e.mustFail(ExitFailure, []string{"holds the configuration of another managed folder"}, "add", "x",
+		e.playbook("pb", "x-a"))
 	if after, err := os.ReadFile(config.ProfileFile(nested, "default")); err != nil || string(after) != string(before) {
 		t.Fatalf("the nested managed folder's profile changed: %v", err)
 	}
@@ -1047,9 +1076,59 @@ func TestProfileLinkThroughNestedProfile(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.app.Cwd = parent
-	e.mustFail(ExitFailure, []string{"configuration of the managed folder"}, "add", "x", e.playbook("pb", "x-a"))
+	e.mustFail(ExitFailure, []string{"holds the configuration of another managed folder"}, "add", "x",
+		e.playbook("pb", "x-a"))
 	if after, err := os.ReadFile(backing); err != nil || string(after) != string(before) {
 		t.Fatalf("the nested managed folder's profile changed: %v", err)
+	}
+}
+
+// TestProfileLinkIntoLinkedConfigurationFolder checks the same as TestProfileLinkIntoNestedManagedFolder when the
+// nested managed folder's .aiplam folder is itself a link to a folder of another name, and when the parent's link
+// reaches the nested profile with a '..' after a link to a folder (which the system applies to where that link leads).
+func TestProfileLinkIntoLinkedConfigurationFolder(t *testing.T) {
+	e := newEnv(t)
+	parent := e.mkdir(filepath.Join(e.root, "parent"))
+	nested := e.mkdir(filepath.Join(parent, "nested"))
+	e.mustRun(ExitOK, "init", parent, "-a", "standard")
+	e.mustRun(ExitOK, "init", nested, "-a", "standard")
+	if err := os.Rename(config.Dir(nested), filepath.Join(nested, "cfg")); err != nil {
+		t.Fatal(err)
+	}
+	if err := symlink(t, "cfg", config.Dir(nested)); err != nil {
+		t.Fatal(err)
+	}
+	backing := filepath.Join(nested, "cfg", "default.yaml")
+	before, err := os.ReadFile(backing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := config.ProfileFile(parent, "default")
+	e.app.Cwd = parent
+	pb := e.playbook("pb", "x-a")
+	for _, target := range []string{
+		filepath.Join("..", "nested", config.DirName, "default.yaml"),
+		"../via/../default.yaml", // via leads into nested/.aiplam/deeper: '..' leads back to it
+	} {
+		if err := os.Remove(file); err != nil {
+			t.Fatal(err)
+		}
+		if err := symlink(t, target, file); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(target, "via") {
+			if runtime.GOOS == "windows" {
+				continue // Windows applies '..' as text: the link leads to parent/default.yaml, which does not exist
+			}
+			e.mkdir(filepath.Join(nested, "cfg", "deeper"))
+			if err := symlink(t, filepath.Join("nested", config.DirName, "deeper"), filepath.Join(parent, "via")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		e.mustFail(ExitFailure, []string{"holds the configuration of another managed folder"}, "add", "x", pb)
+		if after, err := os.ReadFile(backing); err != nil || string(after) != string(before) {
+			t.Fatalf("link %s: the nested managed folder's profile changed: %v", target, err)
+		}
 	}
 }
 
@@ -1061,16 +1140,21 @@ func TestListReportsUnreadableTargets(t *testing.T) {
 	}
 	e := newEnv(t)
 	e.mustRun(ExitOK, "init", "-u", "-a", "standard")
-	e.mustRun(ExitOK, "add", "x", e.playbook("pb", "x-a"), "-u")
-	if err := os.Chmod(e.homeSkills(), 0); err != nil {
-		t.Fatal(err)
+	pb := e.playbook("pb", "x-a")
+	e.mustRun(ExitOK, "add", "x", pb, "-u")
+	unreadable := func(dir string, mode os.FileMode, msgs ...string) {
+		t.Helper()
+		if err := os.Chmod(dir, mode); err != nil {
+			t.Fatal(err)
+		}
+		defer os.Chmod(dir, 0o755)
+		e.mustFail(ExitFailure, append(msgs, "links that cannot be checked are not listed"), "list", "-u")
+		if _, out, _ := e.run("list", "-u"); contains(out, "nothing is linked") {
+			t.Fatalf("list says nothing is linked:\n%s", out)
+		}
 	}
-	t.Cleanup(func() { _ = os.Chmod(e.homeSkills(), 0o755) })
-	e.mustFail(ExitFailure, []string{"cannot read target folder '~/.agents/skills'", "cannot be read are not listed"},
-		"list", "-u")
-	if _, out, _ := e.run("list", "-u"); contains(out, "nothing is linked") {
-		t.Fatalf("list says nothing is linked:\n%s", out)
-	}
+	unreadable(e.homeSkills(), 0, "cannot read target folder '~/.agents/skills'")
+	unreadable(pb, 0o644) // the playbook folder: its links cannot be checked
 }
 
 // TestNewTargetFoldersBelowFiles checks that a profile is not created with a target folder below a file.

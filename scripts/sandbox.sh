@@ -58,11 +58,12 @@ echo "PS1='(aiplam-sandbox) \\w \\$ '" >"$sandbox/.bashrc"
 
 # git for the example repositories, without the user's global and system settings (hooks, ignore rules, templates...),
 # which could stop it or leave files out.
+# HOME and XDG_CONFIG_HOME are the sandbox's too, where git looks for its default ignore and attributes files.
 g() {
   dir=$1
   shift
-  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$dir" -c user.name=aiplam -c user.email=aiplam@example.com \
-    -c commit.gpgsign=false -c tag.gpgsign=false "$@" >/dev/null
+  HOME=$sandbox XDG_CONFIG_HOME=$sandbox/.config GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$dir" \
+    -c user.name=aiplam -c user.email=aiplam@example.com -c commit.gpgsign=false -c tag.gpgsign=false "$@" >/dev/null
 }
 
 if command -v git >/dev/null 2>&1; then
@@ -107,9 +108,12 @@ esac
 # Tried first (a script whose interpreter is missing is executable, yet cannot start), already in the sandbox, with its
 # environment, and without the files that non-interactive shells run at start (BASH_ENV, ENV): nothing of the caller's
 # runs outside the sandbox. Nor ZDOTDIR, so that zsh reads the sandbox's start-up files, not the caller's.
-unset BASH_ENV ENV ZDOTDIR
+# And the shell keeps its history, and other data, in the sandbox: no HISTFILE of the caller's, and the sandbox's own
+# XDG folders.
+unset BASH_ENV ENV ZDOTDIR HISTFILE
 cd "$sandbox"
 export HOME=$sandbox PATH=$sandbox/bin:$PATH AIPLAM_SANDBOX=$sandbox XDG_CONFIG_HOME=$sandbox/.config \
+  XDG_DATA_HOME=$sandbox/.local/share XDG_STATE_HOME=$sandbox/.local/state XDG_CACHE_HOME=$sandbox/.cache \
   GIT_CONFIG_NOSYSTEM=1
 [ -n "$shell" ] && [ -f "$shell" ] && [ -x "$shell" ] && "$shell" -c true </dev/null >/dev/null 2>&1 ||
   { echo "cannot start the shell '${SHELL:-/bin/sh}': set SHELL to one that can be" >&2; exit 1; }
