@@ -611,3 +611,28 @@ func TestSaveThroughLinkNeedsConfigurationFolder(t *testing.T) {
 		t.Errorf("files next to the backing file: %d", len(items))
 	}
 }
+
+// TestCheckWritableBesideFolderNamedLikeConfiguration checks that a folder named like the configuration file, next to
+// the file a configuration link leads to, is not taken for another managed folder's configuration file.
+func TestCheckWritableBesideFolderNamedLikeConfiguration(t *testing.T) {
+	managed := fsutil.Canonical(t.TempDir())
+	if err := SaveConfig(managed, &Config{}); err != nil {
+		t.Fatal(err)
+	}
+	backing := filepath.Join(managed, "dotfiles", "p.yaml")
+	if err := os.MkdirAll(filepath.Join(filepath.Dir(backing), ConfigName+FileExt), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(backing, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(backing, ProfileFile(managed, "p")); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skip("symbolic links need developer mode or administrator rights on Windows")
+		}
+		t.Fatal(err)
+	}
+	if err := CheckWritable(managed, ProfileFile(managed, "p")); err != nil {
+		t.Errorf("refused: %v", err)
+	}
+}

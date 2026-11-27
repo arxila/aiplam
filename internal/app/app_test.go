@@ -985,6 +985,31 @@ func TestLinkMadeRedirectsEarlierSource(t *testing.T) {
 	}
 }
 
+// TestLinkMadeRedirectsKeptSource checks the same as TestLinkMadeRedirectsEarlierSource for a link that the command
+// keeps: made by an earlier command, to an artifact that a link made now leads outside the playbook folder.
+func TestLinkMadeRedirectsKeptSource(t *testing.T) {
+	e := newEnv(t)
+	pb := e.mkdir(filepath.Join(e.root, "pb"))
+	managed := e.mkdir(filepath.Join(pb, "m"))
+	if err := symlink(t, filepath.Join("..", "m", ".agents", "skills", "x-b", "inner"),
+		filepath.Join(e.mkdir(filepath.Join(pb, "skills")), "x-a")); err != nil {
+		t.Fatal(err)
+	}
+	e.mustRun(ExitOK, "init", managed, "-a", "standard")
+	e.app.Cwd = managed
+	e.mustRun(ExitOK, "add", "x", pb)
+	kept := filepath.Join(managed, ".agents", "skills", "x-a")
+	e.mkdir(filepath.Join(pb, "skills", "x-b"))
+	if err := symlink(t, e.file("outside.md"), filepath.Join(pb, "skills", "x-b", "inner")); err != nil {
+		t.Fatal(err)
+	}
+	e.mustFail(ExitFailure, []string{"now leads outside", "undone"}, "update", "x")
+	e.assertMissing(filepath.Join(managed, ".agents", "skills", "x-b"))
+	if _, err := os.Lstat(kept); err != nil {
+		t.Fatalf("the kept link is gone: %v", err)
+	}
+}
+
 // TestUnreadableMovedPlaybookFolderPlainLink checks the same as TestUnreadableMovedPlaybookFolder for a link whose
 // target holds no '..' (as one made by hand, or for a playbook that was inside its target folder).
 func TestUnreadableMovedPlaybookFolderPlainLink(t *testing.T) {
@@ -1155,6 +1180,27 @@ func TestListReportsUnreadableTargets(t *testing.T) {
 	}
 	unreadable(e.homeSkills(), 0, "cannot read target folder '~/.agents/skills'")
 	unreadable(pb, 0o644) // the playbook folder: its links cannot be checked
+}
+
+// TestListLeavesUnrelatedLinks checks that list says nothing of a link it cannot check when that link cannot be any
+// playbook's (status reports it), nor that some links cannot be checked.
+func TestListLeavesUnrelatedLinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows reads link targets as text: they always resolve")
+	}
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init", "-u", "-a", "standard")
+	loop := filepath.Join(e.mkdir(e.homeSkills()), "loop")
+	if err := symlink(t, "loop", loop); err != nil {
+		t.Fatal(err)
+	}
+	if err := symlink(t, loop+"/../y", filepath.Join(e.homeSkills(), "notes")); err != nil {
+		t.Fatal(err)
+	}
+	out, errOut := e.mustRun(ExitOK, "list", "-u")
+	if contains(out+errOut, "cannot be checked") || contains(errOut, "WARNING") {
+		t.Fatalf("unexpected output:\n%s%s", out, errOut)
+	}
 }
 
 // TestNewTargetFoldersBelowFiles checks that a profile is not created with a target folder below a file.

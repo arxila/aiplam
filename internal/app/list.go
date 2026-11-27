@@ -128,8 +128,14 @@ func (a *App) cmdList(args []string) error {
 			for _, item := range items {
 				link := filepath.Join(t.Dir, item.Name())
 				state, current, err := fsutil.Inspect(link)
+				// A link that cannot be resolved, but that may be one of a playbook's (as when its playbook folder
+				// cannot be read), is reported; one that cannot be any playbook's is left to status.
 				if err != nil && state == fsutil.Link {
-					unread = true // a link that cannot be checked (as when its playbook folder cannot be read)
+					if e := playbook.MayOwner(s.entries, t.Kind, item.Name(), current); e != nil {
+						a.warnf("cannot check %s, which may be a link of playbook %s: %s", a.pretty(link), e.Label(),
+							err)
+						failed, unread = true, true
+					}
 				}
 				if err != nil || state != fsutil.Link {
 					continue

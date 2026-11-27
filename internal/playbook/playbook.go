@@ -758,12 +758,23 @@ func Apply(plan Plan, report func(Action)) error {
 			report(*a)
 		}
 	}
-	// Once all are made, each link is checked again: one made later may have changed where an earlier one leads.
+	// Once all are made, each link made, and each one kept, is checked again: a link made may have changed where
+	// another one leads.
+	var check []*Action
 	for i := range done {
-		if done[i].Kind != Create {
-			continue
+		if done[i].Kind == Create {
+			check = append(check, &done[i])
 		}
-		if err := stillInside(&done[i]); err != nil {
+	}
+	if len(check) > 0 {
+		for i := range plan.Actions {
+			if plan.Actions[i].Kind == Keep {
+				check = append(check, &plan.Actions[i])
+			}
+		}
+	}
+	for _, a := range check {
+		if err := stillInside(a); err != nil {
 			if rerr := Revert(done); rerr != nil {
 				return fmt.Errorf("%w; undoing the changes already made also failed: %v", err, rerr)
 			}

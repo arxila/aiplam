@@ -673,7 +673,7 @@ func linkHops(file string) ([]string, error) {
 func otherConfiguration(managed, target string) error {
 	dir := filepath.Dir(target)
 	otherConf, err := os.Stat(filepath.Join(dir, ConfigName+FileExt))
-	if err != nil {
+	if err != nil || !otherConf.Mode().IsRegular() { // a folder with that name is no configuration file
 		return nil
 	}
 	if ownConf, err := os.Stat(ConfigFile(managed)); err == nil && os.SameFile(ownConf, otherConf) {

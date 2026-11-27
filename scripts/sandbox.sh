@@ -109,8 +109,8 @@ esac
 # environment, and without the files that non-interactive shells run at start (BASH_ENV, ENV): nothing of the caller's
 # runs outside the sandbox. Nor ZDOTDIR, so that zsh reads the sandbox's start-up files, not the caller's.
 # And the shell keeps its history, and other data, in the sandbox: no HISTFILE of the caller's, and the sandbox's own
-# XDG folders.
-unset BASH_ENV ENV ZDOTDIR HISTFILE
+# XDG folders. The same for xonsh, which names its own folders and start-up files.
+unset BASH_ENV ENV ZDOTDIR HISTFILE XONSHRC XONSHRC_DIR XONSH_CONFIG_DIR XONSH_DATA_DIR
 cd "$sandbox"
 export HOME=$sandbox PATH=$sandbox/bin:$PATH AIPLAM_SANDBOX=$sandbox XDG_CONFIG_HOME=$sandbox/.config \
   XDG_DATA_HOME=$sandbox/.local/share XDG_STATE_HOME=$sandbox/.local/state XDG_CACHE_HOME=$sandbox/.cache \

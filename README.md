@@ -729,6 +729,9 @@ These files can be links, as dotfiles managers (GNU Stow, dotbot, rcm...) make t
 the managed folder (for the user managed folder, the home folder: a dotfiles repository anywhere in it): aiplam saves
 the file a link leads to, and the link stays. A command that would change a file linked from outside the managed
 folder fails, and changes nothing, as aiplam only writes inside it. A broken link is never taken for a missing file.
+A file linked from the configuration of another managed folder that is also in use (a project's, from inside it) is
+not supported: aiplam cannot tell it from a dotfiles repository, and both managed folders would then share their
+enabled profiles while each keeps its own links.
 
 Paths in the profile files:
 
