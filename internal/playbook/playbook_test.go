@@ -706,6 +706,13 @@ func TestLinksReadAsTheSystemDoes(t *testing.T) {
 	if err := os.Symlink(s.pb+"/skills/sub/../x-a", link); err != nil {
 		t.Fatal(err)
 	}
+	// A broken one, through a folder that is missing for now: where it will lead once that folder exists.
+	s.skill("x-b")
+	if runtime.GOOS != "windows" {
+		if err := os.Symlink(s.pb+"/skills/sub/missing/../../x-b", s.link(".agents/skills/x-b")); err != nil {
+			t.Fatal(err)
+		}
+	}
 	g := s.group("p", pb("x", nil))
 	if runtime.GOOS == "windows" {
 		if plan := s.transition([]Group{g}, nil, scopeOf(g)); actions(plan, Remove) != "x-a" {
@@ -716,8 +723,9 @@ func TestLinksReadAsTheSystemDoes(t *testing.T) {
 	if plan := s.transition([]Group{g}, nil, scopeOf(g)); actions(plan, Remove) != "" {
 		t.Errorf("removal of the playbook removes %q", actions(plan, Remove))
 	}
-	if c := s.transition([]Group{g}, []Group{g}, scopeOf(g)).Conflicts(); len(c) != 1 || c[0].Cause != OtherLink {
-		t.Errorf("update: conflicts %+v, want the link in the way", c)
+	if c := s.transition([]Group{g}, []Group{g}, scopeOf(g)).Conflicts(); len(c) != 2 || c[0].Cause != OtherLink ||
+		c[1].Cause != OtherLink {
+		t.Errorf("update: conflicts %+v, want the links in the way", c)
 	}
 }
 
@@ -772,5 +780,42 @@ func TestRevertReportsFoldersLeft(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
 	if err := Revert([]Action{{Kind: Create, Link: filepath.Join(made, "x"), madeDirs: []string{made}}}); err == nil {
 		t.Error("an empty folder that cannot be removed: no error")
+	}
+}
+
+// TestRemoveDirsOnlyFolders checks that undoing a creation removes only the folders it made: not a link found in the
+// place of one, nor what it leads to.
+func TestRemoveDirsOnlyFolders(t *testing.T) {
+	s := newSandbox(t)
+	elsewhere := filepath.Join(s.root, "elsewhere")
+	if err := os.MkdirAll(elsewhere, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	made := filepath.Join(s.root, "made")
+	if err := os.Symlink(elsewhere, made); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeDirs([]string{made}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(made); err != nil {
+		t.Error("the link in the folder's place was removed")
+	}
+	if !fsutil.IsDir(elsewhere) {
+		t.Error("the folder the link leads to was removed")
+	}
+}
+
+// TestIgnoresCase checks that case is detected from an entry of the folder, as the system compares its names.
+func TestIgnoresCase(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Name"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a, errA := os.Lstat(filepath.Join(dir, "Name"))
+	b, errB := os.Lstat(filepath.Join(dir, "nAME"))
+	want := errA == nil && errB == nil && os.SameFile(a, b)
+	if got := ignoresCase(dir); got != want {
+		t.Errorf("ignoresCase = %v, want %v (as the folder compares its names)", got, want)
 	}
 }

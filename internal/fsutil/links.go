@@ -64,16 +64,20 @@ func Inspect(path string) (LinkState, string, error) {
 	if !filepath.IsAbs(target) {
 		target = Canonical(filepath.Dir(path)) + string(filepath.Separator) + target
 	}
-	return Link, linkPath(target), nil
+	if target, err = linkPath(target); err != nil {
+		return Link, "", err
+	}
+	return Link, target, nil
 }
 
 // linkPath returns a link's absolute target, as written, cleaned as the system reads it: on Linux and macOS, a '..'
-// that follows a link in it applies to where that link leads, not to the text before it; so its folder is resolved as
-// Canonical does (when it exists), and its last name is kept, as the target itself may be a link, or missing. Windows
-// reads it as text (see windowsText), and so does it without '..'.
-func linkPath(target string) string {
+// that follows a link in it applies to where that link leads, not to the text before it; so its folder is resolved
+// (see Resolve, which also resolves it for missing folders, as it will lead once they exist), and its last name is
+// kept, as the target itself may be a link, or missing. Windows reads it as text (see windowsText), and so does it
+// without '..'. It fails when the target's folder cannot be resolved.
+func linkPath(target string) (string, error) {
 	if runtime.GOOS == "windows" {
-		return filepath.Clean(target)
+		return filepath.Clean(target), nil
 	}
 	elems := splitPath(target[len(filepath.VolumeName(target)):])
 	dotDot := false
@@ -81,19 +85,17 @@ func linkPath(target string) string {
 		dotDot = dotDot || elem == ".."
 	}
 	if !dotDot || len(elems) == 0 {
-		return filepath.Clean(target)
+		return filepath.Clean(target), nil
 	}
 	if last := elems[len(elems)-1]; last == "." || last == ".." {
-		if resolved, err := filepath.EvalSymlinks(target); err == nil {
-			return resolved
-		}
-		return filepath.Clean(target)
+		return Resolve(target)
 	}
 	end := strings.LastIndexFunc(strings.TrimRightFunc(target, isSeparator), isSeparator)
-	if resolved, err := filepath.EvalSymlinks(target[:end+1]); err == nil {
-		return filepath.Join(resolved, elems[len(elems)-1])
+	dir, err := Resolve(target[:end+1])
+	if err != nil {
+		return "", err
 	}
-	return filepath.Clean(target)
+	return filepath.Join(dir, elems[len(elems)-1]), nil
 }
 
 // isSeparator reports whether r is a path separator.

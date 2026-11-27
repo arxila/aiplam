@@ -38,6 +38,8 @@ bin=$(cd "$(dirname "$bin")" && pwd)/$(basename "$bin")
 
 tmp=${TMPDIR:-/tmp}
 sandbox=$(mktemp -d "${tmp%/}/aiplam-sandbox.XXXXXX")
+# Removed if setting it up fails; kept once the shell starts, for the session.
+trap 'rm -rf "$sandbox"' EXIT
 sandbox=$(cd "$sandbox" && pwd -P)
 mkdir -p "$sandbox/bin"
 ln -s "$bin" "$sandbox/bin/aiplam"
@@ -46,11 +48,13 @@ cp -R "$repo/testdata/playbooks" "$sandbox/playbooks"
 echo "PS1='(aiplam-sandbox) %~ %# '" >"$sandbox/.zshrc"
 echo "PS1='(aiplam-sandbox) \\w \\$ '" >"$sandbox/.bashrc"
 
+# git for the example repositories, without the user's global and system settings (hooks, ignore rules, templates...),
+# which could stop it or leave files out.
 g() {
   dir=$1
   shift
-  git -C "$dir" -c user.name=aiplam -c user.email=aiplam@example.com -c commit.gpgsign=false -c tag.gpgsign=false \
-    "$@" >/dev/null
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$dir" -c user.name=aiplam -c user.email=aiplam@example.com \
+    -c commit.gpgsign=false -c tag.gpgsign=false "$@" >/dev/null
 }
 
 if command -v git >/dev/null 2>&1; then
@@ -85,5 +89,6 @@ Type 'exit' to leave; then delete the sandbox with: rm -rf $quoted
 
 MSG
 
+trap - EXIT
 cd "$sandbox"
 HOME=$sandbox PATH=$sandbox/bin:$PATH AIPLAM_SANDBOX=$sandbox exec "${SHELL:-/bin/sh}"

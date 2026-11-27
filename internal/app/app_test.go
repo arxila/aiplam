@@ -829,6 +829,7 @@ func TestRestoreProfilesReportsFailures(t *testing.T) {
 	e.mkdir(filepath.Join(fmt.Sprintf("%s.%d.tmp", config.ProfileFile(e.home, "b"), os.Getpid()), "x"))
 	got := e.app.restoreProfiles([]*config.Profile{a, b}, "nothing changed")
 	if !strings.Contains(got, "putting back profile 'b'") || !strings.Contains(got, "so it keeps the change") ||
+		!strings.Contains(got, "see it with 'aiplam profile show b") ||
 		strings.Contains(got, "'a'") || strings.Contains(got, "nothing changed") {
 		t.Errorf("b not put back: %q", got)
 	}
@@ -1125,6 +1126,19 @@ func TestFailedInitIsUndone(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.mustRun(ExitOK, "init", project, "-a", "standard", "-p", "a,b")
+
+	// Cleaning up in a folder whose name has characters special in patterns: only its own temporary files go.
+	own, kept := e.file("proj[1]/.aiplam/a.yaml.1.tmp"), e.file("proj1/.aiplam/keep.tmp")
+	removeNewConfigDir(filepath.Dir(own))
+	if fsutil.IsFile(own) || !fsutil.IsFile(kept) {
+		t.Fatalf("cleanup: own file left %v, other folder's file kept %v", fsutil.IsFile(own), fsutil.IsFile(kept))
+	}
+
+	// A profile file left by an earlier setup, named in another case: init does not make a second one.
+	other := e.mkdir(filepath.Join(e.root, "other"))
+	e.file("other/.aiplam/Work.yaml")
+	e.mustFail(ExitFailure, []string{"already exists, from an earlier setup"}, "init", other, "-a", "standard", "-p",
+		"work")
 }
 
 func TestFilesWhereFoldersMustBe(t *testing.T) {

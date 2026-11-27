@@ -26,6 +26,9 @@ import (
 	"syscall"
 )
 
+// openNoFollow makes opening a link fail instead of following it.
+const openNoFollow = syscall.O_NOFOLLOW
+
 func lockFile(f *os.File) error {
 	err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 	if errors.Is(err, syscall.EWOULDBLOCK) {

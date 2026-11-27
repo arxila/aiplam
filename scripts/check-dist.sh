@@ -20,13 +20,15 @@
 #
 # Checks the release archives that 'make dist' wrote, before they are published. Usage:
 #
-#   scripts/check-dist.sh <dist folder> <binary name> <version> [<signing key fingerprint>]
+#   PLATFORMS='<os>/<arch> ...' scripts/check-dist.sh <dist folder> <binary name> <version> [<signing key fingerprint>]
 #
+# PLATFORMS lists the platforms there must be an archive for, and no other ('make dist' and 'make release-sign' give
+# the Makefile's).
 # Each archive (aiplam-<version>-<os>-<arch>.tar.gz, or .zip for Windows) must hold exactly its top folder, named like
 # the archive, with the executable (executable, in the .tar.gz), README.md, LICENSE.txt and NOTICE.txt: nothing else,
 # so no files of the building machine (macOS's "._*" and .DS_Store files), no agent files (AGENTS.md, CLAUDE.md,
-# .agents/, .claude/...), nothing from the repository. The .tar.gz archives must not record extended attributes (it
-# reads their headers with python3), nor the name of the user who built them. SHA256SUMS must list exactly the
+# .agents/, .claude/...), nothing from the repository. The .tar.gz archives must not record extended attributes, nor
+# anyone but root (uid 0) as an owner (it reads their headers with python3). SHA256SUMS must list exactly the
 # archives, with their checksums. With a signing key, SHA256SUMS.asc must be a good signature of SHA256SUMS made with
 # that key (not expired, nor revoked); without one, there must be no SHA256SUMS.asc.
 
@@ -36,12 +38,22 @@ set -eu
 	{ echo "usage: $0 <dist folder> <binary name> <version> [<signing key fingerprint>]" >&2; exit 2; }
 DIST=$1 BINARY=$2 VERSION=$3 SIGN_KEY=$(printf %s "${4:-}" | tr a-f A-F)
 command -v python3 >/dev/null || { echo "check-dist: python3 is needed (to read the archives' headers)" >&2; exit 1; }
-USER_NAME=$(id -un)
+[ -n "${PLATFORMS:-}" ] || { echo "check-dist: PLATFORMS must list the platforms of the archives" >&2; exit 2; }
 failed=0
 fail() { echo "check-dist: $*" >&2; failed=1; }
 
 archives=$(cd "$DIST" && ls "$BINARY-$VERSION"-*.tar.gz "$BINARY-$VERSION"-*.zip 2>/dev/null || true)
 [ -n "$archives" ] || { echo "check-dist: no archives in $DIST" >&2; exit 1; }
+
+# Exactly one archive per platform: a .zip for Windows, a .tar.gz for the others.
+expected=$(for p in $PLATFORMS; do
+	os=${p%/*} arch=${p#*/} ext=tar.gz
+	[ "$os" = windows ] && ext=zip
+	echo "$BINARY-$VERSION-$os-$arch.$ext"
+done | sort)
+[ "$(printf '%s\n' $archives | sort)" = "$expected" ] ||
+	fail "the archives are not exactly one per platform:$(printf '\n    %s' $archives)" \
+		"(expected:$(printf '\n    %s' $expected))"
 
 for archive in $archives; do
 	file=$DIST/$archive
@@ -57,23 +69,27 @@ for archive in $archives; do
 	fi
 	case $archive in
 		*.tar.gz)
-			# Extended attributes are stored in pax headers (SCHILY.xattr.*, LIBARCHIVE.xattr.*), read with Python's
-			# tarfile, not searched for in the whole archive, where a file's own content could hold those words.
-			python3 -I -c '
+			# Read from the headers with Python's tarfile: extended attributes are in pax headers (SCHILY.xattr.*,
+			# LIBARCHIVE.xattr.*), not to be searched for in the whole archive, where a file could hold those words;
+			# and owners are in each entry's header, whatever tar's listing shows them like.
+			problems=$(python3 -I -c '
 import sys, tarfile
 try:
     with tarfile.open(sys.argv[1]) as archive:
-        headers = [archive.pax_headers] + [member.pax_headers for member in archive.getmembers()]
+        members = archive.getmembers()
+        headers = [archive.pax_headers] + [member.pax_headers for member in members]
 except Exception as error:
-    print(error, file=sys.stderr)
-    sys.exit(2)
-sys.exit(1 if any("xattr" in key for h in headers for key in h) else 0)
-' "$file" || case $? in
-				1) fail "$archive records extended attributes" ;;
-				*) fail "$archive cannot be read" ;;
-			esac
-			if tar -tvzf "$file" | grep -q "[[:space:]]$USER_NAME[[:space:]]"; then
-				fail "$archive records the user name '$USER_NAME'"
+    print("cannot be read: %s" % error)
+    sys.exit(0)
+if any("xattr" in key for h in headers for key in h):
+    print("records extended attributes")
+for m in members:
+    if m.uid != 0 or m.gid != 0 or m.uname not in ("", "root") or m.gname not in ("", "root", "wheel"):
+        print("records %s as owned by %s:%s (%d:%d), not root" % (m.name, m.uname, m.gname, m.uid, m.gid))
+' "$file")
+			if [ -n "$problems" ]; then
+				printf '%s\n' "$problems" | while IFS= read -r problem; do echo "check-dist: $archive $problem" >&2; done
+				failed=1
 			fi
 			if ! tar -tvzf "$file" | grep -q "^-rwx.*$name/$exe\$"; then
 				fail "$archive: $name/$exe is not executable"

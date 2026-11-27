@@ -504,6 +504,10 @@ func TestTargetDir(t *testing.T) {
 	if _, _, err := TargetDir("/m", "%APPDATA%/devin/skills", ""); err == nil {
 		t.Errorf("want an error without APPDATA")
 	}
+	dir, stop, err = TargetDir("/m", "./%APPDATA%/devin/skills", "/appdata") // written by hand
+	if err != nil || dir != filepath.Join("/appdata", "devin", "skills") || stop != "/appdata" {
+		t.Errorf("TargetDir with './' = %s, %s, %v", dir, stop, err)
+	}
 	if runtime.GOOS == "windows" { // written with backslashes, as CleanTarget accepts them there
 		dir, stop, err = TargetDir(`C:\m`, `%APPDATA%\devin\skills`, `C:\appdata`)
 		if err != nil || dir != `C:\appdata\devin\skills` || stop != `C:\appdata` {

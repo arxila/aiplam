@@ -21,8 +21,9 @@
 # Signs the draft release that the Release workflow (.github/workflows/release.yml) created for a version, on the
 # machine that holds the Arxila release GPG key. Usage ('make release-sign' runs it with the Makefile's values):
 #
-#   scripts/sign-release.sh <version> <signing key fingerprint>
+#   PLATFORMS='<os>/<arch> ...' scripts/sign-release.sh <version> <signing key fingerprint>
 #
+# PLATFORMS lists the platforms of the archives, for scripts/check-dist.sh.
 # It downloads the draft's files, and only signs them if:
 #   - the tag v<version> points to the same commit in this clone and on GitHub (origin);
 #   - every archive and SHA256SUMS has a build provenance attestation made by the Release workflow of arxila/aiplam,
@@ -33,7 +34,8 @@
 
 set -eu
 
-[ $# -eq 2 ] || { echo "usage: $0 <version> <signing key fingerprint>" >&2; exit 2; }
+[ $# -eq 2 ] || { echo "usage: PLATFORMS='<os>/<arch> ...' $0 <version> <signing key fingerprint>" >&2; exit 2; }
+[ -n "${PLATFORMS:-}" ] || { echo "sign-release: PLATFORMS must list the platforms of the archives" >&2; exit 2; }
 VERSION=$1 SIGN_KEY=$2
 REPO=arxila/aiplam
 BINARY=aiplam

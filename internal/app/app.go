@@ -430,11 +430,16 @@ const (
 
 // removeNewConfigDir removes what a failed init wrote in the .aiplam folder it created, while it still holds the lock:
 // the .gitignore, temporary files of interrupted saves, and the lock file (see fsutil.Lock). On Windows, the lock file
-// cannot be removed while it is open: removeNewConfigDirAfter does it.
+// cannot be removed while it is open: removeNewConfigDirAfter does it. The lock file goes last: once it is removed,
+// another command can lock a new one while this init finishes; all that is left then is removing the folder, which
+// fails, leaving it, once that command has written in it.
 func removeNewConfigDir(dir string) {
-	if tmps, err := filepath.Glob(filepath.Join(dir, "*.tmp")); err == nil {
-		for _, tmp := range tmps {
-			_ = os.Remove(tmp)
+	// The folder's entries, not a pattern made from its path, which may hold characters special in patterns.
+	if items, err := os.ReadDir(dir); err == nil {
+		for _, item := range items {
+			if strings.HasSuffix(item.Name(), ".tmp") {
+				_ = os.Remove(filepath.Join(dir, item.Name()))
+			}
 		}
 	}
 	for _, name := range []string{ignoreName, lockName} {
@@ -1030,21 +1035,23 @@ func (a *App) cleanup(plan playbook.Plan) {
 // restoreProfiles saves back the profiles that a command had already saved when saving another one failed, and returns
 // the state to report: state when they were all put back, or else which ones could not be.
 func (a *App) restoreProfiles(saved []*config.Profile, state string) string {
-	var failed []string
+	var failed, show []string
 	for _, prof := range saved {
 		if err := config.SaveProfile(a.Managed, prof); err != nil {
 			failed = append(failed, fmt.Sprintf("'%s' (%v)", prof.Name, err))
+			show = append(show, "'"+a.hint("profile show "+prof.Name)+"'")
 		}
 	}
 	if len(failed) == 0 {
 		return state
 	}
-	which, keeps := "profile", "it keeps"
+	// status only shows the enabled profiles: profile show shows each one, enabled or not.
+	which, keeps, see := "profile", "it keeps", "see it with"
 	if len(failed) > 1 {
-		which, keeps = "profiles", "they keep"
+		which, keeps, see = "profiles", "they keep", "see them with"
 	}
-	return fmt.Sprintf("putting back %s %s also failed, so %s the change: %s", which, strings.Join(failed, ", "),
-		keeps, a.leftAdvice())
+	return fmt.Sprintf("putting back %s %s also failed, so %s the change (%s %s): %s", which,
+		strings.Join(failed, ", "), keeps, see, strings.Join(show, " and "), a.leftAdvice())
 }
 
 // leftAdvice says how to find what a change that could not be completed nor undone left.

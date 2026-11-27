@@ -130,10 +130,14 @@ func (a *App) cmdInit(args []string) (err error) {
 		profiles = []string{config.DefaultProfile}
 	}
 	dir := config.Dir(a.Managed)
-	_, serr := os.Lstat(dir)
-	created := errors.Is(serr, os.ErrNotExist)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
+	// Created with one call, so that of two inits at once, only one takes the folder for its own.
+	merr := os.Mkdir(dir, 0o755)
+	if merr != nil && !errors.Is(merr, os.ErrExist) {
+		return merr
+	}
+	created := merr == nil
+	if !fsutil.IsDir(dir) {
+		return fmt.Errorf("'%s' exists and is not a folder", a.pretty(dir))
 	}
 	unlock, err := a.lock()
 	if err != nil {
@@ -166,7 +170,16 @@ func (a *App) cmdInit(args []string) (err error) {
 		return fmt.Errorf("'%s' is already a managed folder: %s exists. Manage its profiles with 'aiplam profile'",
 			a.pretty(a.Managed), a.pretty(file))
 	}
+	existing, err := config.Profiles(a.Managed)
+	if err != nil {
+		return err
+	}
 	for _, profile := range profiles {
+		for _, other := range existing {
+			if strings.EqualFold(other, profile) {
+				profile = other // the same profile on a disk that ignores case: never two files for it
+			}
+		}
 		if config.ProfileExists(a.Managed, profile) {
 			// Left by an earlier setup whose configuration file was lost: overwriting it would lose its playbooks.
 			return fmt.Errorf("%s already exists, from an earlier setup of this managed folder whose %s is missing: to "+

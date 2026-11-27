@@ -552,8 +552,8 @@ func newPlaces() *places {
 
 // key returns the key of the link name in the target folder dir: its path with links resolved, in which the deepest
 // folder that exists is spelled as the first path seen to the same folder (so that two spellings of one folder, such
-// as another case on a disk that ignores it, count as one), and what follows it is in lower case when that folder's
-// disk ignores case (on Windows, all of it is, as fsutil.SamePath does).
+// as another case on a disk that ignores it, count as one), and what follows it is in lower case when names in that
+// folder are compared ignoring case (see ignoresCase).
 func (p *places) key(dir, name string) string {
 	r, ok := p.resolved[dir]
 	if !ok {
@@ -573,7 +573,7 @@ func (p *places) key(dir, name string) string {
 		}
 		parent := filepath.Dir(existing)
 		if parent == existing {
-			return linkKey(full)
+			return full
 		}
 		existing = parent
 	}
@@ -596,36 +596,45 @@ func (p *places) key(dir, name string) string {
 	if folds {
 		rest = strings.ToLower(rest)
 	}
-	return linkKey(filepath.Join(existing, rest))
+	return filepath.Join(existing, rest)
 }
 
-// ignoresCase reports whether the disk of dir (which exists) ignores case: whether the nearest of dir and its parents
-// with a name that has letters is found again with the case of those letters swapped, as the same folder.
+// ignoresCase reports whether names in dir (which exists) are compared ignoring case: whether an entry of dir with
+// letters in its name is found again with their case swapped, as the same entry. That depends on the disk of dir
+// itself (dir may be where another disk is mounted), and on Windows, on the folder. With no such entry, it asks the
+// same of dir, and then of its parents, in their own parent; when no name has letters, it answers what the system
+// usually does (on Windows and macOS, ignore case).
 func ignoresCase(dir string) bool {
-	for d := dir; filepath.Dir(d) != d; d = filepath.Dir(d) {
-		name := filepath.Base(d)
-		swapped := strings.Map(func(r rune) rune {
-			if unicode.IsUpper(r) {
-				return unicode.ToLower(r)
+	if items, err := os.ReadDir(dir); err == nil {
+		for _, item := range items {
+			if folds, ok := foundSwapped(dir, item.Name()); ok {
+				return folds
 			}
-			return unicode.ToUpper(r)
-		}, name)
-		if swapped == name {
-			continue
 		}
-		a, errA := os.Stat(d)
-		b, errB := os.Stat(filepath.Join(filepath.Dir(d), swapped))
-		return errA == nil && errB == nil && os.SameFile(a, b)
 	}
-	return false
+	for d := dir; filepath.Dir(d) != d; d = filepath.Dir(d) {
+		if folds, ok := foundSwapped(filepath.Dir(d), filepath.Base(d)); ok {
+			return folds
+		}
+	}
+	return runtime.GOOS == "windows" || runtime.GOOS == "darwin"
 }
 
-// linkKey returns path as the key of a link, ignoring case on Windows, as fsutil.SamePath does.
-func linkKey(path string) string {
-	if runtime.GOOS == "windows" {
-		return strings.ToLower(path)
+// foundSwapped reports whether the entry name of dir is found again with the case of its letters swapped, as the same
+// entry; ok is false when its name has no letters.
+func foundSwapped(dir, name string) (found, ok bool) {
+	swapped := strings.Map(func(r rune) rune {
+		if unicode.IsUpper(r) {
+			return unicode.ToLower(r)
+		}
+		return unicode.ToUpper(r)
+	}, name)
+	if swapped == name {
+		return false, false
 	}
-	return path
+	a, errA := os.Lstat(filepath.Join(dir, name))
+	b, errB := os.Lstat(filepath.Join(dir, swapped))
+	return errA == nil && errB == nil && os.SameFile(a, b), true
 }
 
 // sameFolder reports whether two paths lead to the same place once links are resolved, so that a link made through
@@ -694,6 +703,10 @@ func missingDirs(dir, stop string) []string {
 func removeDirs(dirs []string) error {
 	var first error
 	for _, dir := range dirs {
+		// Only a folder: not a link (or anything else) found in its place.
+		if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
+			continue
+		}
 		entries, err := os.ReadDir(dir)
 		if errors.Is(err, fs.ErrNotExist) || (err == nil && len(entries) > 0) {
 			continue

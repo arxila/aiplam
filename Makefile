@@ -55,7 +55,7 @@ vet:
 # files (which the Apache License requires to go with every copy), a SHA256SUMS file, and its detached signature
 # SHA256SUMS.asc. When HEAD is tagged, the tag must match the version. scripts/check-dist.sh then checks that the
 # archives hold exactly these files, and nothing of the machine that built them, and that SIGN_KEY signed SHA256SUMS.
-dist: clean
+dist:
 	@[ -n "$(VERSION)" ] || { echo "cannot read the version from internal/app/app.go: run 'make VERSION=x.y.z dist'" >&2; exit 1; }
 	@for tag in $$(git tag --points-at HEAD 'v*' 2>/dev/null); do \
 		[ "$$tag" = "v$(VERSION)" ] || { echo "HEAD is tagged $$tag, but the version is $(VERSION)" >&2; exit 1; }; \
@@ -65,6 +65,7 @@ dist: clean
 	@[ -z "$(SIGN_KEY)" ] || gpg --list-secret-keys "$(SIGN_KEY)" >/dev/null 2>&1 || \
 		{ echo "cannot sign: gpg is not installed, or has no secret key $(SIGN_KEY)" >&2; \
 		echo "(for a build that is not going to be published, run 'make SIGN_KEY= dist')" >&2; exit 1; }
+	@rm -rf $(DIST) $(BINARY) # only once the checks above passed
 	@mkdir -p $(DIST)
 	@for p in $(PLATFORMS); do \
 		os=$${p%/*}; arch=$${p#*/}; ext=; [ $$os = windows ] && ext=.exe; \
@@ -89,13 +90,13 @@ dist: clean
 	else \
 		echo "SHA256SUMS is not signed (SIGN_KEY is empty): it must be signed before it is published"; \
 	fi
-	@./scripts/check-dist.sh $(DIST) $(BINARY) $(VERSION) $(SIGN_KEY)
+	@PLATFORMS="$(PLATFORMS)" ./scripts/check-dist.sh $(DIST) $(BINARY) $(VERSION) $(SIGN_KEY)
 
 # Signs the draft release that the Release workflow created for VERSION, after checking its attestations and archives
 # (see scripts/sign-release.sh). Publishing the draft is left to the maintainer.
 release-sign:
 	@[ -n "$(VERSION)" ] && [ -n "$(SIGN_KEY)" ] || { echo "release-sign needs VERSION and SIGN_KEY" >&2; exit 1; }
-	./scripts/sign-release.sh $(VERSION) $(SIGN_KEY)
+	PLATFORMS="$(PLATFORMS)" ./scripts/sign-release.sh $(VERSION) $(SIGN_KEY)
 
 clean:
 	rm -rf $(DIST) $(BINARY)

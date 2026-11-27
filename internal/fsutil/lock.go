@@ -36,7 +36,8 @@ func Lock(path string) (unlock func(), err error) {
 	if fi, err := os.Lstat(path); err == nil && !fi.Mode().IsRegular() {
 		return nil, &os.PathError{Op: "lock", Path: path, Err: errors.New("not a regular file")}
 	}
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
+	// Opened without following a link (on Linux and macOS), even one put there since it was checked.
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|openNoFollow, 0o644)
 	if err != nil {
 		return nil, err
 	}

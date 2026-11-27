@@ -25,6 +25,9 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// openNoFollow is not available on Windows: Lock checks what is at the path before opening it.
+const openNoFollow = 0
+
 func lockFile(f *os.File) error {
 	err := windows.LockFileEx(windows.Handle(f.Fd()),
 		windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, new(windows.Overlapped))

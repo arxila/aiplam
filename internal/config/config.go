@@ -264,7 +264,8 @@ func RelFolder(managed, dir string) (string, error) {
 // aiplam never removes empty folders after unlinking (managed, or appData for a folder under AppData). appData is the
 // value of the APPDATA environment variable.
 func TargetDir(managed, folder, appData string) (dir, stop string, err error) {
-	folder = toSlash(folder) // as CleanTarget reads it: a folder written by hand may have backslashes on Windows
+	// As CleanTarget reads it: a folder written by hand may have backslashes on Windows, or start with './'.
+	folder = path.Clean(toSlash(folder))
 	if rest, ok := strings.CutPrefix(folder, AppData+"/"); ok {
 		if appData == "" {
 			return "", "", fmt.Errorf("target folder '%s' needs the APPDATA environment variable, which is not set",
