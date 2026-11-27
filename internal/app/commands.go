@@ -146,6 +146,12 @@ func (a *App) cmdInit(args []string) (err error) {
 		}
 		return err
 	}
+	if created {
+		// Another init may have taken the lock first, and set the folder up meanwhile: it is no longer this one's.
+		_, cerr := os.Lstat(config.ConfigFile(a.Managed))
+		profiles, perr := config.Profiles(a.Managed)
+		created = errors.Is(cerr, os.ErrNotExist) && perr == nil && len(profiles) == 0
+	}
 	// A failed init removes the .aiplam folder it created, so that the folder does not become a managed folder without
 	// configuration (which would shadow the managed folders above it). Only the init that holds the lock does it, and
 	// while it holds it, so that a concurrent one never removes the files of another; only the lock file (on Windows)
@@ -166,7 +172,7 @@ func (a *App) cmdInit(args []string) (err error) {
 		}()
 	}
 	file := config.ConfigFile(a.Managed)
-	if _, err := os.Stat(file); err == nil {
+	if _, err := os.Lstat(file); err == nil { // anything there, even a broken link
 		return fmt.Errorf("'%s' is already a managed folder: %s exists. Manage its profiles with 'aiplam profile'",
 			a.pretty(a.Managed), a.pretty(file))
 	}

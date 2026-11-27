@@ -766,43 +766,75 @@ func TestRevertReportsFoldersLeft(t *testing.T) {
 	}
 	s := newSandbox(t)
 	parent := filepath.Join(s.root, "parent")
-	made, full := filepath.Join(parent, "made"), filepath.Join(parent, "full")
+	empty, full := filepath.Join(parent, "made"), filepath.Join(parent, "full")
 	s.file("parent/full/kept")
-	if err := os.MkdirAll(made, 0o755); err != nil {
+	if err := os.MkdirAll(empty, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := Revert([]Action{{Kind: Create, Link: filepath.Join(full, "x"), madeDirs: []string{full}}}); err != nil {
+	kept := []Action{{Kind: Create, Link: filepath.Join(full, "x"), madeDirs: made([]string{full})}}
+	if err := Revert(kept); err != nil {
 		t.Errorf("a folder with something in it: %v", err)
 	}
 	if err := os.Chmod(parent, 0o555); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
-	if err := Revert([]Action{{Kind: Create, Link: filepath.Join(made, "x"), madeDirs: []string{made}}}); err == nil {
+	madeDirs := made([]string{empty})
+	if err := Revert([]Action{{Kind: Create, Link: filepath.Join(empty, "x"), madeDirs: madeDirs}}); err == nil {
 		t.Error("an empty folder that cannot be removed: no error")
+	}
+	// A folder that cannot even be inspected: an error too.
+	if err := os.Chmod(parent, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeDirs(madeDirs); err == nil {
+		t.Error("a folder that cannot be inspected: no error")
 	}
 }
 
 // TestRemoveDirsOnlyFolders checks that undoing a creation removes only the folders it made: not a link found in the
-// place of one, nor what it leads to.
+// place of one, nor what it leads to, nor another folder put in its place.
 func TestRemoveDirsOnlyFolders(t *testing.T) {
 	s := newSandbox(t)
 	elsewhere := filepath.Join(s.root, "elsewhere")
-	if err := os.MkdirAll(elsewhere, 0o755); err != nil {
+	path := filepath.Join(s.root, "made")
+	for _, dir := range []string{elsewhere, path} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dirs := made([]string{path})
+
+	// A link in its place (a junction on Windows, which needs no rights).
+	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	made := filepath.Join(s.root, "made")
-	if err := os.Symlink(elsewhere, made); err != nil {
+	if err := fsutil.CreateLink(path, elsewhere); err != nil {
 		t.Fatal(err)
 	}
-	if err := removeDirs([]string{made}); err != nil {
+	if err := removeDirs(dirs); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Lstat(made); err != nil {
-		t.Error("the link in the folder's place was removed")
+	if _, err := os.Lstat(path); err != nil || !fsutil.IsDir(elsewhere) {
+		t.Fatalf("the link in the folder's place, or what it leads to, was removed: %v", err)
 	}
-	if !fsutil.IsDir(elsewhere) {
-		t.Error("the folder the link leads to was removed")
+
+	// Another (empty) folder in its place, made while the first one still existed, so that it is another folder.
+	other := filepath.Join(s.root, "other")
+	if err := os.Mkdir(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsutil.RemoveLink(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(other, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeDirs(dirs); err != nil {
+		t.Fatal(err)
+	}
+	if !fsutil.IsDir(path) {
+		t.Fatal("another folder in the folder's place was removed")
 	}
 }
 
@@ -817,5 +849,39 @@ func TestIgnoresCase(t *testing.T) {
 	want := errA == nil && errB == nil && os.SameFile(a, b)
 	if got := ignoresCase(dir); got != want {
 		t.Errorf("ignoresCase = %v, want %v (as the folder compares its names)", got, want)
+	}
+}
+
+// TestUnrelatedLinksInTargetFolders checks that a link in a target folder that cannot be resolved, but whose name no
+// playbook's link can have, does not stop anything.
+func TestUnrelatedLinksInTargetFolders(t *testing.T) {
+	s := newSandbox(t)
+	s.skill("x-a")
+	g := s.group("p", pb("x", nil))
+	s.apply(s.transition(nil, []Group{g}, scopeOf(g)))
+	dir := s.link(".agents/skills")
+	if err := os.Symlink("loop", filepath.Join(dir, "loop")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "loop")+"/../y", filepath.Join(dir, "notes")); err != nil {
+		t.Fatal(err)
+	}
+	if plan := s.transition([]Group{g}, nil, scopeOf(g)); actions(plan, Remove) != "x-a" {
+		t.Errorf("removals: %q", actions(plan, Remove))
+	}
+}
+
+// TestIgnoresCaseWithBothNames checks that a folder holding two names that differ only in case tells them apart, even
+// when they are two names of one file (hard links).
+func TestIgnoresCaseWithBothNames(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(filepath.Join(dir, "a"), filepath.Join(dir, "A")); err != nil {
+		t.Skip("the disk does not tell case apart: " + err.Error())
+	}
+	if ignoresCase(dir) {
+		t.Error("a folder holding both a and A ignores case")
 	}
 }

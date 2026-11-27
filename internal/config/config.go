@@ -445,9 +445,11 @@ func Profiles(managed string) ([]string, error) {
 	return profiles, nil
 }
 
-// ProfileExists reports whether a profile's file exists.
+// ProfileExists reports whether a profile's file exists: anything at its path, even a broken link (which no command
+// may then replace, see save).
 func ProfileExists(managed, profile string) bool {
-	return fsutil.IsFile(ProfileFile(managed, profile))
+	_, err := os.Lstat(ProfileFile(managed, profile))
+	return err == nil
 }
 
 // ProfileName returns the name of the file of a profile designated by name: name itself when a file has exactly that
@@ -591,6 +593,12 @@ func save(file string, v any, header string) error {
 	dir := filepath.Dir(file)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
+	}
+	// Only a regular file is replaced: never a link (which saving would replace with a file, leaving what it leads to
+	// behind), nor anything else.
+	if info, err := os.Lstat(file); err == nil && !info.Mode().IsRegular() {
+		return fmt.Errorf("'%s' is not a regular file (it may be a link): aiplam only writes regular files in %s; "+
+			"replace it with the file itself", file, DirName)
 	}
 	var buf bytes.Buffer
 	buf.WriteString(header)

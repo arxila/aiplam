@@ -240,7 +240,7 @@ type Action struct {
 	// Others describe the other playbooks of a Duplicate or SamePlaybook conflict.
 	Others []string
 	// madeDirs are the folders that Apply created for a Create's link, deepest first, which undoing it removes again.
-	madeDirs []string
+	madeDirs []madeDir
 	// linkKind is, for a Remove, the kind of the link removed, so that undoing it makes the same kind of link again.
 	linkKind fsutil.LinkKind
 }
@@ -430,8 +430,8 @@ func Transition(from, to []Group, scope map[Key]bool) (Plan, error) {
 				for _, de := range dirEntries {
 					name := de.Name()
 					link, k := filepath.Join(t.Dir, name), key(t.Dir, name)
-					if removed[k] || transferred[k] {
-						continue
+					if removed[k] || transferred[k] || !config.MatchFormat(e.Format(t.Kind), name) {
+						continue // a name the playbook's links cannot have: not inspected, whatever it is
 					}
 					state, current, err := fsutil.Inspect(link)
 					if err != nil {
@@ -599,13 +599,23 @@ func (p *places) key(dir, name string) string {
 	return filepath.Join(existing, rest)
 }
 
-// ignoresCase reports whether names in dir (which exists) are compared ignoring case: whether an entry of dir with
-// letters in its name is found again with their case swapped, as the same entry. That depends on the disk of dir
-// itself (dir may be where another disk is mounted), and on Windows, on the folder. With no such entry, it asks the
-// same of dir, and then of its parents, in their own parent; when no name has letters, it answers what the system
-// usually does (on Windows and macOS, ignore case).
+// ignoresCase reports whether names in dir (which exists) are compared ignoring case: not when two of its entries have
+// names that differ only in case; else, whether an entry of dir with letters in its name is found again with their
+// case swapped, as the same entry (two names of one file, hard links, are told apart by the listing first). That
+// depends on the disk of dir itself (dir may be where another disk is mounted), and on Windows, on the folder. With
+// no such entry, it asks the same of dir, and then of its parents, in their own parent; when no name has letters, it
+// answers what the system usually does (on Windows and macOS, ignore case). Those answers can be wrong for an empty
+// folder whose case rules differ from its parent's: links that then collide fail when made, and are undone.
 func ignoresCase(dir string) bool {
 	if items, err := os.ReadDir(dir); err == nil {
+		seen := map[string]bool{}
+		for _, item := range items {
+			lower := strings.ToLower(item.Name())
+			if seen[lower] {
+				return false // two entries whose names differ only in case: the folder tells them apart
+			}
+			seen[lower] = true
+		}
 		for _, item := range items {
 			if folds, ok := foundSwapped(dir, item.Name()); ok {
 				return folds
@@ -657,8 +667,10 @@ func Apply(plan Plan, report func(Action)) error {
 		var err error
 		switch a.Kind {
 		case Create:
-			a.madeDirs = missingDirs(filepath.Dir(a.Link), a.Stop)
-			if err = os.MkdirAll(filepath.Dir(a.Link), 0o755); err == nil {
+			missing := missingDirs(filepath.Dir(a.Link), a.Stop)
+			err = os.MkdirAll(filepath.Dir(a.Link), 0o755)
+			a.madeDirs = made(missing) // also those made before failing
+			if err == nil {
 				err = fsutil.CreateLink(a.Link, a.Source)
 			}
 		case Remove:
@@ -698,16 +710,41 @@ func missingDirs(dir, stop string) []string {
 	return dirs
 }
 
-// removeDirs removes the folders of dirs (deepest first) that are empty, and returns the first error removing one of
-// them. Folders with something in them are kept: that is no error.
-func removeDirs(dirs []string) error {
-	var first error
+// madeDir is a folder that Apply made, as it found it then, so that only that folder is ever removed.
+type madeDir struct {
+	path string
+	info os.FileInfo
+}
+
+// made returns the folders of dirs that exist now, as madeDirs.
+func made(dirs []string) []madeDir {
+	var out []madeDir
 	for _, dir := range dirs {
-		// Only a folder: not a link (or anything else) found in its place.
-		if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
+		if info, err := os.Lstat(dir); err == nil && info.IsDir() {
+			out = append(out, madeDir{dir, info})
+		}
+	}
+	return out
+}
+
+// removeDirs removes the folders of dirs (deepest first) that are empty, and returns the first error removing one of
+// them, or finding out whether it can. Folders with something in them are kept, and so is anything found in the place
+// of one that is not that same folder (a link, or another folder): that is no error.
+func removeDirs(dirs []madeDir) error {
+	var first error
+	for _, d := range dirs {
+		dir := d.path
+		info, err := os.Lstat(dir)
+		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
-		entries, err := os.ReadDir(dir)
+		if err == nil && (!info.IsDir() || !os.SameFile(info, d.info)) {
+			continue
+		}
+		var entries []os.DirEntry
+		if err == nil {
+			entries, err = os.ReadDir(dir)
+		}
 		if errors.Is(err, fs.ErrNotExist) || (err == nil && len(entries) > 0) {
 			continue
 		}

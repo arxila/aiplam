@@ -724,6 +724,9 @@ validates:
 - `.lock`, which keeps two commands from changing the managed folder at once, and a `.gitignore` that keeps `.lock`
   (and the temporary files of interrupted saves) out of git when the `.aiplam` folder is committed.
 
+These files must be regular files: aiplam reads them through links, but never writes through one, so a command that
+would change a file that is a link (or replace a broken one) fails, and changes nothing.
+
 Paths in the profile files:
 
 - target folders are relative to the managed folder;

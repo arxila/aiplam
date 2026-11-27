@@ -23,7 +23,7 @@
 #   PLATFORMS='<os>/<arch> ...' scripts/check-dist.sh <dist folder> <binary name> <version> [<signing key fingerprint>]
 #
 # PLATFORMS lists the platforms there must be an archive for, and no other ('make dist' and 'make release-sign' give
-# the Makefile's).
+# the Makefile's). The folder must hold nothing else than the archives, SHA256SUMS and SHA256SUMS.asc.
 # Each archive (aiplam-<version>-<os>-<arch>.tar.gz, or .zip for Windows) must hold exactly its top folder, named like
 # the archive, with the executable (executable, in the .tar.gz), README.md, LICENSE.txt and NOTICE.txt: nothing else,
 # so no files of the building machine (macOS's "._*" and .DS_Store files), no agent files (AGENTS.md, CLAUDE.md,
@@ -51,6 +51,14 @@ expected=$(for p in $PLATFORMS; do
 	[ "$os" = windows ] && ext=zip
 	echo "$BINARY-$VERSION-$os-$arch.$ext"
 done | sort)
+# Nothing else than the archives, SHA256SUMS and its signature: no other file can be published with them.
+release_files=" $(echo $archives) SHA256SUMS SHA256SUMS.asc "
+for entry in $(cd "$DIST" && ls -A); do
+	case $release_files in
+		*" $entry "*) ;;
+		*) fail "$DIST holds '$entry', which is not part of a release" ;;
+	esac
+done
 [ "$(printf '%s\n' $archives | sort)" = "$expected" ] ||
 	fail "the archives are not exactly one per platform:$(printf '\n    %s' $archives)" \
 		"(expected:$(printf '\n    %s' $expected))"

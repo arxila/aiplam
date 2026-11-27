@@ -65,6 +65,9 @@ dist:
 	@[ -z "$(SIGN_KEY)" ] || gpg --list-secret-keys "$(SIGN_KEY)" >/dev/null 2>&1 || \
 		{ echo "cannot sign: gpg is not installed, or has no secret key $(SIGN_KEY)" >&2; \
 		echo "(for a build that is not going to be published, run 'make SIGN_KEY= dist')" >&2; exit 1; }
+	@for tool in go tar gzip zip unzip python3; do \
+		command -v $$tool >/dev/null || { echo "$$tool is needed to build the release archives" >&2; exit 1; }; \
+	done
 	@rm -rf $(DIST) $(BINARY) # only once the checks above passed
 	@mkdir -p $(DIST)
 	@for p in $(PLATFORMS); do \

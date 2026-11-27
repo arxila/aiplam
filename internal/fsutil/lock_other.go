@@ -24,7 +24,7 @@ import "os"
 
 // Systems without file locks known to aiplam: running two aiplam commands at once is not prevented.
 
-const openNoFollow = 0
+func openLock(path string) (*os.File, error) { return os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644) }
 
 func lockFile(*os.File) error { return nil }
 

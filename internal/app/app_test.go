@@ -866,6 +866,52 @@ func TestUndoReportsEverything(t *testing.T) {
 	}
 }
 
+// TestConfigurationFileLinks checks that configuration files that are links are read, but never replaced: not even a
+// broken one.
+func TestConfigurationFileLinks(t *testing.T) {
+	e := newEnv(t)
+	isLink := func(path string) bool {
+		info, err := os.Lstat(path)
+		return err == nil && info.Mode()&os.ModeSymlink != 0
+	}
+
+	// A broken link where a profile's file goes: init takes it for an existing profile.
+	project := e.mkdir(filepath.Join(e.root, "project"))
+	broken := filepath.Join(e.mkdir(filepath.Join(project, config.DirName)), "default.yaml")
+	if err := os.Symlink(filepath.Join(e.root, "gone.yaml"), broken); err != nil {
+		t.Fatal(err)
+	}
+	e.mustFail(ExitFailure, []string{"already exists"}, "init", project, "-a", "standard")
+	if !isLink(broken) {
+		t.Fatal("the broken link was replaced")
+	}
+
+	// A profile file that is a link to a file: commands that read it work, those that would change it fail.
+	other := e.mkdir(filepath.Join(e.root, "other"))
+	e.mustRun(ExitOK, "init", other, "-a", "standard")
+	file := config.ProfileFile(other, "default")
+	shared := filepath.Join(e.mkdir(filepath.Join(other, "shared")), "default.yaml")
+	if err := os.Rename(file, shared); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..", "shared", "default.yaml"), file); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(shared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.app.Cwd = other
+	e.mustRun(ExitOK, "status")
+	pb := e.playbook("pb", "x-a")
+	e.mustFail(ExitFailure, []string{"is not a regular file"}, "add", "x", pb)
+	after, err := os.ReadFile(shared)
+	if !isLink(file) || err != nil || string(after) != string(before) {
+		t.Fatalf("the profile file or its link changed: link %v, %v", isLink(file), err)
+	}
+	e.assertMissing(filepath.Join(other, ".agents", "skills", "x-a"))
+}
+
 func TestSandbox(t *testing.T) {
 	e := newEnv(t)
 	outside := e.mkdir(filepath.Join(e.root, "outside"))

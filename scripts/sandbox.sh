@@ -31,6 +31,11 @@
 
 set -eu
 
+# Nothing from the caller's environment that changes what git does (another repository, templates, settings): not for
+# the example repositories, nor in the sandbox's shell.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_TEMPLATE_DIR \
+  GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_CEILING_DIRECTORIES 2>/dev/null || true
+
 repo=$(cd "$(dirname "$0")/.." && pwd)
 bin=${1:-$repo/aiplam}
 [ -x "$bin" ] || { echo "aiplam binary not found at $bin: run 'make build' first" >&2; exit 1; }
@@ -60,7 +65,7 @@ g() {
 if command -v git >/dev/null 2>&1; then
   lettuce=$sandbox/playbooks/aiplam-lettuce-playbook
   mv "$lettuce/skills/aiplam-lettuce-data-report" "$sandbox/aiplam-lettuce-data-report"
-  g "$lettuce" init -q -b main
+  g "$lettuce" init -q -b main --template=
   g "$lettuce" add -A
   g "$lettuce" commit -q -m "Lettuce playbook 1.0.0"
   g "$lettuce" tag v1.0.0
@@ -70,7 +75,7 @@ if command -v git >/dev/null 2>&1; then
   g "$lettuce" tag v1.1.0
 
   tomato=$sandbox/playbooks/aiplam-tomato-playbook
-  g "$tomato" init -q -b main
+  g "$tomato" init -q -b main --template=
   g "$tomato" add -A
   g "$tomato" commit -q -m "Tomato playbook"
 else
