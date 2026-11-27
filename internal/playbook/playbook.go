@@ -765,6 +765,9 @@ func made(dirs []string) ([]madeDir, error) {
 		info, err := os.Lstat(dir)
 		switch {
 		case err == nil && info.IsDir():
+			// On Windows, os.SameFile reads a file's identity the first time it is asked, from its path, and keeps it:
+			// asking now keeps the identity of the folder made, not of whatever is at its path when it is compared.
+			os.SameFile(info, info)
 			out = append(out, madeDir{dir, info})
 		case err != nil && !errors.Is(err, fs.ErrNotExist) && first == nil:
 			first = err
