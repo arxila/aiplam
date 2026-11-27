@@ -19,6 +19,7 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -92,8 +93,12 @@ func (a *App) cmdList(args []string) error {
 			scope[e.Key()] = true
 		}
 	}
+	// What cannot be read is reported, never shown as nothing linked (status tells more).
+	failed := false
 	plan, err := a.transition(st.enabled, st.enabled, scope)
 	if err != nil {
+		a.warnf("%s", err)
+		failed = true
 		plan = playbook.Plan{}
 	}
 	count := func(kind playbook.ActionKind, profile string) int {
@@ -112,6 +117,10 @@ func (a *App) cmdList(args []string) error {
 		for _, t := range s.targets {
 			items, err := os.ReadDir(t.Dir)
 			if err != nil {
+				if !errors.Is(err, os.ErrNotExist) {
+					a.warnf("cannot read target folder '%s': %s", a.pretty(t.Dir), err)
+					failed = true
+				}
 				continue
 			}
 			var rows []listRow
@@ -170,6 +179,9 @@ func (a *App) cmdList(args []string) error {
 	if len(plan.Skipped()) > 0 {
 		a.printf("\n%d artifact(s) are not linked, as they are files and, on Windows, links to files need developer "+
 			"mode or administrator rights ('%s' lists them).\n", len(plan.Skipped()), a.hint("status"))
+	}
+	if failed {
+		return errSilent
 	}
 	return nil
 }

@@ -701,7 +701,7 @@ func (a *App) newProfileState(prof *config.Profile, enabled bool) (*profileState
 // checkNewTargets fails when a target folder of a profile being created leads where target folders must not, once
 // links are resolved (see newProfileState), so that a profile is never saved that later commands refuse. Those that
 // cannot be located yet (under %APPDATA%, while APPDATA is not set) are checked when they are used.
-func (a *App) checkNewTargets(targets config.Targets) error {
+func (a *App) checkNewTargets(profile string, targets config.Targets) error {
 	for _, t := range targets {
 		dir, stop, err := config.TargetDir(a.Managed, t.Folder, a.AppData)
 		if err != nil {
@@ -714,7 +714,14 @@ func (a *App) checkNewTargets(targets config.Targets) error {
 			return err
 		}
 	}
-	return nil
+	// And, as loading checks them, no part of their paths is a file.
+	s := &profileState{name: profile}
+	for _, t := range targets {
+		if dir, stop, err := config.TargetDir(a.Managed, t.Folder, a.AppData); err == nil {
+			s.targets = append(s.targets, playbook.Target{Kind: t.Kind, Folder: t.Folder, Dir: dir, Stop: stop})
+		}
+	}
+	return a.checkTargetFolders(s)
 }
 
 // checkNotConfig fails when dir, a target folder (as folder in its profile), once links are resolved, is the managed

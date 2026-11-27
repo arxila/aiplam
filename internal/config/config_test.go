@@ -541,3 +541,35 @@ func TestReadmeTemplates(t *testing.T) {
 		t.Fatalf("README lists the templates as %s, want %s", got, strings.Join(want, ","))
 	}
 }
+
+// TestCheckWritableLinks checks which links to configuration files saving accepts.
+func TestCheckWritableLinks(t *testing.T) {
+	managed := fsutil.Canonical(t.TempDir())
+	if err := SaveConfig(managed, &Config{}); err != nil {
+		t.Fatal(err)
+	}
+	inside := filepath.Join(managed, "dotfiles", "p.yaml")
+	if err := os.MkdirAll(filepath.Dir(inside), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(inside, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for target, ok := range map[string]bool{
+		inside: true,
+		filepath.Join(managed, "dotfiles", "missing.yaml"):   false, // a link that leads nowhere for now
+		filepath.Join(filepath.Dir(managed), "outside.yaml"): false,
+	} {
+		link := ProfileFile(managed, "p")
+		_ = os.Remove(link)
+		if err := os.Symlink(target, link); err != nil {
+			if runtime.GOOS == "windows" {
+				t.Skip("symbolic links need developer mode or administrator rights on Windows")
+			}
+			t.Fatal(err)
+		}
+		if err := CheckWritable(managed, link); (err == nil) != ok {
+			t.Errorf("link to %s: %v", target, err)
+		}
+	}
+}

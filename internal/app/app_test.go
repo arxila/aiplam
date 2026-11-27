@@ -883,6 +883,113 @@ func TestNewTargetFoldersCheckedOnDisk(t *testing.T) {
 	}
 }
 
+// TestLinkMadeRedirectsAnotherTarget checks that a link made by a command cannot lead a later link of the same command
+// outside the managed folder: here, the rules target folder is a link into the skills one, where a skill's link (to
+// a folder of the playbook) is made first.
+func TestLinkMadeRedirectsAnotherTarget(t *testing.T) {
+	e := newEnv(t)
+	project := e.mkdir(filepath.Join(e.root, "project"))
+	if err := symlink(t, filepath.Join("a", "x-dir", "sub"), filepath.Join(project, "b")); err != nil {
+		t.Fatal(err)
+	}
+	e.mustRun(ExitOK, "init", project, "-f", "skills:a,rules:b")
+	e.app.Cwd = project
+	pb := e.playbook("pb", "x-dir")
+	e.mkdir(filepath.Join(pb, "skills", "x-dir", "sub"))
+	e.file("pb/rules/x-r.md")
+	e.mustFail(ExitFailure, []string{"now leads outside", "undone"}, "add", "x", pb)
+	e.assertMissing(filepath.Join(pb, "skills", "x-dir", "sub", "x-r.md"))
+	e.assertMissing(filepath.Join(project, "a", "x-dir"))
+}
+
+// TestUnreadableMovedPlaybookFolderPlainLink checks the same as TestUnreadableMovedPlaybookFolder for a link whose
+// target holds no '..' (as one made by hand, or for a playbook that was inside its target folder).
+func TestUnreadableMovedPlaybookFolderPlainLink(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a folder the current user cannot search")
+	}
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init", "-u", "-a", "standard")
+	pb := e.playbook("pb", "x-a")
+	e.mustRun(ExitOK, "add", "x", pb, "-u")
+	link := filepath.Join(e.homeSkills(), "x-a")
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := symlink(t, filepath.Join(pb, "skills", "x-a"), link); err != nil {
+		t.Fatal(err)
+	}
+	e.mustRun(ExitOK, "status", "-u")
+	moved := filepath.Join(e.root, "moved")
+	if err := os.Rename(pb, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := symlink(t, moved, pb); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(moved, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(moved, 0o755) })
+	e.mustFail(ExitFailure, []string{"cannot tell whether", "is a link of playbook x"}, "profile", "disable", "default",
+		"-u")
+	if _, err := os.Lstat(link); err != nil {
+		t.Fatalf("the link was removed: %v", err)
+	}
+}
+
+// TestProfileLinkIntoNestedManagedFolder checks that a profile file cannot be a link to another managed folder's
+// profile: that folder's commands use it as theirs.
+func TestProfileLinkIntoNestedManagedFolder(t *testing.T) {
+	e := newEnv(t)
+	parent := e.mkdir(filepath.Join(e.root, "parent"))
+	nested := e.mkdir(filepath.Join(parent, "nested"))
+	e.mustRun(ExitOK, "init", parent, "-a", "standard")
+	e.mustRun(ExitOK, "init", nested, "-a", "standard")
+	file := config.ProfileFile(parent, "default")
+	if err := os.Remove(file); err != nil {
+		t.Fatal(err)
+	}
+	if err := symlink(t, filepath.Join("..", "nested", config.DirName, "default.yaml"), file); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(config.ProfileFile(nested, "default"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.app.Cwd = parent
+	e.mustFail(ExitFailure, []string{"configuration of the managed folder"}, "add", "x", e.playbook("pb", "x-a"))
+	if after, err := os.ReadFile(config.ProfileFile(nested, "default")); err != nil || string(after) != string(before) {
+		t.Fatalf("the nested managed folder's profile changed: %v", err)
+	}
+}
+
+// TestListReportsUnreadableTargets checks that list reports a target folder it cannot read, instead of showing
+// nothing linked.
+func TestListReportsUnreadableTargets(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a folder the current user cannot read")
+	}
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init", "-u", "-a", "standard")
+	e.mustRun(ExitOK, "add", "x", e.playbook("pb", "x-a"), "-u")
+	if err := os.Chmod(e.homeSkills(), 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(e.homeSkills(), 0o755) })
+	e.mustFail(ExitFailure, []string{"cannot read target folder '~/.agents/skills'"}, "list", "-u")
+}
+
+// TestNewTargetFoldersBelowFiles checks that a profile is not created with a target folder below a file.
+func TestNewTargetFoldersBelowFiles(t *testing.T) {
+	e := newEnv(t)
+	project := e.mkdir(filepath.Join(e.root, "project"))
+	e.file("project/t")
+	e.mustFail(ExitFailure, []string{"'" + filepath.Join(project, "t") + "' exists and is not a folder"}, "init",
+		project, "-f", "skills:t/skills")
+	e.assertMissing(config.ConfigFile(project))
+}
+
 // TestRemoveBrokenProfileInAnotherCase checks that removing a profile whose file is a broken link, named in another
 // case on a disk that ignores case, disables it too.
 func TestRemoveBrokenProfileInAnotherCase(t *testing.T) {

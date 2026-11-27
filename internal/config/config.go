@@ -601,8 +601,9 @@ func CheckWritable(managed, file string) error {
 
 // writePath returns the file that saving file writes: file itself when it is a regular file, or nothing is there; or,
 // when it is a link (as dotfiles managers such as GNU Stow, dotbot or rcm make them), the file it leads to, so that
-// the link stays, as long as that file is inside the managed folder, where aiplam keeps everything it writes, and is
-// a regular file (or does not exist yet). Anything else is refused.
+// the link stays, as long as that file is inside the managed folder, where aiplam keeps everything it writes, is a
+// regular file that exists (a link that leads nowhere for now may have lost what it went through), and is not a file
+// of another managed folder's configuration. Anything else is refused.
 func writePath(managed, file string) (string, error) {
 	info, err := os.Lstat(file)
 	switch {
@@ -628,10 +629,32 @@ func writePath(managed, file string) (string, error) {
 			"inside it; keep the file it leads to inside the managed folder, or replace the link with the file itself",
 			file, managed, target)
 	}
-	if info, err := os.Stat(target); err == nil && !info.Mode().IsRegular() {
-		return "", fmt.Errorf("'%s' is a link to '%s', which is not a regular file", file, target)
+	if info, err := os.Stat(target); err != nil || !info.Mode().IsRegular() {
+		return "", fmt.Errorf("'%s' is a link to '%s', which is not a regular file that exists", file, target)
+	}
+	if err := otherConfiguration(managed, target); err != nil {
+		return "", fmt.Errorf("'%s' is a link to '%s': %w", file, target, err)
 	}
 	return target, nil
+}
+
+// otherConfiguration fails when target lies in the configuration folder of another managed folder (a folder nested in
+// managed, with a configuration file of its own), whose commands use it as theirs. A configuration folder without one
+// is not another managed folder's (a dotfiles folder holding profiles, in GNU Stow's layout), and neither is one whose
+// configuration file is managed's own (the dotfiles folder that managed's configuration files are links to).
+func otherConfiguration(managed, target string) error {
+	dir := filepath.Dir(target)
+	if !strings.EqualFold(filepath.Base(dir), DirName) {
+		return nil
+	}
+	otherConf, err := os.Stat(filepath.Join(dir, ConfigName+FileExt))
+	if err != nil {
+		return nil
+	}
+	if ownConf, err := os.Stat(ConfigFile(managed)); err == nil && os.SameFile(ownConf, otherConf) {
+		return nil
+	}
+	return fmt.Errorf("it is a file of the configuration of the managed folder '%s'", filepath.Dir(dir))
 }
 
 func save(managed, file string, v any, header string) error {
@@ -653,13 +676,24 @@ func save(managed, file string, v any, header string) error {
 	if err := enc.Close(); err != nil {
 		return err
 	}
-	// The new content goes to a file next to it (next to the file a link leads to, which so stays a link), which then
-	// replaces it: a crash leaves either the old file or the new one, complete. The temporary file is created with the
-	// usual permissions (0644 minus the umask), unlike os.CreateTemp's 0600, and then given those of the file it
-	// replaces, if any, so that a file made private stays so. Its name includes the process id, so that concurrent runs
-	// do not share it. A file with that name can only be left by a process that crashed (with a process id since
-	// reused): it is replaced.
-	tmpName := fmt.Sprintf("%s.%d.tmp", file, os.Getpid())
+	// The new content goes to a temporary file, which then replaces the file: a crash leaves either the old file or the
+	// new one, complete. The temporary file is in the .aiplam folder (whose .gitignore covers such files), also when
+	// file is the file a link leads to (which so stays a link) elsewhere; but next to that file when it cannot be moved
+	// from there (another disk).
+	data := buf.Bytes()
+	err = replace(filepath.Join(Dir(managed), fmt.Sprintf("%s.%d.tmp", filepath.Base(file), os.Getpid())), file, data)
+	if err != nil && filepath.Dir(file) != Dir(managed) {
+		err = replace(fmt.Sprintf("%s.%d.tmp", file, os.Getpid()), file, data)
+	}
+	return err
+}
+
+// replace writes data to the temporary file tmpName and moves it to file. The temporary file is created with the usual
+// permissions (0644 minus the umask), unlike os.CreateTemp's 0600, and then given those of the file it replaces, if
+// any, so that a file made private stays so. Its name includes the process id, so that concurrent runs do not share
+// it: a file with that name can only be left by a process that crashed (with a process id since reused), and is
+// replaced.
+func replace(tmpName, file string, data []byte) error {
 	_ = os.Remove(tmpName)
 	tmp, err := os.OpenFile(tmpName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
@@ -669,7 +703,7 @@ func save(managed, file string, v any, header string) error {
 		err = tmp.Chmod(old.Mode().Perm())
 	}
 	if err == nil {
-		_, err = tmp.Write(buf.Bytes())
+		_, err = tmp.Write(data)
 	}
 	if err == nil {
 		err = tmp.Sync()

@@ -102,7 +102,9 @@ try:
         headers = [archive.pax_headers] + [member.pax_headers for member in members]
         for member in members:  # read in full, so that gzip checks the whole archive
             if member.isfile():
-                archive.extractfile(member).read()
+                content = archive.extractfile(member)
+                while content.read(1 << 20):  # in chunks: a member never has to fit in memory
+                    pass
 except Exception as error:
     print("cannot be read: %s" % error)
     sys.exit(0)

@@ -470,9 +470,13 @@ func Transition(from, to []Group, scope map[Key]bool) (Plan, error) {
 					if err != nil && state != fsutil.Link {
 						return plan, err
 					}
-					// A link whose target cannot be resolved may still be the playbook's, when its folder cannot be
-					// read for now: then it can be neither kept nor removed. When even its target as written leads
-					// elsewhere, it is not the playbook's, and is left as it is (status reports it).
+					// A link whose target cannot be resolved (or whose target's folder cannot, when it holds no '..')
+					// may still be the playbook's, when its folder cannot be read for now: then it can be neither kept
+					// nor removed. When even its target as written leads elsewhere, it is not the playbook's, and is
+					// left as it is (status reports it).
+					if err == nil && state == fsutil.Link && !e.Owns(t.Kind, name, current) {
+						_, err = fsutil.Resolve(filepath.Dir(current))
+					}
 					if err != nil && e.MayOwn(t.Kind, name, current) {
 						return plan, fmt.Errorf("cannot tell whether %s is a link of playbook %s, as its target cannot be "+
 							"resolved (%w): check that the playbook folder can be read", link, e.Label(), err)
@@ -711,6 +715,10 @@ func Apply(plan Plan, report func(Action)) error {
 		var err error
 		switch a.Kind {
 		case Create:
+			// Checked again now: a link made earlier by the same plan may have changed where this one would go.
+			if err = stillInside(a); err != nil {
+				break
+			}
 			missing := missingDirs(filepath.Dir(a.Link), a.Stop)
 			err = os.MkdirAll(filepath.Dir(a.Link), 0o755)
 			var merr error
@@ -744,6 +752,27 @@ func Apply(plan Plan, report func(Action)) error {
 	return nil
 }
 
+// stillInside fails when the folder of a Create's link no longer leads inside its Stop folder (the managed folder, or
+// %APPDATA%), once links are resolved: a link made by the plan may lead there.
+func stillInside(a *Action) error {
+	if a.Stop == "" {
+		return nil
+	}
+	dir, err := fsutil.Resolve(filepath.Dir(a.Link))
+	if err != nil {
+		return err
+	}
+	stop, err := fsutil.Resolve(a.Stop)
+	if err != nil {
+		return err
+	}
+	if !fsutil.Inside(dir, stop) {
+		return fmt.Errorf("'%s' now leads outside '%s', to '%s', through a link made by this command: aiplam only "+
+			"makes links inside it", filepath.Dir(a.Link), a.Stop, dir)
+	}
+	return nil
+}
+
 // missingDirs returns dir and its parents that do not exist, deepest first, up to (and never including) stop.
 func missingDirs(dir, stop string) []string {
 	var dirs []string
@@ -772,8 +801,10 @@ func made(dirs []string) ([]madeDir, error) {
 		case err == nil && info.IsDir():
 			// On Windows, os.SameFile reads a file's identity the first time it is asked, from its path, and keeps it:
 			// asking now keeps the identity of the folder made, not of whatever is at its path when it is compared.
-			os.SameFile(info, info)
-			out = append(out, madeDir{dir, info})
+			// When it cannot be read (it then reports false), the folder is not recorded: it is never removed.
+			if os.SameFile(info, info) {
+				out = append(out, madeDir{dir, info})
+			}
 		case err != nil && !errors.Is(err, fs.ErrNotExist) && first == nil:
 			first = err
 		}
@@ -832,13 +863,19 @@ func Revert(actions []Action) error {
 				err = removeDirs(a.madeDirs)
 			}
 		case Remove:
-			// A link whose target cannot be resolved where the link was removed: something else took its place.
-			if state, _, ierr := fsutil.Inspect(a.Link); ierr != nil && state != fsutil.Link {
+			// Something else in the place of the link removed is left as it is, but the link was not put back.
+			state, current, ierr := fsutil.Inspect(a.Link)
+			switch {
+			case ierr != nil && state != fsutil.Link:
 				err = ierr
-			} else if state == fsutil.Missing {
+			case state == fsutil.Missing:
 				if err = os.MkdirAll(filepath.Dir(a.Link), 0o755); err == nil {
 					err = fsutil.RestoreLink(a.Link, a.Source, a.linkKind)
 				}
+			case ierr == nil && state == fsutil.Link && sameFolder(current, a.Source):
+				// the same link is back
+			default:
+				err = fmt.Errorf("%s was not put back, as something else is there now", a.Link)
 			}
 		}
 		if err != nil && first == nil {

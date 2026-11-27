@@ -260,7 +260,7 @@ func (a *App) profileAdd(name, agent string, targets config.Targets) error {
 		}
 	}
 	// The target folders as they are on disk (once links are resolved), as every later command checks them.
-	if err := a.checkNewTargets(targets); err != nil {
+	if err := a.checkNewTargets(name, targets); err != nil {
 		return err
 	}
 	prof := &config.Profile{Name: name, Agent: agent, Targets: targets}

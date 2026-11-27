@@ -962,3 +962,28 @@ func symlink(t *testing.T, oldname, newname string) error {
 	}
 	return err
 }
+
+// TestRevertReportsLinksNotPutBack checks that undoing a removal reports when something else has taken the link's
+// place (which is left as it is), and that the same link back is no error.
+func TestRevertReportsLinksNotPutBack(t *testing.T) {
+	s := newSandbox(t)
+	source := s.skill("x-a")
+	link := s.link(".agents/skills/x-a")
+	s.file("m/.agents/skills/x-a")
+	removal := []Action{{Kind: Remove, Link: link, Source: source}}
+	if err := Revert(removal); err == nil {
+		t.Error("a file in the link's place: no error")
+	}
+	if fsutil.IsDir(link) || !fsutil.IsFile(link) {
+		t.Error("the file in the link's place was changed")
+	}
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsutil.CreateLink(link, source); err != nil {
+		t.Fatal(err)
+	}
+	if err := Revert(removal); err != nil {
+		t.Errorf("the same link back: %v", err)
+	}
+}

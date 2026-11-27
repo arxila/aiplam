@@ -195,7 +195,7 @@ func (a *App) cmdInit(args []string) (err error) {
 		}
 	}
 	// The target folders as they are on disk (once links are resolved), as every later command checks them.
-	if err := a.checkNewTargets(targets); err != nil {
+	if err := a.checkNewTargets(profiles[0], targets); err != nil {
 		return err
 	}
 	a.showManaged()

@@ -104,10 +104,14 @@ case $shell in
   /*) ;;
   ?*) shell=$(cd "$(dirname "$shell")" && pwd)/$(basename "$shell") ;;
 esac
-# Tried first (a script whose interpreter is missing is executable, yet cannot start).
+# Tried first (a script whose interpreter is missing is executable, yet cannot start), already in the sandbox, with its
+# environment, and without the files that non-interactive shells run at start (BASH_ENV, ENV): nothing of the caller's
+# runs outside the sandbox.
+unset BASH_ENV ENV
+cd "$sandbox"
+export HOME=$sandbox PATH=$sandbox/bin:$PATH AIPLAM_SANDBOX=$sandbox XDG_CONFIG_HOME=$sandbox/.config \
+  GIT_CONFIG_NOSYSTEM=1
 [ -n "$shell" ] && [ -f "$shell" ] && [ -x "$shell" ] && "$shell" -c true </dev/null >/dev/null 2>&1 ||
   { echo "cannot start the shell '${SHELL:-/bin/sh}': set SHELL to one that can be" >&2; exit 1; }
 trap - EXIT
-cd "$sandbox"
-HOME=$sandbox PATH=$sandbox/bin:$PATH AIPLAM_SANDBOX=$sandbox XDG_CONFIG_HOME=$sandbox/.config GIT_CONFIG_NOSYSTEM=1 \
-  exec "$shell"
+exec "$shell"

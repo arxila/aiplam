@@ -105,7 +105,7 @@ dist:
 	fi
 	@PLATFORMS="$(PLATFORMS)" ./scripts/check-dist.sh $(DIST).new $(BINARY) $(VERSION) $(SIGN_KEY)
 	@# The previous build is moved aside, and only removed once the new one is in place (put back if that fails).
-	@rm -rf $(DIST).old; \
+	@rm -rf $(DIST).old || exit 1; \
 	if [ -e $(DIST) ]; then mv $(DIST) $(DIST).old || exit 1; fi; \
 	if mv $(DIST).new $(DIST); then \
 		rm -rf $(DIST).old $(BINARY); \
