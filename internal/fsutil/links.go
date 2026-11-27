@@ -23,6 +23,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"unicode/utf8"
 )
 
 // LinkState describes what exists at a path where aiplam wants a link.
@@ -38,8 +40,8 @@ const (
 )
 
 // Inspect returns what exists at path and, for a link, its target as an absolute path (relative link targets are
-// resolved against the link's folder, with links resolved, as the system does). The target may not exist (a broken
-// link).
+// resolved against the link's folder, with links resolved, as the system does; see linkPath). The target may not
+// exist (a broken link).
 func Inspect(path string) (LinkState, string, error) {
 	fi, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -60,10 +62,38 @@ func Inspect(path string) (LinkState, string, error) {
 		return Link, "", err
 	}
 	if !filepath.IsAbs(target) {
-		target = filepath.Join(Canonical(filepath.Dir(path)), target)
+		target = Canonical(filepath.Dir(path)) + string(filepath.Separator) + target
 	}
-	return Link, filepath.Clean(target), nil
+	return Link, linkPath(target), nil
 }
+
+// linkPath returns a link's absolute target, as written, cleaned as the system reads it: a '..' that follows a link in
+// it applies to where that link leads, not to the text before it. Its folder is resolved as Canonical does (when it
+// exists), and its last name is kept, as the target itself may be a link, or missing. Without '..', it is only cleaned.
+func linkPath(target string) string {
+	elems := splitPath(target[len(filepath.VolumeName(target)):])
+	dotDot := false
+	for _, elem := range elems {
+		dotDot = dotDot || elem == ".."
+	}
+	if !dotDot || len(elems) == 0 {
+		return filepath.Clean(target)
+	}
+	if last := elems[len(elems)-1]; last == "." || last == ".." {
+		if resolved, err := filepath.EvalSymlinks(target); err == nil {
+			return resolved
+		}
+		return filepath.Clean(target)
+	}
+	end := strings.LastIndexFunc(strings.TrimRightFunc(target, isSeparator), isSeparator)
+	if resolved, err := filepath.EvalSymlinks(target[:end+1]); err == nil {
+		return filepath.Join(resolved, elems[len(elems)-1])
+	}
+	return filepath.Clean(target)
+}
+
+// isSeparator reports whether r is a path separator.
+func isSeparator(r rune) bool { return r < utf8.RuneSelf && os.IsPathSeparator(uint8(r)) }
 
 // isLinkMode reports whether a Lstat mode can be a symbolic link or a directory junction. Since Go 1.23, Windows
 // reports junctions (mount points) as irregular files instead of symbolic links.
@@ -82,11 +112,27 @@ func CreateLink(link, target string) error {
 	return createLink(link, target)
 }
 
-// RestoreLink creates again a link that was removed, as CreateLink does; symlink says whether it was a symbolic link
-// (not a junction). On Windows, a link whose target no longer exists is then made a symbolic link again, as it was:
-// CreateLink, unable to tell a missing folder from a missing file, would make it a junction.
-func RestoreLink(link, target string, symlink bool) error {
-	return restoreLink(link, target, symlink)
+// LinkKind is the kind of a link that RestoreLink must make again, as KindOf reports it.
+type LinkKind int
+
+const (
+	// AnyLink is the link that CreateLink makes for its target: every link, but on Windows (see KindOf).
+	AnyLink LinkKind = iota
+	// FileSymlink and DirSymlink are, on Windows, symbolic links to a file and to a folder: they are made differently,
+	// and a link to a folder may also be a junction (AnyLink).
+	FileSymlink
+	DirSymlink
+)
+
+// KindOf returns the kind of the link at path (AnyLink when it cannot tell, or nothing is there).
+func KindOf(path string) LinkKind {
+	return kindOf(path)
+}
+
+// RestoreLink creates again a link that was removed, of the kind it was (see KindOf), so that it works as it did even
+// when its target is missing for now: CreateLink, unable to tell a missing folder from a missing file, would choose.
+func RestoreLink(link, target string, kind LinkKind) error {
+	return restoreLink(link, target, kind)
 }
 
 // linkTarget returns the path a link to target must hold: target's folder with links resolved, and target's own name,

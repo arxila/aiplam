@@ -20,6 +20,7 @@ package app
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -32,6 +33,7 @@ import (
 	"arxila.io/aiplam/internal/config"
 	"arxila.io/aiplam/internal/fsutil"
 	"arxila.io/aiplam/internal/gitinfo"
+	"arxila.io/aiplam/internal/playbook"
 )
 
 type env struct {
@@ -245,6 +247,7 @@ func TestInitUsage(t *testing.T) {
 		{[]string{"init", project, "-f", "skills:../x"}, "cannot contain '..'"},
 		{[]string{"init", project, "-f", "skills:%APPDATA%/x"}, "only exists on Windows"},
 		{[]string{"init", "-u", "-f", "skills:%APPDATA%/x"}, "only exists on Windows"},
+		{[]string{"init", "-u", "-f", "skills:./%APPDATA%/x"}, "only exists on Windows"},
 		{[]string{"init", project, "-f", "skills:a,rules:a"}, "the same target folder"},
 		{[]string{"init", project, "-f", "skills:\"a"}, "unterminated quote"},
 		{[]string{"init", project, "-a", "claude", "-p", "aiplam-config"}, "invalid profile name"},
@@ -778,6 +781,8 @@ func TestPlaybookBehindSymlink(t *testing.T) {
 func TestProfileNameCase(t *testing.T) {
 	e := newEnv(t)
 	e.mustRun(ExitOK, "init", "-u", "-a", "standard", "-p", "work")
+	// Never a second profile whose name differs only in case, even where the disk tells them apart.
+	e.mustFail(ExitFailure, []string{"already exists"}, "profile", "add", "Work", "-a", "standard", "-u")
 	if !config.ProfileExists(e.home, "Work") {
 		t.Skip("the file system distinguishes case: Work and work are different profiles")
 	}
@@ -831,6 +836,32 @@ func TestRestoreProfilesReportsFailures(t *testing.T) {
 	if got := e.app.restoreProfiles([]*config.Profile{a, b}, "nothing changed"); !strings.Contains(got,
 		"putting back profiles 'a'") || !strings.Contains(got, "so they keep the change") {
 		t.Errorf("a and b not put back: %q", got)
+	}
+}
+
+// TestUndoReportsEverything checks that, when undoing the link changes fails too, the message still says what
+// happened to the profiles, and how to see what is left (once).
+func TestUndoReportsEverything(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a folder the current user cannot read")
+	}
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init", "-u", "-a", "standard")
+	e.app.Managed = e.home
+	locked := e.mkdir(filepath.Join(e.root, "locked"))
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	plan := playbook.Plan{Actions: []playbook.Action{{Kind: playbook.Create, Link: filepath.Join(locked, "x")}}}
+	for _, state := range []string{"the playbook was not registered",
+		"putting back profile 'b' (failed), so it keeps the change: " + e.app.leftAdvice()} {
+		err := e.app.undo(plan, errors.New("saving failed"), state)
+		msg := err.Error()
+		if !strings.Contains(msg, "undoing the link changes also failed") || !strings.Contains(msg, state) ||
+			strings.Count(msg, e.app.leftAdvice()) != 1 {
+			t.Errorf("undo: %s", msg)
+		}
 	}
 }
 
@@ -1484,7 +1515,8 @@ func TestUnignoredLinks(t *testing.T) {
 }
 
 func TestGitignorePattern(t *testing.T) {
-	for format, want := range map[string]string{"x-*": "x-*", "*.agent.md": "*.agent.md", `a?[b]\c*`: `a\?\[b\]\\c*`} {
+	for format, want := range map[string]string{"x-*": "x-*", "*.agent.md": "*.agent.md", `a?[b]\c*`: `a\?\[b\]\\c*`,
+		"x-* ": `x-*\ `} {
 		if got := gitignorePattern(format); got != want {
 			t.Errorf("gitignorePattern(%q) = %q, want %q", format, got, want)
 		}

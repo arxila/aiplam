@@ -132,6 +132,24 @@ func TestLock(t *testing.T) {
 	if _, err := Lock(filepath.Join(path, "missing", ".lock")); err == nil {
 		t.Fatal("locked a file in a missing folder")
 	}
+	// A lock file removed by its holder while it holds it: whoever opened it before cannot lock it any more.
+	if runtime.GOOS != "windows" { // where an open file cannot be removed
+		late, err := os.OpenFile(path, os.O_RDWR, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := lockOpened(late, path); err != ErrLocked {
+			t.Fatalf("lock of a removed file: %v, want ErrLocked", err)
+		}
+		unlock3, err := Lock(path)
+		if err != nil {
+			t.Fatalf("lock of the new file: %v", err)
+		}
+		unlock3()
+	}
 	// A link is never followed, even a broken one.
 	link := filepath.Join(filepath.Dir(path), "link.lock")
 	target := filepath.Join(filepath.Dir(path), "target")
@@ -287,5 +305,40 @@ func TestResolveShortNames(t *testing.T) {
 	}
 	if got, err := Resolve(filepath.Join(short, "linked", "a")); err != nil || !Within(got, top) {
 		t.Errorf("Resolve(linked/a) = %q, %v; want it inside %q", got, err, top)
+	}
+}
+
+// TestInside checks that Inside compares folders as the system does.
+func TestInside(t *testing.T) {
+	root := Canonical(t.TempDir())
+	dir := filepath.Join(root, "dir")
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "dirs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]bool{
+		dir:                                  true,
+		filepath.Join(dir, "sub"):            true,
+		filepath.Join(dir, "missing", "a"):   true,
+		filepath.Join(root, "dirs"):          false,
+		filepath.Join(root, "dirs", "dir"):   false,
+		root:                                 false,
+		filepath.Join(root, "missing", "a"):  false,
+		filepath.Join(root, "nowhere", "di"): false,
+	} {
+		if got := Inside(path, dir); got != want {
+			t.Errorf("Inside(%q) = %v, want %v", path, got, want)
+		}
+	}
+	if !Inside(filepath.Join(root, "gone", "a"), filepath.Join(root, "gone")) {
+		t.Error("a folder that does not exist: compared as text")
+	}
+	if _, err := os.Stat(filepath.Join(root, "DIR")); err == nil {
+		// A disk that ignores case: the same folder spelled in another case.
+		if !Inside(filepath.Join(root, "DIR", "sub"), dir) {
+			t.Error("DIR/sub is inside dir on a disk that ignores case")
+		}
 	}
 }

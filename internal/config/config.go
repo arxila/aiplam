@@ -37,6 +37,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"unicode"
 
 	"go.yaml.in/yaml/v3"
 
@@ -328,17 +329,20 @@ func CleanTarget(folder string, user bool) (string, error) {
 	if f == "" {
 		return "", errors.New("the target folder is empty")
 	}
-	prefix := ""
-	if first, rest, _ := strings.Cut(f, "/"); first == AppData {
-		if !user {
-			return "", fmt.Errorf("target folder '%s': %s can only be used in the user managed folder", folder, AppData)
-		}
-		prefix, f = AppData+"/", rest
+	if HasControl(f) {
+		return "", fmt.Errorf("target folder %q cannot contain control characters, such as line breaks", folder)
 	}
 	if err := relative(f); err != nil {
 		return "", fmt.Errorf("target folder '%s' %s", folder, err)
 	}
-	c := path.Clean(f)
+	// Cleaned first, so that %APPDATA% is recognized however it is written ('./%APPDATA%/...' too).
+	c, prefix := path.Clean(f), ""
+	if first, rest, _ := strings.Cut(c, "/"); first == AppData {
+		if !user {
+			return "", fmt.Errorf("target folder '%s': %s can only be used in the user managed folder", folder, AppData)
+		}
+		prefix, c = AppData+"/", rest
+	}
 	switch {
 	case c == "." || c == "":
 		return "", fmt.Errorf("target folder '%s' cannot be the managed folder itself", folder)
@@ -357,6 +361,9 @@ func CleanSubfolder(folder string) (string, error) {
 	if f == "" {
 		return "", errors.New("the playbook subfolder is empty ('.' is the playbook folder itself)")
 	}
+	if HasControl(f) {
+		return "", fmt.Errorf("playbook subfolder %q cannot contain control characters, such as line breaks", folder)
+	}
 	if err := relative(f); err != nil {
 		return "", fmt.Errorf("playbook subfolder '%s' %s", folder, err)
 	}
@@ -367,11 +374,19 @@ func CleanSubfolder(folder string) (string, error) {
 	return c, nil
 }
 
+// HasControl reports whether s contains a control character (such as a line break or a tab), which no folder, format
+// or artifact name aiplam handles may contain: it could not be shown, nor written in a .gitignore line, reliably.
+func HasControl(s string) bool {
+	return strings.ContainsFunc(s, unicode.IsControl)
+}
+
 // CheckFormat checks a format: a pattern for the names of a playbook's artifacts, where '*' matches any characters.
 func CheckFormat(format string) error {
 	switch {
 	case format == "":
 		return errors.New("the format is empty")
+	case HasControl(format):
+		return fmt.Errorf("format %q cannot contain control characters, such as line breaks", format)
 	case strings.ContainsAny(format, `/\`):
 		return fmt.Errorf("format '%s' cannot contain path separators: it matches the names of files and folders", format)
 	case strings.HasPrefix(format, "."):

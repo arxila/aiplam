@@ -27,7 +27,9 @@ import (
 
 func fileLinksAllowed() bool { return true }
 
-func restoreLink(link, target string, _ bool) error { return createLink(link, target) }
+func kindOf(string) LinkKind { return AnyLink }
+
+func restoreLink(link, target string, _ LinkKind) error { return createLink(link, target) }
 
 // createLink creates a symbolic link whose target is relative to the link's folder (with links resolved), so that the
 // link keeps working when a folder holding both the link and its target is moved.

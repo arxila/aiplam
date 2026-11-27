@@ -26,6 +26,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"unicode/utf16"
 
 	"golang.org/x/sys/windows"
@@ -34,19 +36,89 @@ import (
 const fsctlSetReparsePoint = 0x000900A4
 
 // createLink creates a link to a folder as a directory junction, and a link to a file as a symbolic link: junctions
-// cannot point to files, and symbolic links need developer mode (or administrator rights).
+// cannot point to files, and symbolic links need developer mode (or administrator rights). Junctions cannot lead to
+// network folders either: a link to a folder on a network share is a symbolic link too.
 func createLink(link, target string) error {
 	if info, err := os.Stat(target); err == nil && !info.IsDir() {
 		return createFileLink(link, target)
 	}
+	if onNetwork(target) {
+		if err := createDirSymlink(link, target); err != nil {
+			return fmt.Errorf("%w (links to folders on network shares are symbolic links, as junctions cannot lead "+
+				"there, and on Windows they need developer mode or administrator rights)", err)
+		}
+		return nil
+	}
 	return createJunction(link, target)
 }
 
-func restoreLink(link, target string, symlink bool) error {
-	if _, err := os.Stat(target); err != nil && symlink {
+// onNetwork reports whether path is on a network share: a UNC path (\\server\share\...), or a mapped network drive.
+func onNetwork(path string) bool {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	volume := strings.ToUpper(filepath.VolumeName(abs))
+	switch {
+	case strings.HasPrefix(volume, `\\?\UNC\`):
+		return true
+	case strings.HasPrefix(volume, `\\?\`), strings.HasPrefix(volume, `\\.\`):
+		volume = volume[len(`\\?\`):]
+	case strings.HasPrefix(volume, `\\`):
+		return true
+	}
+	if len(volume) != 2 || volume[1] != ':' {
+		return false
+	}
+	root, err := windows.UTF16PtrFromString(volume + `\`)
+	return err == nil && windows.GetDriveType(root) == windows.DRIVE_REMOTE
+}
+
+// symbolicLinkFlagAllowUnprivilegedCreate lets CreateSymbolicLink work in developer mode, without administrator rights.
+const symbolicLinkFlagAllowUnprivilegedCreate = 0x2
+
+func kindOf(path string) LinkKind {
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		return AnyLink // a junction, or not a link
+	}
+	if data, ok := info.Sys().(*syscall.Win32FileAttributeData); ok &&
+		data.FileAttributes&syscall.FILE_ATTRIBUTE_DIRECTORY != 0 {
+		return DirSymlink
+	}
+	return FileSymlink
+}
+
+func restoreLink(link, target string, kind LinkKind) error {
+	switch kind {
+	case FileSymlink:
 		return createFileLink(link, target)
+	case DirSymlink:
+		return createDirSymlink(link, target)
 	}
 	return createLink(link, target)
+}
+
+// createDirSymlink creates a symbolic link to a folder, with a target relative to the link's folder when possible,
+// even when the target does not exist (os.Symlink would then make a link to a file).
+func createDirSymlink(link, target string) error {
+	if rel, err := filepath.Rel(Canonical(filepath.Dir(link)), linkTarget(target)); err == nil {
+		target = rel
+	}
+	from, err := windows.UTF16PtrFromString(link)
+	if err != nil {
+		return err
+	}
+	to, err := windows.UTF16PtrFromString(target)
+	if err != nil {
+		return err
+	}
+	err = windows.CreateSymbolicLink(from, to, windows.SYMBOLIC_LINK_FLAG_DIRECTORY|
+		symbolicLinkFlagAllowUnprivilegedCreate)
+	if err != nil {
+		return &os.LinkError{Op: "symlink", Old: target, New: link, Err: err}
+	}
+	return nil
 }
 
 func fileLinksAllowed() bool {

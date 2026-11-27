@@ -61,6 +61,7 @@ make dist       # dist/aiplam-<version>-<os>-<arch>.tar.gz (.zip for Windows) pe
 ```
 
 Signing `SHA256SUMS` needs the Arxila release key: without it, run `make SIGN_KEY= dist` for an unsigned build.
+`make dist` also needs `python3`, to check the archives' headers.
 
 ## Quick start
 
@@ -138,7 +139,8 @@ matching folder is linked as a whole, with everything inside it:
 - by default, the subfolder is named like the kind (`skills/`, `subagents/`, ...), and the format is `<name>-*`;
 - `aiplam add --folder <kind>:<subfolder>[:<format>]` (`-f`) sets another subfolder (`.` for the playbook folder
   itself) and format, in which `*` matches any characters (`-f subagents:agents:*.agent.md`, `-f 'skills:.:*'`);
-- hidden entries (named `.*`) are never artifacts, whatever the format;
+- hidden entries (named `.*`) are never artifacts, whatever the format, and neither are entries whose names have
+  control characters (such as line breaks);
 - aiplam does not check what an entry holds: a folder without a `SKILL.md` that matches the format is linked too.
 
 ```text
@@ -296,7 +298,9 @@ artifact into the target folder:
 - A link has the artifact's own name: `.claude/skills/acme-deploy` leads to `skills/acme-deploy`.
 - Links are relative symbolic links on Linux and macOS. On Windows, links to folders (skills) are directory junctions,
   and links to files (subagents, rules) are symbolic links, which need developer mode or administrator rights (see
-  [Windows without developer mode](#windows-without-developer-mode)).
+  [Windows without developer mode](#windows-without-developer-mode)). Junctions cannot lead to network shares, so
+  links to folders on a network share (a `\\server\share` path, or a mapped network drive) are symbolic links too,
+  and need the same rights.
 - Artifacts never come from outside the playbook folder, not even through links inside it.
 - Playbooks of profiles that are not enabled are registered, but not linked.
 
@@ -305,7 +309,8 @@ artifact into the target folder:
 On Windows, links to files need developer mode or administrator rights, which many users do not have. Without them,
 aiplam links what it can and skips the rest:
 
-- folders (skills) are always linked: directory junctions need no rights;
+- folders (skills) are always linked: directory junctions need no rights (except folders on a network share, whose
+  links are symbolic links: those fail without the rights, and the command changes nothing);
 - files (subagents, commands, rules, instructions) are **skipped**, with a warning listing them, and everything else
   is linked: `add` still registers the playbook, and `profile enable` still enables the profile;
 - `aiplam status` lists them too, but does not count them as problems, so it can still succeed;

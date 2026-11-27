@@ -247,6 +247,18 @@ func (a *App) profileAdd(name, agent string, targets config.Targets) error {
 	if config.ProfileExists(a.Managed, name) {
 		return fmt.Errorf("profile '%s' already exists (%s)", name, a.profileFile(name))
 	}
+	// Names that differ only in case are one profile on disks that ignore case, and are refused together in the
+	// enabled list: never two profiles of them, wherever the configuration is used.
+	existing, err := config.Profiles(a.Managed)
+	if err != nil {
+		return err
+	}
+	for _, other := range existing {
+		if strings.EqualFold(other, name) {
+			return fmt.Errorf("profile '%s' already exists (%s): profile names that differ only in case cannot be "+
+				"told apart", other, a.profileFile(other))
+		}
+	}
 	if err := config.SaveProfile(a.Managed, &config.Profile{Name: name, Agent: agent, Targets: targets}); err != nil {
 		return err
 	}

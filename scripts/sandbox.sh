@@ -73,12 +73,15 @@ else
   echo "git not found: the playbooks are plain folders and their versions show as unknown" >&2
 fi
 
+# The sandbox's path, quoted for the shell, for the command printed below.
+quoted="'$(printf '%s' "$sandbox" | sed "s/'/'\\\\''/g")'"
+
 cat <<MSG
 
 aiplam sandbox: $sandbox
 HOME is the sandbox and 'aiplam' is $bin. Playbooks are in ~/playbooks (see testdata/README.md for scenarios).
 aiplam refuses managed folders outside the sandbox, so run it from folders inside it.
-Type 'exit' to leave; then delete the sandbox with: rm -rf $sandbox
+Type 'exit' to leave; then delete the sandbox with: rm -rf $quoted
 
 MSG
 

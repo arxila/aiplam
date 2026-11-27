@@ -154,6 +154,10 @@ func TestItemsFormats(t *testing.T) {
 		filepath.Join(s.pb, "skills", "x-far")); err != nil {
 		t.Fatal(err)
 	}
+	// Names with control characters are never artifacts.
+	if runtime.GOOS != "windows" { // where they cannot be file names
+		s.skill("x-line\nbreak")
+	}
 	// A broken link counts as leading where it would lead once its target exists.
 	if err := os.Symlink(filepath.Join(s.root, "elsewhere", "x-later"),
 		filepath.Join(s.pb, "skills", "x-later")); err != nil {
@@ -511,6 +515,37 @@ func TestItemsUnreadable(t *testing.T) {
 	if plan, err := Transition([]Group{g}, []Group{g}, scopeOf(g)); err == nil {
 		t.Errorf("Transition with an unreadable subfolder succeeded; removals: %q", actions(plan, Remove))
 	}
+	if err := os.Chmod(inner, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// An artifact that is a link to a folder that cannot be read: an error, not an artifact gone.
+	s.file("pb/private/x-b/SKILL.md")
+	if err := os.Symlink(filepath.Join("..", "..", "private", "x-b"), filepath.Join(inner, "skills", "x-b")); err != nil {
+		t.Fatal(err)
+	}
+	s.apply(s.transition([]Group{g}, []Group{g}, scopeOf(g)))
+	private := filepath.Join(s.pb, "private")
+	if err := os.Chmod(private, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(private, 0o755) })
+	if plan, err := Transition([]Group{g}, []Group{g}, scopeOf(g)); err == nil {
+		t.Errorf("Transition with an unreadable artifact succeeded; removals: %q", actions(plan, Remove))
+	}
+	if err := os.Chmod(private, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// A target folder whose entries cannot be inspected: an error, not links left behind.
+	target := s.link(".agents/skills")
+	if err := os.Chmod(target, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(target, 0o755) })
+	if plan, err := Transition([]Group{g}, nil, scopeOf(g)); err == nil {
+		t.Errorf("Transition with links that cannot be inspected succeeded; removals: %q", actions(plan, Remove))
+	}
 }
 
 // TestLinkedArtifacts checks that an artifact that is a link inside the playbook folder (to another name) is linked
@@ -565,23 +600,45 @@ func TestFailedApplyRemovesItsFolders(t *testing.T) {
 	}
 }
 
-// TestRevertKeepsLinkType checks that undoing the removal of a broken link to a file makes a symbolic link again
-// (on Windows, not a junction).
+// TestRevertKeepsLinkType checks that undoing the removal of a broken link makes the same kind of link again (on
+// Windows, a symbolic link to a file or to a folder, whose target is missing: not a junction, nor the other kind).
 func TestRevertKeepsLinkType(t *testing.T) {
 	s := newSandbox(t)
 	artifact := s.file("pb/subagents/x-r.md")
+	skill := s.skill("x-a")
 	g := s.group("p", pb("x", nil))
 	s.apply(s.transition(nil, []Group{g}, scopeOf(g)))
-	if err := os.Remove(artifact); err != nil {
+	// The skill's link, made by hand as a symbolic link to a folder (aiplam makes junctions on Windows).
+	dirLink := s.link(".agents/skills/x-a")
+	if err := fsutil.RemoveLink(dirLink); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Symlink(skill, dirLink); err != nil {
+		t.Fatal(err)
+	}
+	links := []string{s.link(".claude/agents/x-r.md"), dirLink}
+	var kinds []fsutil.LinkKind
+	for _, link := range links {
+		kinds = append(kinds, fsutil.KindOf(link))
+	}
+	for _, gone := range []string{artifact, skill} {
+		if err := os.Rename(gone, gone+".gone"); err != nil {
+			t.Fatal(err)
+		}
+	}
 	plan := s.transition([]Group{g}, []Group{g}, scopeOf(g))
+	if got := actions(plan, Remove); got != "x-a,x-r.md" {
+		t.Fatalf("removals: %q", got)
+	}
 	s.apply(plan)
 	if err := Revert(plan.Changes()); err != nil {
 		t.Fatal(err)
 	}
-	if info, err := os.Lstat(s.link(".claude/agents/x-r.md")); err != nil || info.Mode()&os.ModeSymlink == 0 {
-		t.Fatalf("restored link: %v, %v", info, err)
+	for i, link := range links {
+		info, err := os.Lstat(link)
+		if err != nil || info.Mode()&os.ModeSymlink == 0 || fsutil.KindOf(link) != kinds[i] {
+			t.Errorf("restored %s: %v, %v, kind %v (was %v)", link, info, err, fsutil.KindOf(link), kinds[i])
+		}
 	}
 }
 
@@ -627,5 +684,85 @@ func TestTargetFoldersInAnotherCase(t *testing.T) {
 	plan := s.transition(nil, []Group{p, q}, scopeOf(p, q))
 	if c := plan.Conflicts(); len(c) != 1 || c[0].Cause != Duplicate {
 		t.Fatalf("conflicts: %+v; creations: %q", c, actions(plan, Create))
+	}
+}
+
+// TestLinksReadAsTheSystemDoes checks that a link whose target holds '..' after a link is taken for where it really
+// leads: one that only seems, as text, to point to an artifact of the playbook does not belong to it.
+func TestLinksReadAsTheSystemDoes(t *testing.T) {
+	s := newSandbox(t)
+	s.skill("x-a")
+	elsewhere := filepath.Dir(s.file("elsewhere/d/SKILL.md"))
+	s.file("elsewhere/x-a/SKILL.md")
+	if err := os.Symlink(elsewhere, filepath.Join(s.pb, "skills", "sub")); err != nil {
+		t.Fatal(err)
+	}
+	link := s.link(".agents/skills/x-a")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(s.pb+"/skills/sub/../x-a", link); err != nil {
+		t.Fatal(err)
+	}
+	g := s.group("p", pb("x", nil))
+	if plan := s.transition([]Group{g}, nil, scopeOf(g)); actions(plan, Remove) != "" {
+		t.Errorf("removal of the playbook removes %q", actions(plan, Remove))
+	}
+	if c := s.transition([]Group{g}, []Group{g}, scopeOf(g)).Conflicts(); len(c) != 1 || c[0].Cause != OtherLink {
+		t.Errorf("update: conflicts %+v, want the link in the way", c)
+	}
+}
+
+// TestNewFoldersInAnotherCase checks that, on a disk that ignores case, target folders that do not exist yet and
+// differ only in case collide, and so do artifact names that differ only in case.
+func TestNewFoldersInAnotherCase(t *testing.T) {
+	s := newSandbox(t)
+	s.skill("x-a")
+	s.file("other/skills/X-A/SKILL.md")
+	if err := os.MkdirAll(s.managed, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !ignoresCase(s.managed) {
+		t.Skip("the disk does not ignore case")
+	}
+	p := s.group("p", pb("x", nil))
+	q := Group{Profile: "q", Entries: Entries("q", []config.Playbook{pb("y", map[string]config.Mapping{
+		"skills": {Folder: "skills", Format: "x-*"}})}, s.managed),
+		Targets: []Target{{Kind: "skills", Folder: ".AGENTS/skills", Dir: s.link(".AGENTS/skills"), Stop: s.managed}}}
+	plan := s.transition(nil, []Group{p, q}, scopeOf(p, q))
+	if c := plan.Conflicts(); len(c) != 1 || c[0].Cause != Duplicate {
+		t.Fatalf("new folders: conflicts %+v; creations %q", c, actions(plan, Create))
+	}
+	r := Group{Profile: "r", Entries: Entries("r", []config.Playbook{{Name: "z", Folder: "../other",
+		Mappings: map[string]config.Mapping{"skills": {Folder: "skills", Format: "X-*"}}}}, s.managed),
+		Targets: p.Targets}
+	plan = s.transition(nil, []Group{p, r}, scopeOf(p, r))
+	if c := plan.Conflicts(); len(c) != 1 || c[0].Cause != Duplicate {
+		t.Fatalf("names in another case: conflicts %+v; creations %q", c, actions(plan, Create))
+	}
+}
+
+// TestRevertReportsFoldersLeft checks that an empty folder that undoing a creation must remove, but cannot, is an
+// error, while a folder with something in it is only kept.
+func TestRevertReportsFoldersLeft(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a folder the current user cannot write to")
+	}
+	s := newSandbox(t)
+	parent := filepath.Join(s.root, "parent")
+	made, full := filepath.Join(parent, "made"), filepath.Join(parent, "full")
+	s.file("parent/full/kept")
+	if err := os.MkdirAll(made, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := Revert([]Action{{Kind: Create, Link: filepath.Join(full, "x"), madeDirs: []string{full}}}); err != nil {
+		t.Errorf("a folder with something in it: %v", err)
+	}
+	if err := os.Chmod(parent, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
+	if err := Revert([]Action{{Kind: Create, Link: filepath.Join(made, "x"), madeDirs: []string{made}}}); err == nil {
+		t.Error("an empty folder that cannot be removed: no error")
 	}
 }

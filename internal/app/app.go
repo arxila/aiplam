@@ -428,17 +428,26 @@ const (
 	ignoreName = ".gitignore"
 )
 
-// removeNewConfigDir removes a .aiplam folder that a failed init created: the files aiplam writes there before the
-// configuration (the lock file, its .gitignore and temporary files of interrupted saves), and then the folder, only if
-// that leaves it empty.
+// removeNewConfigDir removes what a failed init wrote in the .aiplam folder it created, while it still holds the lock:
+// the .gitignore, temporary files of interrupted saves, and the lock file (see fsutil.Lock). On Windows, the lock file
+// cannot be removed while it is open: removeNewConfigDirAfter does it.
 func removeNewConfigDir(dir string) {
-	for _, name := range []string{lockName, ignoreName} {
-		_ = os.Remove(filepath.Join(dir, name))
-	}
 	if tmps, err := filepath.Glob(filepath.Join(dir, "*.tmp")); err == nil {
 		for _, tmp := range tmps {
 			_ = os.Remove(tmp)
 		}
+	}
+	for _, name := range []string{ignoreName, lockName} {
+		_ = os.Remove(filepath.Join(dir, name))
+	}
+}
+
+// removeNewConfigDirAfter finishes removing the .aiplam folder of a failed init, once the lock is released: on Windows,
+// the lock file (which fails if another command has opened it meanwhile; elsewhere, it is already gone, and a lock
+// file there now is another command's), and then the folder, only if that leaves it empty.
+func removeNewConfigDirAfter(dir string) {
+	if runtime.GOOS == "windows" {
+		_ = os.Remove(filepath.Join(dir, lockName))
 	}
 	_ = os.Remove(dir)
 }
@@ -687,7 +696,7 @@ func (a *App) checkInside(dir, top, what, writes string) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", name, err)
 	}
-	if !fsutil.Within(resolved, resolvedTop) {
+	if !fsutil.Inside(resolved, resolvedTop) {
 		return fmt.Errorf("%s ('%s') leads outside %s, to '%s', through a link: aiplam only writes %s inside it; "+
 			"replace the link with a folder, or move what it leads to inside %s", what, a.pretty(dir), name,
 			a.pretty(resolved), writes, name)
@@ -1034,15 +1043,22 @@ func (a *App) restoreProfiles(saved []*config.Profile, state string) string {
 	if len(failed) > 1 {
 		which, keeps = "profiles", "they keep"
 	}
-	return fmt.Sprintf("putting back %s %s also failed, so %s the change: run '%s' to see what is left", which,
-		strings.Join(failed, ", "), keeps, a.hint("status"))
+	return fmt.Sprintf("putting back %s %s also failed, so %s the change: %s", which, strings.Join(failed, ", "),
+		keeps, a.leftAdvice())
+}
+
+// leftAdvice says how to find what a change that could not be completed nor undone left.
+func (a *App) leftAdvice() string {
+	return fmt.Sprintf("run '%s' to see what is left", a.hint("status"))
 }
 
 // undo reverts the link changes of an applied plan after saving the configuration failed.
 func (a *App) undo(plan playbook.Plan, saveErr error, state string) error {
 	if err := playbook.Revert(plan.Changes()); err != nil {
-		return fmt.Errorf("%w; undoing the link changes also failed (%v): run '%s' to see what is left", saveErr, err,
-			a.hint("status"))
+		if !strings.HasSuffix(state, a.leftAdvice()) {
+			state += ": " + a.leftAdvice()
+		}
+		return fmt.Errorf("%w; undoing the link changes also failed (%v), and %s", saveErr, err, state)
 	}
 	if len(plan.Changes()) == 0 {
 		return fmt.Errorf("%w; %s", saveErr, state)

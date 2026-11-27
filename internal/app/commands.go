@@ -142,18 +142,25 @@ func (a *App) cmdInit(args []string) (err error) {
 		}
 		return err
 	}
+	// A failed init removes the .aiplam folder it created, so that the folder does not become a managed folder without
+	// configuration (which would shadow the managed folders above it). Only the init that holds the lock does it, and
+	// while it holds it, so that a concurrent one never removes the files of another; only the lock file (on Windows)
+	// and the folder itself are left for after the lock is released. Deferred calls run last first.
 	if created {
-		// A failed init removes the .aiplam folder it created, so that the folder does not become a managed folder
-		// without configuration (which would shadow the managed folders above it). Only the init that holds the lock
-		// does it, so that a concurrent one never removes the files of another. Deferred before unlock, it runs after
-		// the lock is released (on Windows, an open file cannot be removed).
+		defer func() {
+			if err != nil {
+				removeNewConfigDirAfter(dir)
+			}
+		}()
+	}
+	defer unlock()
+	if created {
 		defer func() {
 			if err != nil {
 				removeNewConfigDir(dir)
 			}
 		}()
 	}
-	defer unlock()
 	file := config.ConfigFile(a.Managed)
 	if _, err := os.Stat(file); err == nil {
 		return fmt.Errorf("'%s' is already a managed folder: %s exists. Manage its profiles with 'aiplam profile'",

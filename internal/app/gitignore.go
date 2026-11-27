@@ -203,9 +203,10 @@ func gitignoreName(name string) string {
 }
 
 // gitignorePattern returns a gitignore pattern matching the names a format matches: its '*' stay wildcards, and the
-// characters that are special in gitignore patterns are escaped.
+// characters that are special in gitignore patterns are escaped, and so are its trailing spaces (see gitignoreName).
 func gitignorePattern(format string) string {
-	return gitignoreEscape(format, `\?[]`)
+	trimmed := strings.TrimRight(format, " ")
+	return gitignoreEscape(trimmed, `\?[]`) + strings.Repeat(`\ `, len(format)-len(trimmed))
 }
 
 // gitignoreEscape returns s with a backslash before each of the special characters.

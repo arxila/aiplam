@@ -136,6 +136,10 @@ func TestCleanTarget(t *testing.T) {
 		{"%APPDATA%/a/../b", true, ""},
 		{"%APPDATA%", true, ""},
 		{"%APPDATA%/", true, ""},
+		{"./%APPDATA%/skills", false, ""},
+		{"./%APPDATA%/skills", true, "%APPDATA%/skills"},
+		{"a\nb", false, ""},
+		{"a\tb", false, ""},
 	} {
 		got, err := CleanTarget(c.folder, c.user)
 		if (err != nil) != (c.want == "") || got != c.want {
@@ -156,6 +160,14 @@ func TestCleanSubfolderAndFormat(t *testing.T) {
 		`a\b`: false, ".x*": false} {
 		if err := CheckFormat(format); (err == nil) != ok {
 			t.Errorf("CheckFormat(%q) = %v", format, err)
+		}
+	}
+	for _, bad := range []string{"x-\n*", "x\r"} {
+		if CheckFormat(bad) == nil {
+			t.Errorf("CheckFormat(%q) accepted control characters", bad)
+		}
+		if _, err := CleanSubfolder(bad); err == nil {
+			t.Errorf("CleanSubfolder(%q) accepted control characters", bad)
 		}
 	}
 }

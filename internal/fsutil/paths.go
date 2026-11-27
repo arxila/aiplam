@@ -29,7 +29,6 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
-	"unicode/utf8"
 )
 
 // Canonical returns the absolute, cleaned form of path with symbolic links resolved. When the path does not exist
@@ -132,9 +131,7 @@ func Resolve(path string) (string, error) {
 
 // splitPath returns the elements of path, without its volume name, as written (with '.' and '..' kept).
 func splitPath(path string) []string {
-	return strings.FieldsFunc(path, func(r rune) bool {
-		return r < utf8.RuneSelf && os.IsPathSeparator(uint8(r))
-	})
+	return strings.FieldsFunc(path, isSeparator)
 }
 
 // normalized returns path, which exists and holds no links, as the system spells it: on Windows, with long names
@@ -164,6 +161,27 @@ func Within(path, dir string) bool {
 	}
 	rel, err := filepath.Rel(dir, path)
 	return err == nil && filepath.IsLocal(rel)
+}
+
+// Inside reports whether path (with links resolved, see Resolve) is dir or lies inside it, as the system sees them:
+// whether path, or one of its folders, is dir itself (the same folder, however it is spelled), which also holds on
+// disks that ignore case, or that ignore it only in some folders (on Windows). When dir does not exist, it compares
+// the paths lexically (see Within).
+func Inside(path, dir string) bool {
+	top, err := os.Stat(dir)
+	if err != nil {
+		return Within(path, dir)
+	}
+	for p := path; ; {
+		if info, err := os.Stat(p); err == nil && os.SameFile(info, top) {
+			return true
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return false
+		}
+		p = parent
+	}
 }
 
 // SameName reports whether two path segments are equal, ignoring case on Windows.

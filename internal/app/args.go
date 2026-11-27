@@ -21,6 +21,7 @@ package app
 import (
 	"errors"
 	"fmt"
+	"path"
 	"strings"
 	"unicode"
 
@@ -191,7 +192,7 @@ func parseTargets(values []string, user bool, goos string) (config.Targets, erro
 			return nil, usagef("--folder '%s' must be <kind>:<targetfolder>, as in 'skills:.agents/skills'",
 				strings.Join(parts, ":"))
 		}
-		if first, _, _ := strings.Cut(strings.ReplaceAll(parts[1], `\`, "/"), "/"); first == config.AppData &&
+		if first, _, _ := strings.Cut(path.Clean(strings.ReplaceAll(parts[1], `\`, "/")), "/"); first == config.AppData &&
 			goos != "windows" {
 			return nil, usagef("--folder: target folder '%s': %s only exists on Windows", parts[1], config.AppData)
 		}

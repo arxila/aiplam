@@ -31,6 +31,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"unicode"
 
 	"arxila.io/aiplam/internal/config"
 	"arxila.io/aiplam/internal/fsutil"
@@ -135,10 +136,10 @@ type Item struct {
 }
 
 // Items returns the artifacts that e provides for kind: the entries of its folder for the kind (files and folders
-// alike) whose names match its format, except hidden ones and links leading outside the playbook folder (or that
-// would, for broken links, or that cannot be read), sorted by name. A playbook without a folder for the kind (or with
-// something else than a folder there) provides none; a folder that cannot be read is an error, not an empty folder,
-// so that its links are not taken for gone.
+// alike) whose names match its format, except hidden ones, those with control characters (see config.HasControl) and
+// links leading outside the playbook folder (or that would, for broken links), sorted by name. A playbook without a
+// folder for the kind (or with something else than a folder there) provides none. A folder, or a link among its
+// entries, that cannot be read is an error, not something missing, so that its links are not taken for gone.
 func Items(e Entry, kind string) ([]Item, error) {
 	dir := e.SourceDir(kind)
 	info, err := os.Stat(dir)
@@ -163,10 +164,14 @@ func Items(e Entry, kind string) ([]Item, error) {
 	for _, entry := range entries {
 		name := entry.Name()
 		src := filepath.Join(dir, name)
-		if !config.MatchFormat(format, name) {
+		if !config.MatchFormat(format, name) || config.HasControl(name) {
 			continue
 		}
-		if resolved, err := fsutil.Resolve(src); err != nil || !fsutil.Within(resolved, top) {
+		resolved, err := fsutil.Resolve(src)
+		if err != nil {
+			return nil, fmt.Errorf("playbook %s: %w", e.Label(), err)
+		}
+		if !fsutil.Inside(resolved, top) {
 			continue
 		}
 		items = append(items, Item{Name: name, Source: src})
@@ -236,8 +241,8 @@ type Action struct {
 	Others []string
 	// madeDirs are the folders that Apply created for a Create's link, deepest first, which undoing it removes again.
 	madeDirs []string
-	// symlink is set for a Remove of a symbolic link (not a junction), so that undoing it makes a symbolic link again.
-	symlink bool
+	// linkKind is, for a Remove, the kind of the link removed, so that undoing it makes the same kind of link again.
+	linkKind fsutil.LinkKind
 }
 
 // Plan is a set of link changes.
@@ -345,39 +350,10 @@ func Transition(from, to []Group, scope map[Key]bool) (Plan, error) {
 		return its, err
 	}
 
-	// Links are told apart by where they are once the links on the way to them are resolved (see linkKey), so that
-	// target folders that are the same folder through a link collide.
-	// Existing folders are also compared as the system does, so that two spellings of one folder (in another case, on
-	// a disk that ignores it) count as one: the first spelling seen stands for both.
-	resolved := map[string]string{}
-	type seenDir struct {
-		path string
-		info os.FileInfo
-	}
-	var seen []seenDir
-	key := func(dir, name string) string {
-		r, ok := resolved[dir]
-		if !ok {
-			r = dir
-			if res, err := fsutil.Resolve(dir); err == nil {
-				r = res
-			}
-			if info, err := os.Stat(r); err == nil {
-				same := false
-				for _, s := range seen {
-					if os.SameFile(s.info, info) {
-						r, same = s.path, true
-						break
-					}
-				}
-				if !same {
-					seen = append(seen, seenDir{r, info})
-				}
-			}
-			resolved[dir] = r
-		}
-		return linkKey(filepath.Join(r, name))
-	}
+	// Links are told apart by where they are, as the system sees them (see places.key), so that target folders that
+	// are the same folder (through a link, or in another case on a disk that ignores it) collide.
+	keys := newPlaces()
+	key := func(dir, name string) string { return keys.key(dir, name) }
 
 	// What every playbook of to wants linked, by link.
 	wants := map[string][]want{}
@@ -458,7 +434,10 @@ func Transition(from, to []Group, scope map[Key]bool) (Plan, error) {
 						continue
 					}
 					state, current, err := fsutil.Inspect(link)
-					if err != nil || state != fsutil.Link || !e.Owns(t.Kind, name, current) {
+					if err != nil {
+						return plan, err
+					}
+					if state != fsutil.Link || !e.Owns(t.Kind, name, current) {
 						continue
 					}
 					keep := false
@@ -487,7 +466,7 @@ func Transition(from, to []Group, scope map[Key]bool) (Plan, error) {
 					removed[k] = true
 					plan.Actions = append(plan.Actions, Action{Kind: Remove, Artifact: t.Kind, Name: name, Link: link,
 						Source: current, Stop: t.Stop, Playbook: e.Label(), ID: e.ID, Profile: e.Profile, Reason: reason,
-						symlink: de.Type()&os.ModeSymlink != 0})
+						linkKind: fsutil.KindOf(link)})
 				}
 			}
 		}
@@ -555,8 +534,93 @@ func Transition(from, to []Group, scope map[Key]bool) (Plan, error) {
 	return plan, nil
 }
 
-// linkKey returns the key that tells a link apart from the others: its path (with links resolved), ignoring case on
-// Windows, as fsutil.SamePath does.
+// places tells links apart by where they are, as the system sees them: two paths to one place have the same key.
+type places struct {
+	resolved map[string]string // target folders, with links resolved
+	seen     []seenDir         // existing folders, by the first spelling seen of each
+	folds    map[string]bool   // whether the disk of an existing folder ignores case
+}
+
+type seenDir struct {
+	path string
+	info os.FileInfo
+}
+
+func newPlaces() *places {
+	return &places{resolved: map[string]string{}, folds: map[string]bool{}}
+}
+
+// key returns the key of the link name in the target folder dir: its path with links resolved, in which the deepest
+// folder that exists is spelled as the first path seen to the same folder (so that two spellings of one folder, such
+// as another case on a disk that ignores it, count as one), and what follows it is in lower case when that folder's
+// disk ignores case (on Windows, all of it is, as fsutil.SamePath does).
+func (p *places) key(dir, name string) string {
+	r, ok := p.resolved[dir]
+	if !ok {
+		r = dir
+		if res, err := fsutil.Resolve(dir); err == nil {
+			r = res
+		}
+		p.resolved[dir] = r
+	}
+	full := filepath.Join(r, name)
+	existing := filepath.Dir(full)
+	var info os.FileInfo
+	for {
+		var err error
+		if info, err = os.Stat(existing); err == nil {
+			break
+		}
+		parent := filepath.Dir(existing)
+		if parent == existing {
+			return linkKey(full)
+		}
+		existing = parent
+	}
+	rest, _ := filepath.Rel(existing, full)
+	same := false
+	for _, s := range p.seen {
+		if os.SameFile(s.info, info) {
+			existing, same = s.path, true
+			break
+		}
+	}
+	if !same {
+		p.seen = append(p.seen, seenDir{existing, info})
+	}
+	folds, ok := p.folds[existing]
+	if !ok {
+		folds = ignoresCase(existing)
+		p.folds[existing] = folds
+	}
+	if folds {
+		rest = strings.ToLower(rest)
+	}
+	return linkKey(filepath.Join(existing, rest))
+}
+
+// ignoresCase reports whether the disk of dir (which exists) ignores case: whether the nearest of dir and its parents
+// with a name that has letters is found again with the case of those letters swapped, as the same folder.
+func ignoresCase(dir string) bool {
+	for d := dir; filepath.Dir(d) != d; d = filepath.Dir(d) {
+		name := filepath.Base(d)
+		swapped := strings.Map(func(r rune) rune {
+			if unicode.IsUpper(r) {
+				return unicode.ToLower(r)
+			}
+			return unicode.ToUpper(r)
+		}, name)
+		if swapped == name {
+			continue
+		}
+		a, errA := os.Stat(d)
+		b, errB := os.Stat(filepath.Join(filepath.Dir(d), swapped))
+		return errA == nil && errB == nil && os.SameFile(a, b)
+	}
+	return false
+}
+
+// linkKey returns path as the key of a link, ignoring case on Windows, as fsutil.SamePath does.
 func linkKey(path string) string {
 	if runtime.GOOS == "windows" {
 		return strings.ToLower(path)
@@ -592,9 +656,12 @@ func Apply(plan Plan, report func(Action)) error {
 			err = fsutil.RemoveLink(a.Link)
 		}
 		if err != nil {
-			removeDirs(a.madeDirs)
+			rerr := removeDirs(a.madeDirs)
 			a.madeDirs = nil
-			if rerr := Revert(done); rerr != nil {
+			if verr := Revert(done); rerr == nil {
+				rerr = verr
+			}
+			if rerr != nil {
 				return fmt.Errorf("%w; undoing the changes already made also failed: %v", err, rerr)
 			}
 			if len(done) > 0 {
@@ -622,11 +689,23 @@ func missingDirs(dir, stop string) []string {
 	return dirs
 }
 
-// removeDirs removes the folders of dirs (deepest first) that are empty.
-func removeDirs(dirs []string) {
+// removeDirs removes the folders of dirs (deepest first) that are empty, and returns the first error removing one of
+// them. Folders with something in them are kept: that is no error.
+func removeDirs(dirs []string) error {
+	var first error
 	for _, dir := range dirs {
-		_ = os.Remove(dir) // fails, leaving it, when something is in it
+		entries, err := os.ReadDir(dir)
+		if errors.Is(err, fs.ErrNotExist) || (err == nil && len(entries) > 0) {
+			continue
+		}
+		if err == nil {
+			err = os.Remove(dir)
+		}
+		if err != nil && first == nil {
+			first = err
+		}
 	}
+	return first
 }
 
 // Revert undoes creations and removals applied by Apply, last first: it removes the created links (only if they are
@@ -645,14 +724,14 @@ func Revert(actions []Action) error {
 				err = fsutil.RemoveLink(a.Link)
 			}
 			if err == nil {
-				removeDirs(a.madeDirs)
+				err = removeDirs(a.madeDirs)
 			}
 		case Remove:
 			if state, _, ierr := fsutil.Inspect(a.Link); ierr != nil {
 				err = ierr
 			} else if state == fsutil.Missing {
 				if err = os.MkdirAll(filepath.Dir(a.Link), 0o755); err == nil {
-					err = fsutil.RestoreLink(a.Link, a.Source, a.symlink)
+					err = fsutil.RestoreLink(a.Link, a.Source, a.linkKind)
 				}
 			}
 		}

@@ -25,16 +25,17 @@
 # Each archive (aiplam-<version>-<os>-<arch>.tar.gz, or .zip for Windows) must hold exactly its top folder, named like
 # the archive, with the executable (executable, in the .tar.gz), README.md, LICENSE.txt and NOTICE.txt: nothing else,
 # so no files of the building machine (macOS's "._*" and .DS_Store files), no agent files (AGENTS.md, CLAUDE.md,
-# .agents/, .claude/...), nothing from the repository. The .tar.gz archives must not record extended attributes, nor
-# the name of the user who built them. SHA256SUMS must list exactly the archives, with their checksums. With a
-# signing key, SHA256SUMS.asc must be a valid signature of SHA256SUMS made with that key; without one, there must be no
-# SHA256SUMS.asc.
+# .agents/, .claude/...), nothing from the repository. The .tar.gz archives must not record extended attributes (it
+# reads their headers with python3), nor the name of the user who built them. SHA256SUMS must list exactly the
+# archives, with their checksums. With a signing key, SHA256SUMS.asc must be a good signature of SHA256SUMS made with
+# that key (not expired, nor revoked); without one, there must be no SHA256SUMS.asc.
 
 set -eu
 
 [ $# -eq 3 ] || [ $# -eq 4 ] ||
 	{ echo "usage: $0 <dist folder> <binary name> <version> [<signing key fingerprint>]" >&2; exit 2; }
 DIST=$1 BINARY=$2 VERSION=$3 SIGN_KEY=$(printf %s "${4:-}" | tr a-f A-F)
+command -v python3 >/dev/null || { echo "check-dist: python3 is needed (to read the archives' headers)" >&2; exit 1; }
 USER_NAME=$(id -un)
 failed=0
 fail() { echo "check-dist: $*" >&2; failed=1; }
@@ -56,9 +57,21 @@ for archive in $archives; do
 	fi
 	case $archive in
 		*.tar.gz)
-			if gzip -dc "$file" | grep -aq 'xattr\.'; then
-				fail "$archive records extended attributes"
-			fi
+			# Extended attributes are stored in pax headers (SCHILY.xattr.*, LIBARCHIVE.xattr.*), read with Python's
+			# tarfile, not searched for in the whole archive, where a file's own content could hold those words.
+			python3 -I -c '
+import sys, tarfile
+try:
+    with tarfile.open(sys.argv[1]) as archive:
+        headers = [archive.pax_headers] + [member.pax_headers for member in archive.getmembers()]
+except Exception as error:
+    print(error, file=sys.stderr)
+    sys.exit(2)
+sys.exit(1 if any("xattr" in key for h in headers for key in h) else 0)
+' "$file" || case $? in
+				1) fail "$archive records extended attributes" ;;
+				*) fail "$archive cannot be read" ;;
+			esac
 			if tar -tvzf "$file" | grep -q "[[:space:]]$USER_NAME[[:space:]]"; then
 				fail "$archive records the user name '$USER_NAME'"
 			fi
@@ -81,14 +94,20 @@ else
 	(cd "$DIST" && shasum -a 256 -c --quiet --strict SHA256SUMS) || fail "SHA256SUMS does not match the archives"
 fi
 
-# SHA256SUMS.asc: signed with the signing key (gpg reports the fingerprint of the key's primary key last in VALIDSIG).
+# SHA256SUMS.asc: a good signature (GOODSIG, which gpg does not report for a bad signature, nor for one made with an
+# expired or revoked key) made with the signing key (gpg reports the fingerprint of the key's primary key last in
+# VALIDSIG).
 if [ -n "$SIGN_KEY" ]; then
 	if [ ! -f "$DIST/SHA256SUMS.asc" ]; then
 		fail "SHA256SUMS.asc is missing"
 	else
-		signer=$(gpg --batch --status-fd 1 --verify "$DIST/SHA256SUMS.asc" "$DIST/SHA256SUMS" 2>/dev/null |
-			awk '$2 == "VALIDSIG" { print $NF }')
-		[ "$signer" = "$SIGN_KEY" ] || fail "SHA256SUMS.asc is not a valid signature of SHA256SUMS by $SIGN_KEY"
+		status=$(gpg --batch --status-fd 1 --verify "$DIST/SHA256SUMS.asc" "$DIST/SHA256SUMS" 2>/dev/null) || true
+		signer=$(printf '%s\n' "$status" | awk '$2 == "VALIDSIG" { print $NF }')
+		if ! printf '%s\n' "$status" | grep -q '^\[GNUPG:\] GOODSIG '; then
+			fail "SHA256SUMS.asc is not a good signature of SHA256SUMS (bad, or made with an expired or revoked key)"
+		elif [ "$signer" != "$SIGN_KEY" ]; then
+			fail "SHA256SUMS.asc is not a signature of SHA256SUMS by $SIGN_KEY"
+		fi
 	fi
 elif [ -e "$DIST/SHA256SUMS.asc" ]; then
 	fail "SHA256SUMS.asc is there, but no signing key was given to check it"
