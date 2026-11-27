@@ -33,7 +33,6 @@ import (
 // ownedLink is a link in a target folder that belongs to a playbook.
 type ownedLink struct {
 	path   string   // the link
-	folder string   // its target folder, as configured (relative to the managed folder)
 	format string   // the format of its playbook for the kind
 	others []string // the names in its target folder that are not links belonging to a playbook
 }
@@ -63,7 +62,7 @@ func ownedLinks(profiles []*profileState, only map[string]bool) []ownedLink {
 				if e := playbook.Owner(s.entries, t.Kind, item.Name(), current); e != nil {
 					owned[link] = true
 					if only == nil || only[link] {
-						links = append(links, ownedLink{path: link, folder: t.Folder, format: e.Format(t.Kind)})
+						links = append(links, ownedLink{path: link, format: e.Format(t.Kind)})
 					}
 				}
 			}
@@ -92,11 +91,17 @@ func (a *App) warnUnignored(links []ownedLink, failures bool) bool {
 	}
 	var inRepo []string
 	byPath := map[string]ownedLink{}
+	// Only those that the managed folder's .gitignore can name: inside the repository, and inside the managed folder
+	// (not those under %APPDATA%, unless it is inside it).
+	folders := map[string]string{}
 	for _, l := range links {
-		if fsutil.Within(l.path, repo) { // not those under %APPDATA%
-			inRepo = append(inRepo, l.path)
-			byPath[l.path] = l
+		rel, err := filepath.Rel(a.Managed, filepath.Dir(l.path))
+		if err != nil || !filepath.IsLocal(rel) || !fsutil.Within(l.path, repo) {
+			continue
 		}
+		inRepo = append(inRepo, l.path)
+		byPath[l.path] = l
+		folders[l.path] = filepath.ToSlash(rel) // where it is, however its target folder is written
 	}
 	if len(inRepo) == 0 {
 		return false
@@ -116,7 +121,7 @@ func (a *App) warnUnignored(links []ownedLink, failures bool) bool {
 	seen := map[string]bool{}
 	for _, p := range unignored {
 		l := byPath[p]
-		if line := "/" + gitignoreFolder(l.folder) + "/" + gitignoreLine(l); !seen[line] {
+		if line := "/" + gitignoreFolder(folders[p]) + "/" + gitignoreLine(l); !seen[line] {
 			seen[line] = true
 			lines = append(lines, line)
 		}

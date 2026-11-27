@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -116,11 +117,11 @@ func TestRemoveLinkWhateverItsTarget(t *testing.T) {
 		t.Skip("Windows reads link targets as text: they always resolve")
 	}
 	root := Canonical(t.TempDir())
-	if err := os.Symlink("loop", filepath.Join(root, "loop")); err != nil {
+	if err := symlink(t, "loop", filepath.Join(root, "loop")); err != nil {
 		t.Fatal(err)
 	}
 	link := filepath.Join(root, "link")
-	if err := os.Symlink(filepath.Join(root, "loop")+"/../x", link); err != nil {
+	if err := symlink(t, filepath.Join(root, "loop")+"/../x", link); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := Inspect(link); err == nil {
@@ -180,7 +181,7 @@ func TestLock(t *testing.T) {
 	// A link is never followed, even a broken one.
 	link := filepath.Join(filepath.Dir(path), "link.lock")
 	target := filepath.Join(filepath.Dir(path), "target")
-	if err := os.Symlink(target, link); err != nil {
+	if err := symlink(t, target, link); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Lock(link); err == nil {
@@ -261,7 +262,7 @@ func TestResolve(t *testing.T) {
 		}
 		return // symbolic links need developer mode
 	}
-	if err := os.Symlink(filepath.Join(root, "gone"), filepath.Join(root, "broken")); err != nil {
+	if err := symlink(t, filepath.Join(root, "gone"), filepath.Join(root, "broken")); err != nil {
 		t.Fatal(err)
 	}
 	// A broken link: where it would lead.
@@ -275,7 +276,7 @@ func TestResolve(t *testing.T) {
 	if err := CreateLink(filepath.Join(root, "deep", "inner"), real); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink("..", filepath.Join(real, "up")); err != nil {
+	if err := symlink(t, "..", filepath.Join(real, "up")); err != nil {
 		t.Fatal(err)
 	}
 	want := filepath.Join(root, "a")
@@ -290,13 +291,13 @@ func TestResolve(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(deep, filepath.Join(inside, "hop")); err != nil {
+	if err := symlink(t, deep, filepath.Join(inside, "hop")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink("hop/../x", filepath.Join(inside, "relative")); err != nil {
+	if err := symlink(t, "hop/../x", filepath.Join(inside, "relative")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(inside+"/hop/../y", filepath.Join(inside, "absolute")); err != nil {
+	if err := symlink(t, inside+"/hop/../y", filepath.Join(inside, "absolute")); err != nil {
 		t.Fatal(err)
 	}
 	for path, want := range map[string]string{
@@ -310,7 +311,7 @@ func TestResolve(t *testing.T) {
 			t.Errorf("Resolve(%q) = %q, %v; want %q", path, got, err, want)
 		}
 	}
-	if err := os.Symlink("loop", filepath.Join(root, "loop")); err != nil {
+	if err := symlink(t, "loop", filepath.Join(root, "loop")); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := Resolve(filepath.Join(root, "loop", "a")); err == nil {
@@ -381,4 +382,15 @@ func TestInside(t *testing.T) {
 			t.Error("DIR/sub is inside dir on a disk that ignores case")
 		}
 	}
+}
+
+// symlink creates a symbolic link as os.Symlink does, skipping the test when Windows refuses it for lack of developer
+// mode or administrator rights (ERROR_PRIVILEGE_NOT_HELD), which aiplam itself does not need for links to folders.
+func symlink(t *testing.T, oldname, newname string) error {
+	t.Helper()
+	err := os.Symlink(oldname, newname)
+	if err != nil && runtime.GOOS == "windows" && errors.Is(err, syscall.Errno(1314)) {
+		t.Skip("symbolic links need developer mode or administrator rights on Windows")
+	}
+	return err
 }

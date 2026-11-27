@@ -28,6 +28,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strings"
+	"syscall"
 	"testing"
 
 	"arxila.io/aiplam/internal/config"
@@ -450,7 +451,7 @@ func TestCollisions(t *testing.T) {
 
 	// Something already where a link must go, even a link to the same artifact made by hand.
 	third := e.playbook("third", "t-a", "t-b")
-	if err := os.Symlink(filepath.Join(third, "skills", "t-a"), filepath.Join(e.homeSkills(), "t-a")); err != nil {
+	if err := symlink(t, filepath.Join(third, "skills", "t-a"), filepath.Join(e.homeSkills(), "t-a")); err != nil {
 		t.Fatal(err)
 	}
 	e.mustFail(ExitFailure, []string{"'~/.agents/skills/t-a' already exists, linking to the same artifact, but it " +
@@ -540,7 +541,7 @@ func TestStatus(t *testing.T) {
 	}
 	// Pending changes, broken links that belong to no playbook, and template mismatches (warned, not counted).
 	e.skill(filepath.Join(pb, "skills"), "x-new")
-	if err := os.Symlink(filepath.Join(e.root, "gone"), filepath.Join(e.home, ".claude", "skills", "stray")); err != nil {
+	if err := symlink(t, filepath.Join(e.root, "gone"), filepath.Join(e.home, ".claude", "skills", "stray")); err != nil {
 		t.Fatal(err)
 	}
 	prof := e.profile(e.home, "default")
@@ -585,7 +586,7 @@ func TestList(t *testing.T) {
 	}
 	e.mustRun(ExitOK, "add", "x", pb)
 	e.file("home/.agents/skills/mine")                                                 // not a link: not listed
-	if err := os.Symlink(e.root, filepath.Join(e.homeSkills(), "other")); err != nil { // not a playbook's
+	if err := symlink(t, e.root, filepath.Join(e.homeSkills(), "other")); err != nil { // not a playbook's
 		t.Fatal(err)
 	}
 	if err := os.RemoveAll(filepath.Join(pb, "skills", "x-b")); err != nil {
@@ -742,11 +743,11 @@ func TestArtifactsStayInsidePlaybook(t *testing.T) {
 	pb := e.playbook("p", "x-a")
 	other := e.playbook("other", "x-b")
 	// A subfolder that leads outside the playbook through a link is refused; an artifact that does is not linked.
-	if err := os.Symlink(filepath.Join(other, "skills"), filepath.Join(pb, "linked")); err != nil {
+	if err := symlink(t, filepath.Join(other, "skills"), filepath.Join(pb, "linked")); err != nil {
 		t.Skipf("cannot create symbolic links: %v", err)
 	}
 	e.mustFail(ExitFailure, []string{"outside the playbook folder"}, "add", "x", pb, "-f", "skills:linked")
-	if err := os.Symlink(filepath.Join(other, "skills", "x-b"), filepath.Join(pb, "skills", "x-b")); err != nil {
+	if err := symlink(t, filepath.Join(other, "skills", "x-b"), filepath.Join(pb, "skills", "x-b")); err != nil {
 		t.Fatal(err)
 	}
 	e.mustRun(ExitOK, "add", "x", pb)
@@ -764,7 +765,7 @@ func TestPlaybookBehindSymlink(t *testing.T) {
 	if err := os.Rename(pb, moved); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(moved, pb); err != nil {
+	if err := symlink(t, moved, pb); err != nil {
 		t.Skipf("cannot create symbolic links: %v", err)
 	}
 	out, _ := e.mustRun(ExitOK, "update", "x")
@@ -776,6 +777,27 @@ func TestPlaybookBehindSymlink(t *testing.T) {
 	e.mustRun(ExitOK, "update")
 	e.mustRun(ExitOK, "remove", "x")
 	e.assertMissing(filepath.Join(e.homeSkills(), "x-a"))
+}
+
+// TestRemoveBrokenProfileInAnotherCase checks that removing a profile whose file is a broken link, named in another
+// case on a disk that ignores case, disables it too.
+func TestRemoveBrokenProfileInAnotherCase(t *testing.T) {
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init", "-u", "-a", "standard", "-p", "Work")
+	if !config.ProfileExists(e.home, "work") {
+		t.Skip("the file system distinguishes case")
+	}
+	file := config.ProfileFile(e.home, "Work")
+	if err := os.Remove(file); err != nil {
+		t.Fatal(err)
+	}
+	if err := symlink(t, filepath.Join(e.root, "gone.yaml"), file); err != nil {
+		t.Fatal(err)
+	}
+	e.run("profile", "remove", "work", "-u")
+	if got := e.enabled(e.home); got != "" {
+		t.Fatalf("still enabled: %q", got)
+	}
 }
 
 func TestProfileNameCase(t *testing.T) {
@@ -878,7 +900,7 @@ func TestConfigurationFileLinks(t *testing.T) {
 	// A broken link where a profile's file goes: init takes it for an existing profile.
 	project := e.mkdir(filepath.Join(e.root, "project"))
 	broken := filepath.Join(e.mkdir(filepath.Join(project, config.DirName)), "default.yaml")
-	if err := os.Symlink(filepath.Join(e.root, "gone.yaml"), broken); err != nil {
+	if err := symlink(t, filepath.Join(e.root, "gone.yaml"), broken); err != nil {
 		t.Fatal(err)
 	}
 	e.mustFail(ExitFailure, []string{"already exists"}, "init", project, "-a", "standard")
@@ -886,30 +908,55 @@ func TestConfigurationFileLinks(t *testing.T) {
 		t.Fatal("the broken link was replaced")
 	}
 
-	// A profile file that is a link to a file: commands that read it work, those that would change it fail.
+	// A profile file that is a link to a file: commands that read it work, those that would change it fail, before
+	// changing any link.
 	other := e.mkdir(filepath.Join(e.root, "other"))
 	e.mustRun(ExitOK, "init", other, "-a", "standard")
+	e.app.Cwd = other
+	kept := e.playbook("kept", "k-a")
+	e.mustRun(ExitOK, "add", "k", kept)
+	keptLink := filepath.Join(other, ".agents", "skills", "k-a")
 	file := config.ProfileFile(other, "default")
 	shared := filepath.Join(e.mkdir(filepath.Join(other, "shared")), "default.yaml")
 	if err := os.Rename(file, shared); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join("..", "shared", "default.yaml"), file); err != nil {
+	if err := symlink(t, filepath.Join("..", "shared", "default.yaml"), file); err != nil {
 		t.Fatal(err)
 	}
 	before, err := os.ReadFile(shared)
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.app.Cwd = other
 	e.mustRun(ExitOK, "status")
 	pb := e.playbook("pb", "x-a")
-	e.mustFail(ExitFailure, []string{"is not a regular file"}, "add", "x", pb)
+	// Refused before changing any link: nothing is undone.
+	refused := func(args ...string) {
+		t.Helper()
+		code, out, errOut := e.run(args...)
+		if code != ExitFailure || !contains(errOut, "is not a regular file") || contains(out+errOut, "undone") {
+			t.Fatalf("aiplam %s: exit %d\n%s%s", strings.Join(args, " "), code, out, errOut)
+		}
+	}
+	refused("add", "x", pb)
+	refused("remove", "k")
 	after, err := os.ReadFile(shared)
 	if !isLink(file) || err != nil || string(after) != string(before) {
 		t.Fatalf("the profile file or its link changed: link %v, %v", isLink(file), err)
 	}
 	e.assertMissing(filepath.Join(other, ".agents", "skills", "x-a"))
+	e.assertLink(keptLink, filepath.Join(kept, "skills", "k-a"))
+
+	// The same for the aiplam configuration file.
+	conf := config.ConfigFile(other)
+	if err := os.Rename(conf, filepath.Join(other, "shared", "conf.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if err := symlink(t, filepath.Join("..", "shared", "conf.yaml"), conf); err != nil {
+		t.Fatal(err)
+	}
+	refused("profile", "disable", "default")
+	e.assertLink(keptLink, filepath.Join(kept, "skills", "k-a"))
 }
 
 func TestSandbox(t *testing.T) {
@@ -1040,7 +1087,7 @@ func TestStatusReportsLeftoverLinks(t *testing.T) {
 
 	// Links to elsewhere are not aiplam's: not reported. A profile that is not enabled and not valid is warned about,
 	// without counting.
-	if err := os.Symlink(e.root, filepath.Join(e.homeSkills(), "mine")); err != nil {
+	if err := symlink(t, e.root, filepath.Join(e.homeSkills(), "mine")); err != nil {
 		t.Fatal(err)
 	}
 	e.writeProfile(e.home, "broken", "name: other\n")
@@ -1051,6 +1098,21 @@ func TestStatusReportsLeftoverLinks(t *testing.T) {
 	out, _ := e.mustRun(ExitOK, "profile", "list")
 	if !contains(out, "broken") || !contains(out, "problem(s) to fix by hand") {
 		t.Fatalf("unexpected list:\n%s", out)
+	}
+
+	// A link whose target cannot be resolved (Windows reads targets as text: they always resolve) is reported.
+	if runtime.GOOS != "windows" {
+		if err := os.Remove(config.ProfileFile(e.home, "broken")); err != nil {
+			t.Fatal(err)
+		}
+		loop := filepath.Join(e.homeSkills(), "loop")
+		if err := symlink(t, "loop", loop); err != nil {
+			t.Fatal(err)
+		}
+		if err := symlink(t, loop+"/../y", filepath.Join(e.homeSkills(), "notes")); err != nil {
+			t.Fatal(err)
+		}
+		e.mustFail(ExitFailure, []string{"~/.agents/skills/notes -> ", "cannot be resolved"}, "status")
 	}
 }
 
@@ -1309,7 +1371,7 @@ func TestLinkedFoldersLeadingOutside(t *testing.T) {
 		if err := os.Remove(path); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Symlink(target, path); err != nil {
+		if err := symlink(t, target, path); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1353,6 +1415,8 @@ func TestQuotedHintsAndGitNote(t *testing.T) {
 		{"windows", `~\p`, `C:\h\p`, `C:\h\p`}, // backslashes are not escapes, and cmd does not expand "~"
 		{"windows", `~\My P`, `C:\h\My P`, `"C:\h\My P"`},
 		{"windows", `~\a&b`, `C:\h\a&b`, `"C:\h\a&b"`},
+		{"windows", `~\a$b`, `C:\h\a$b`, `'C:\h\a$b'`}, // PowerShell would expand $b inside double quotes
+		{"windows", "~\\a`'b", "C:\\h\\a`'b", "'C:\\h\\a`''b'"},
 	} {
 		if got := shellPath(c.goos, c.pretty, c.abs); got != c.want {
 			t.Errorf("shellPath(%s, %q) = %s, want %s", c.goos, c.abs, got, c.want)
@@ -1640,6 +1704,21 @@ func TestUnignoredLinksSpecialFolders(t *testing.T) {
 	if err := check.Run(); err != nil {
 		t.Fatalf("the suggested line does not make git ignore the link: %v", err)
 	}
+
+	// A target folder written by hand in another way: the line names where the links are.
+	other := e.mkdir(filepath.Join(e.root, "other"))
+	e.git(other, "init", "-q")
+	e.mustRun(ExitOK, "init", other, "-f", "skills:.agents/skills")
+	prof := e.profile(other, "default")
+	prof.Targets[0].Folder = "./.agents/skills"
+	if err := config.SaveProfile(other, prof); err != nil {
+		t.Fatal(err)
+	}
+	e.app.Cwd = other
+	_, errOut := e.mustRun(ExitOK, "add", "x", e.playbook("pb2", "x-a"))
+	if !contains(errOut, "\n  /.agents/skills/x-*\n") || contains(errOut, "/./") {
+		t.Fatalf("unexpected lines:\n%s", errOut)
+	}
 }
 
 func TestGitignoreName(t *testing.T) {
@@ -1677,4 +1756,15 @@ func TestDrivePathsInFolder(t *testing.T) {
 		"profile", "add", "p", "-f", "skills:D:/x")
 	// A one-letter subfolder followed by a format is not a drive.
 	e.mustRun(ExitOK, "add", "x", pb, "-f", "skills:s:x-*")
+}
+
+// symlink creates a symbolic link as os.Symlink does, skipping the test when Windows refuses it for lack of developer
+// mode or administrator rights (ERROR_PRIVILEGE_NOT_HELD), which aiplam itself does not need for links to folders.
+func symlink(t *testing.T, oldname, newname string) error {
+	t.Helper()
+	err := os.Symlink(oldname, newname)
+	if err != nil && runtime.GOOS == "windows" && errors.Is(err, syscall.Errno(1314)) {
+		t.Skip("symbolic links need developer mode or administrator rights on Windows")
+	}
+	return err
 }

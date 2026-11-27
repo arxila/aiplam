@@ -606,12 +606,17 @@ func (a *App) hint(command string) string {
 
 // shellPath returns a path to paste in a shell on the operating system goos. On Windows, it is the absolute path (cmd
 // does not expand "~"), in double quotes when it holds spaces or characters that cmd or PowerShell treat specially
-// (Windows paths cannot hold double quotes, and backslashes are not escapes there). Elsewhere, it is pretty (the path,
-// shortened with "~") when it needs no quoting, or else the absolute path in double quotes, escaped for POSIX shells
-// ("~" is not expanded inside quotes).
+// (Windows paths cannot hold double quotes, and backslashes are not escapes there); but in single quotes, doubling
+// those in it, when it holds '$' or '`', which PowerShell (Windows' usual shell) would still expand inside double
+// quotes. No quoting suits both shells then (cmd does not take single quotes), nor for '%' in cmd, which may expand
+// '%NAME%' even inside double quotes. Elsewhere, it is pretty (the path, shortened with "~") when it needs no quoting,
+// or else the absolute path in double quotes, escaped for POSIX shells ("~" is not expanded inside quotes).
 func shellPath(goos, pretty, abs string) string {
 	if goos == "windows" {
-		if strings.ContainsAny(abs, " \t&|()<>^%!;,=`$'@{}#+") {
+		switch {
+		case strings.ContainsAny(abs, "$`"):
+			return "'" + strings.ReplaceAll(abs, "'", "''") + "'"
+		case strings.ContainsAny(abs, " \t&|()<>^%!;,=`$'@{}#+"):
 			return `"` + abs + `"`
 		}
 		return abs
@@ -1030,6 +1035,17 @@ func (a *App) printAction(act playbook.Action) {
 // cleanup removes the folders that the removals of an applied plan left empty, printing each one.
 func (a *App) cleanup(plan playbook.Plan) {
 	playbook.Cleanup(plan, func(dir string) { a.printf("  - %s (empty folder removed)\n", a.pretty(dir)) })
+}
+
+// checkWritable fails when the file of one of profiles cannot be saved (see config.CheckWritable), before anything is
+// changed.
+func (a *App) checkWritable(profiles []*profileState) error {
+	for _, s := range profiles {
+		if err := config.CheckWritable(config.ProfileFile(a.Managed, s.name)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // restoreProfiles saves back the profiles that a command had already saved when saving another one failed, and returns

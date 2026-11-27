@@ -94,6 +94,10 @@ Type 'exit' to leave; then delete the sandbox with: rm -rf $quoted
 
 MSG
 
+# The shell must be one that can be started, or the sandbox is removed (the cleanup is only given up for the session).
+shell=${SHELL:-/bin/sh}
+command -v "$shell" >/dev/null 2>&1 && [ -x "$(command -v "$shell")" ] ||
+  { echo "cannot start the shell '$shell': set SHELL to one that can be" >&2; exit 1; }
 trap - EXIT
 cd "$sandbox"
-HOME=$sandbox PATH=$sandbox/bin:$PATH AIPLAM_SANDBOX=$sandbox exec "${SHELL:-/bin/sh}"
+HOME=$sandbox PATH=$sandbox/bin:$PATH AIPLAM_SANDBOX=$sandbox exec "$shell"

@@ -253,6 +253,11 @@ func (a *App) cmdStatus(args []string) error {
 		for _, item := range items {
 			link := filepath.Join(dir, item.Name())
 			state, current, err := fsutil.Inspect(link)
+			if err != nil && state == fsutil.Link {
+				problem("link %s -> %s cannot be resolved (%v): it belongs to no playbook; remove it by hand",
+					a.pretty(link), a.pretty(current), err)
+				continue
+			}
 			if err != nil || state != fsutil.Link || ownedBy(st.enabled, link, item.Name(), current) {
 				continue
 			}

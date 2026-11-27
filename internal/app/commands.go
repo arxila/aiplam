@@ -392,6 +392,9 @@ func (a *App) cmdAdd(args []string) error {
 		a.printf("  profile '%s':\n", u.name)
 		total += a.printSources(u, entries[i])
 	}
+	if err := a.checkWritable(updated); err != nil {
+		return err
+	}
 	if err := playbook.Apply(plan, a.printAction); err != nil {
 		return fmt.Errorf("%w; the playbook was not registered: fix the problem and add it again", err)
 	}
@@ -629,6 +632,9 @@ func (a *App) cmdRemove(args []string) error {
 		if err != nil {
 			return err
 		}
+	}
+	if err := a.checkWritable(updated); err != nil {
+		return err
 	}
 	if err := playbook.Apply(plan, a.printAction); err != nil {
 		return fmt.Errorf("%w; the playbook is still registered: fix the problem and remove it again", err)

@@ -51,14 +51,14 @@ expected=$(for p in $PLATFORMS; do
 	[ "$os" = windows ] && ext=zip
 	echo "$BINARY-$VERSION-$os-$arch.$ext"
 done | sort)
-# Nothing else than the archives, SHA256SUMS and its signature: no other file can be published with them.
-release_files=" $(echo $archives) SHA256SUMS SHA256SUMS.asc "
-for entry in $(cd "$DIST" && ls -A); do
-	case $release_files in
-		*" $entry "*) ;;
-		*) fail "$DIST holds '$entry', which is not part of a release" ;;
-	esac
-done
+# Nothing else than the expected archives, SHA256SUMS and its signature: no other file can be published with them.
+# Python compares the names exactly (shell words would split a name with spaces into allowed ones).
+extra=$(python3 -I -c '
+import os, sys
+for name in sorted(set(os.listdir(sys.argv[1])) - set(sys.argv[2:])):
+    print(repr(name))
+' "$DIST" $expected SHA256SUMS SHA256SUMS.asc)
+[ -z "$extra" ] || fail "$DIST holds files that are not part of a release:$(printf '\n    %s' "$extra")"
 [ "$(printf '%s\n' $archives | sort)" = "$expected" ] ||
 	fail "the archives are not exactly one per platform:$(printf '\n    %s' $archives)" \
 		"(expected:$(printf '\n    %s' $expected))"

@@ -19,12 +19,14 @@
 package playbook
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
+	"syscall"
 	"testing"
 
 	"arxila.io/aiplam/internal/config"
@@ -144,13 +146,13 @@ func TestItemsFormats(t *testing.T) {
 	s.file("pb/agents/x-r.agent.md")
 	s.file("pb/outside/x-out/SKILL.md")
 	inside := filepath.Join(s.root, "pb", "outside", "x-out")
-	if err := os.Symlink(inside, filepath.Join(s.pb, "skills", "x-in")); err != nil {
+	if err := symlink(t, inside, filepath.Join(s.pb, "skills", "x-in")); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(filepath.Join(s.root, "elsewhere", "x-far"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(s.root, "elsewhere", "x-far"),
+	if err := symlink(t, filepath.Join(s.root, "elsewhere", "x-far"),
 		filepath.Join(s.pb, "skills", "x-far")); err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +161,7 @@ func TestItemsFormats(t *testing.T) {
 		s.skill("x-line\nbreak")
 	}
 	// A broken link counts as leading where it would lead once its target exists.
-	if err := os.Symlink(filepath.Join(s.root, "elsewhere", "x-later"),
+	if err := symlink(t, filepath.Join(s.root, "elsewhere", "x-later"),
 		filepath.Join(s.pb, "skills", "x-later")); err != nil {
 		t.Fatal(err)
 	}
@@ -267,10 +269,10 @@ func TestTransitionConflicts(t *testing.T) {
 
 	// Something in the way: a file, a link to something else, and a link to the same artifact made by hand.
 	s.file("m/.agents/skills/x-a")
-	if err := os.Symlink(filepath.Join(s.root, "elsewhere"), s.link(".agents/skills/x-b")); err != nil {
+	if err := symlink(t, filepath.Join(s.root, "elsewhere"), s.link(".agents/skills/x-b")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(s.pb, "skills", "x-c"), s.link(".agents/skills/x-c")); err != nil {
+	if err := symlink(t, filepath.Join(s.pb, "skills", "x-c"), s.link(".agents/skills/x-c")); err != nil {
 		t.Fatal(err)
 	}
 	after := s.group("p", pb("x", nil))
@@ -521,7 +523,7 @@ func TestItemsUnreadable(t *testing.T) {
 
 	// An artifact that is a link to a folder that cannot be read: an error, not an artifact gone.
 	s.file("pb/private/x-b/SKILL.md")
-	if err := os.Symlink(filepath.Join("..", "..", "private", "x-b"), filepath.Join(inner, "skills", "x-b")); err != nil {
+	if err := symlink(t, filepath.Join("..", "..", "private", "x-b"), filepath.Join(inner, "skills", "x-b")); err != nil {
 		t.Fatal(err)
 	}
 	s.apply(s.transition([]Group{g}, []Group{g}, scopeOf(g)))
@@ -556,7 +558,7 @@ func TestLinkedArtifacts(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(s.pb, "skills"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join("..", "shared", "x-real"), filepath.Join(s.pb, "skills", "x-alias")); err != nil {
+	if err := symlink(t, filepath.Join("..", "shared", "x-real"), filepath.Join(s.pb, "skills", "x-alias")); err != nil {
 		t.Fatal(err)
 	}
 	g := s.group("p", pb("x", nil))
@@ -613,7 +615,7 @@ func TestRevertKeepsLinkType(t *testing.T) {
 	if err := fsutil.RemoveLink(dirLink); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(skill, dirLink); err != nil {
+	if err := symlink(t, skill, dirLink); err != nil {
 		t.Fatal(err)
 	}
 	links := []string{s.link(".claude/agents/x-r.md"), dirLink}
@@ -653,7 +655,7 @@ func TestAliasedTargetFolders(t *testing.T) {
 	if err := os.MkdirAll(s.link(".claude"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join("..", ".agents", "skills"), s.link(".claude/skills")); err != nil {
+	if err := symlink(t, filepath.Join("..", ".agents", "skills"), s.link(".claude/skills")); err != nil {
 		t.Fatal(err)
 	}
 	p := s.group("p", pb("x", nil))
@@ -696,20 +698,20 @@ func TestLinksReadAsTheSystemDoes(t *testing.T) {
 	s.skill("x-a")
 	elsewhere := filepath.Dir(s.file("elsewhere/d/SKILL.md"))
 	s.file("elsewhere/x-a/SKILL.md")
-	if err := os.Symlink(elsewhere, filepath.Join(s.pb, "skills", "sub")); err != nil {
+	if err := symlink(t, elsewhere, filepath.Join(s.pb, "skills", "sub")); err != nil {
 		t.Fatal(err)
 	}
 	link := s.link(".agents/skills/x-a")
 	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(s.pb+"/skills/sub/../x-a", link); err != nil {
+	if err := symlink(t, s.pb+"/skills/sub/../x-a", link); err != nil {
 		t.Fatal(err)
 	}
 	// A broken one, through a folder that is missing for now: where it will lead once that folder exists.
 	s.skill("x-b")
 	if runtime.GOOS != "windows" {
-		if err := os.Symlink(s.pb+"/skills/sub/missing/../../x-b", s.link(".agents/skills/x-b")); err != nil {
+		if err := symlink(t, s.pb+"/skills/sub/missing/../../x-b", s.link(".agents/skills/x-b")); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -771,7 +773,7 @@ func TestRevertReportsFoldersLeft(t *testing.T) {
 	if err := os.MkdirAll(empty, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	kept := []Action{{Kind: Create, Link: filepath.Join(full, "x"), madeDirs: made([]string{full})}}
+	kept := []Action{{Kind: Create, Link: filepath.Join(full, "x"), madeDirs: mustMade(t, []string{full})}}
 	if err := Revert(kept); err != nil {
 		t.Errorf("a folder with something in it: %v", err)
 	}
@@ -779,7 +781,7 @@ func TestRevertReportsFoldersLeft(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
-	madeDirs := made([]string{empty})
+	madeDirs := mustMade(t, []string{empty})
 	if err := Revert([]Action{{Kind: Create, Link: filepath.Join(empty, "x"), madeDirs: madeDirs}}); err == nil {
 		t.Error("an empty folder that cannot be removed: no error")
 	}
@@ -803,7 +805,7 @@ func TestRemoveDirsOnlyFolders(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	dirs := made([]string{path})
+	dirs := mustMade(t, []string{path})
 
 	// A link in its place (a junction on Windows, which needs no rights).
 	if err := os.Remove(path); err != nil {
@@ -860,14 +862,23 @@ func TestUnrelatedLinksInTargetFolders(t *testing.T) {
 	g := s.group("p", pb("x", nil))
 	s.apply(s.transition(nil, []Group{g}, scopeOf(g)))
 	dir := s.link(".agents/skills")
-	if err := os.Symlink("loop", filepath.Join(dir, "loop")); err != nil {
+	if err := symlink(t, "loop", filepath.Join(dir, "loop")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(dir, "loop")+"/../y", filepath.Join(dir, "notes")); err != nil {
+	if err := symlink(t, filepath.Join(dir, "loop")+"/../y", filepath.Join(dir, "notes")); err != nil {
 		t.Fatal(err)
 	}
 	if plan := s.transition([]Group{g}, nil, scopeOf(g)); actions(plan, Remove) != "x-a" {
 		t.Errorf("removals: %q", actions(plan, Remove))
+	}
+	// Nor one with a name the playbook's links can have (Windows reads targets as text: they always resolve).
+	if runtime.GOOS != "windows" {
+		if err := symlink(t, filepath.Join(dir, "loop")+"/../y", filepath.Join(dir, "x-z")); err != nil {
+			t.Fatal(err)
+		}
+		if plan := s.transition([]Group{g}, nil, scopeOf(g)); actions(plan, Remove) != "x-a" {
+			t.Errorf("removals with x-z: %q", actions(plan, Remove))
+		}
 	}
 }
 
@@ -898,10 +909,10 @@ func TestUnresolvableLinkInTheWay(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink("loop", filepath.Join(dir, "loop")); err != nil {
+	if err := symlink(t, "loop", filepath.Join(dir, "loop")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(dir, "loop")+"/../x", filepath.Join(dir, "x-a")); err != nil {
+	if err := symlink(t, filepath.Join(dir, "loop")+"/../x", filepath.Join(dir, "x-a")); err != nil {
 		t.Fatal(err)
 	}
 	g := s.group("p", pb("x", nil))
@@ -909,4 +920,45 @@ func TestUnresolvableLinkInTheWay(t *testing.T) {
 	if c := plan.Conflicts(); err != nil || len(c) != 1 || c[0].Cause != OtherLink || c[0].Name != "x-a" {
 		t.Fatalf("conflicts %+v, %v; want the link in the way", c, err)
 	}
+	// Even when its target, read as text, is the artifact: it is not the link to it.
+	link := filepath.Join(dir, "x-a")
+	rel, err := filepath.Rel(dir, filepath.Join(s.pb, "skills", "x-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := symlink(t, filepath.Join(dir, "loop")+"/../"+rel, link); err != nil {
+		t.Fatal(err)
+	}
+	plan, err = Transition(nil, []Group{g}, scopeOf(g))
+	if c := plan.Conflicts(); err != nil || len(c) != 1 || c[0].Cause != OtherLink {
+		t.Fatalf("as text, the artifact: conflicts %+v, %v; want the link in the way", c, err)
+	}
+	// Where a link was made, it cannot be told whether it is that link: undoing it fails.
+	if err := Revert([]Action{{Kind: Create, Link: link, Source: filepath.Join(s.pb, "skills", "x-a")}}); err == nil {
+		t.Error("undoing a creation where a link that cannot be resolved is: no error")
+	}
+}
+
+// mustMade returns made(dirs), failing the test on an error.
+func mustMade(t *testing.T, dirs []string) []madeDir {
+	t.Helper()
+	out, err := made(dirs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// symlink creates a symbolic link as os.Symlink does, skipping the test when Windows refuses it for lack of developer
+// mode or administrator rights (ERROR_PRIVILEGE_NOT_HELD), which aiplam itself does not need for links to folders.
+func symlink(t *testing.T, oldname, newname string) error {
+	t.Helper()
+	err := os.Symlink(oldname, newname)
+	if err != nil && runtime.GOOS == "windows" && errors.Is(err, syscall.Errno(1314)) {
+		t.Skip("symbolic links need developer mode or administrator rights on Windows")
+	}
+	return err
 }

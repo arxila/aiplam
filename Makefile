@@ -55,45 +55,53 @@ vet:
 # files (which the Apache License requires to go with every copy), a SHA256SUMS file, and its detached signature
 # SHA256SUMS.asc. When HEAD is tagged, the tag must match the version. scripts/check-dist.sh then checks that the
 # archives hold exactly these files, and nothing of the machine that built them, and that SIGN_KEY signed SHA256SUMS.
+# They are built in $(DIST).new, which only replaces $(DIST) once all of that passed: a failed build leaves the previous
+# one as it was.
 dist:
 	@[ -n "$(VERSION)" ] || { echo "cannot read the version from internal/app/app.go: run 'make VERSION=x.y.z dist'" >&2; exit 1; }
-	@for tag in $$(git tag --points-at HEAD 'v*' 2>/dev/null); do \
-		[ "$$tag" = "v$(VERSION)" ] || { echo "HEAD is tagged $$tag, but the version is $(VERSION)" >&2; exit 1; }; \
-	done
+	@if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then \
+		tags=$$(git tag --points-at HEAD 'v*') || exit 1; \
+		for tag in $$tags; do \
+			[ "$$tag" = "v$(VERSION)" ] || { echo "HEAD is tagged $$tag, but the version is $(VERSION)" >&2; exit 1; }; \
+		done; \
+	fi
 	@command -v sha256sum >/dev/null || command -v shasum >/dev/null || \
 		{ echo "sha256sum or shasum is needed" >&2; exit 1; }
 	@[ -z "$(SIGN_KEY)" ] || gpg --list-secret-keys "$(SIGN_KEY)" >/dev/null 2>&1 || \
 		{ echo "cannot sign: gpg is not installed, or has no secret key $(SIGN_KEY)" >&2; \
 		echo "(for a build that is not going to be published, run 'make SIGN_KEY= dist')" >&2; exit 1; }
-	@for tool in go tar gzip zip unzip python3; do \
+	@for tool in go tar gzip zip unzip python3 cp awk sort; do \
 		command -v $$tool >/dev/null || { echo "$$tool is needed to build the release archives" >&2; exit 1; }; \
 	done
-	@rm -rf $(DIST) $(BINARY) # only once the checks above passed
-	@mkdir -p $(DIST)
+	@rm -rf $(DIST).new
+	@mkdir -p $(DIST).new
 	@for p in $(PLATFORMS); do \
 		os=$${p%/*}; arch=$${p#*/}; ext=; [ $$os = windows ] && ext=.exe; \
-		name=$(BINARY)-$(VERSION)-$$os-$$arch; dir=$(DIST)/$$name; \
+		name=$(BINARY)-$(VERSION)-$$os-$$arch; dir=$(DIST).new/$$name; \
 		echo "building $$name"; \
 		mkdir -p $$dir && cp LICENSE.txt NOTICE.txt README.md $$dir/ || exit 1; \
 		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags "$(LDFLAGS)" -o $$dir/$(BINARY)$$ext \
 			./cmd/aiplam || exit 1; \
 		if [ $$os = windows ]; then \
-			(cd $(DIST) && zip -q -r -X $$name.zip $$name) || exit 1; \
+			(cd $(DIST).new && zip -q -r -X $$name.zip $$name) || exit 1; \
 		else \
-			COPYFILE_DISABLE=1 tar $(TARFLAGS) -C $(DIST) -czf $(DIST)/$$name.tar.gz $$name || exit 1; \
+			COPYFILE_DISABLE=1 tar $(TARFLAGS) -C $(DIST).new -czf $(DIST).new/$$name.tar.gz $$name || exit 1; \
 		fi; \
 		rm $$dir/* && rmdir $$dir || exit 1; \
 	done
-	@cd $(DIST) && { command -v sha256sum >/dev/null && sha256sum $(BINARY)-* || shasum -a 256 $(BINARY)-*; } > SHA256SUMS
-	@echo "written $(DIST)/SHA256SUMS"
+	@cd $(DIST).new && { command -v sha256sum >/dev/null && sha256sum $(BINARY)-* || shasum -a 256 $(BINARY)-*; } \
+		> SHA256SUMS
+	@echo "written SHA256SUMS"
 	@if [ -n "$(SIGN_KEY)" ]; then \
 		gpg --batch --yes --local-user "$(SIGN_KEY)" --armor --detach-sign \
-			--output $(DIST)/SHA256SUMS.asc $(DIST)/SHA256SUMS || exit 1; \
-		echo "written $(DIST)/SHA256SUMS.asc"; \
+			--output $(DIST).new/SHA256SUMS.asc $(DIST).new/SHA256SUMS || exit 1; \
+		echo "written SHA256SUMS.asc"; \
 	else \
 		echo "SHA256SUMS is not signed (SIGN_KEY is empty): it must be signed before it is published"; \
 	fi
-	@PLATFORMS="$(PLATFORMS)" ./scripts/check-dist.sh $(DIST) $(BINARY) $(VERSION) $(SIGN_KEY)
+	@PLATFORMS="$(PLATFORMS)" ./scripts/check-dist.sh $(DIST).new $(BINARY) $(VERSION) $(SIGN_KEY)
+	@rm -rf $(DIST) $(BINARY) && mv $(DIST).new $(DIST)
+	@echo "the release archives are in $(DIST)"
 
 # Signs the draft release that the Release workflow created for VERSION, after checking its attestations and archives
 # (see scripts/sign-release.sh). Publishing the draft is left to the maintainer.
@@ -102,7 +110,7 @@ release-sign:
 	PLATFORMS="$(PLATFORMS)" ./scripts/sign-release.sh $(VERSION) $(SIGN_KEY)
 
 clean:
-	rm -rf $(DIST) $(BINARY)
+	rm -rf $(DIST) $(DIST).new $(BINARY)
 
 # A shell with HOME set to a temporary folder holding copies of testdata/playbooks (see scripts/sandbox.sh).
 sandbox: build

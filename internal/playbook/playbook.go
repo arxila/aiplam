@@ -434,10 +434,12 @@ func Transition(from, to []Group, scope map[Key]bool) (Plan, error) {
 						continue // a name the playbook's links cannot have: not inspected, whatever it is
 					}
 					state, current, err := fsutil.Inspect(link)
-					if err != nil {
+					if err != nil && state != fsutil.Link {
 						return plan, err
 					}
-					if state != fsutil.Link || !e.Owns(t.Kind, name, current) {
+					// A link whose target cannot be resolved is not one of the playbook's (those lead into its
+					// folder for the kind, which resolves): it is left as it is (status reports it).
+					if err != nil || state != fsutil.Link || !e.Owns(t.Kind, name, current) {
 						continue
 					}
 					keep := false
@@ -510,18 +512,20 @@ func Transition(from, to []Group, scope map[Key]bool) (Plan, error) {
 						continue
 					}
 					state, current := fsutil.Missing, ""
+					unresolved := false
 					if !removed[k] {
 						var err error
 						// A link whose target cannot be resolved is in the way like any other (current is its
-						// target as written).
+						// target as written), and never the link to the same artifact.
 						if state, current, err = fsutil.Inspect(link); err != nil && state != fsutil.Link {
 							return plan, err
 						}
+						unresolved = err != nil
 					}
 					switch {
 					case state == fsutil.Missing:
 						act.Kind = Create
-					case state == fsutil.Link && sameFolder(current, it.Source):
+					case state == fsutil.Link && !unresolved && sameFolder(current, it.Source):
 						act.Kind, act.Cause = Conflict, Exists
 					case state == fsutil.Link:
 						act.Kind, act.Cause, act.Current = Conflict, OtherLink, current
@@ -671,7 +675,11 @@ func Apply(plan Plan, report func(Action)) error {
 		case Create:
 			missing := missingDirs(filepath.Dir(a.Link), a.Stop)
 			err = os.MkdirAll(filepath.Dir(a.Link), 0o755)
-			a.madeDirs = made(missing) // also those made before failing
+			var merr error
+			a.madeDirs, merr = made(missing) // also those made before failing
+			if err == nil {
+				err = merr
+			}
 			if err == nil {
 				err = fsutil.CreateLink(a.Link, a.Source)
 			}
@@ -718,15 +726,20 @@ type madeDir struct {
 	info os.FileInfo
 }
 
-// made returns the folders of dirs that exist now, as madeDirs.
-func made(dirs []string) []madeDir {
+// made returns the folders of dirs that exist now, as madeDirs, and the first error finding out whether one does.
+func made(dirs []string) ([]madeDir, error) {
 	var out []madeDir
+	var first error
 	for _, dir := range dirs {
-		if info, err := os.Lstat(dir); err == nil && info.IsDir() {
+		info, err := os.Lstat(dir)
+		switch {
+		case err == nil && info.IsDir():
 			out = append(out, madeDir{dir, info})
+		case err != nil && !errors.Is(err, fs.ErrNotExist) && first == nil:
+			first = err
 		}
 	}
-	return out
+	return out, first
 }
 
 // removeDirs removes the folders of dirs (deepest first) that are empty, and returns the first error removing one of
@@ -769,17 +782,18 @@ func Revert(actions []Action) error {
 		a := actions[i]
 		var err error
 		switch a.Kind {
-		// A link whose target cannot be resolved is something else in the place: not the link made, nor a gap to fill.
 		case Create:
-			if state, current, ierr := fsutil.Inspect(a.Link); ierr != nil && state != fsutil.Link {
+			// A link that cannot be resolved where the link was made: it cannot be told whether it is that link.
+			if state, current, ierr := fsutil.Inspect(a.Link); ierr != nil {
 				err = ierr
-			} else if ierr == nil && state == fsutil.Link && sameFolder(current, a.Source) {
+			} else if state == fsutil.Link && sameFolder(current, a.Source) {
 				err = fsutil.RemoveLink(a.Link)
 			}
 			if err == nil {
 				err = removeDirs(a.madeDirs)
 			}
 		case Remove:
+			// A link whose target cannot be resolved where the link was removed: something else took its place.
 			if state, _, ierr := fsutil.Inspect(a.Link); ierr != nil && state != fsutil.Link {
 				err = ierr
 			} else if state == fsutil.Missing {

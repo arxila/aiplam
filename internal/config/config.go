@@ -473,13 +473,14 @@ func ProfileName(managed, name string) string {
 }
 
 // SameProfile reports whether two profile names designate the same profile: equal names, or names of the same file (on
-// file systems that ignore case, "Work" and "work" are the same profile).
+// file systems that ignore case, "Work" and "work" are the same profile). The files are compared themselves, not
+// what they lead to when they are links (even broken ones).
 func SameProfile(managed, a, b string) bool {
 	if a == b {
 		return true
 	}
-	fa, errA := os.Stat(ProfileFile(managed, a))
-	fb, errB := os.Stat(ProfileFile(managed, b))
+	fa, errA := os.Lstat(ProfileFile(managed, a))
+	fb, errB := os.Lstat(ProfileFile(managed, b))
 	return errA == nil && errB == nil && os.SameFile(fa, fb)
 }
 
@@ -589,16 +590,24 @@ func SaveProfile(managed string, s *Profile) error {
 		s.Name, CustomAgent, CustomAgent))
 }
 
+// CheckWritable returns an error when saving would refuse to replace what is at file: only a regular file is replaced,
+// never a link (which saving would replace with a file, leaving what it leads to behind), nor anything else. Commands
+// check it before changing any link, so that saving does not fail afterwards for this.
+func CheckWritable(file string) error {
+	if info, err := os.Lstat(file); err == nil && !info.Mode().IsRegular() {
+		return fmt.Errorf("'%s' is not a regular file (it may be a link): aiplam only writes regular files in %s; "+
+			"replace it with the file itself", file, DirName)
+	}
+	return nil
+}
+
 func save(file string, v any, header string) error {
 	dir := filepath.Dir(file)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	// Only a regular file is replaced: never a link (which saving would replace with a file, leaving what it leads to
-	// behind), nor anything else.
-	if info, err := os.Lstat(file); err == nil && !info.Mode().IsRegular() {
-		return fmt.Errorf("'%s' is not a regular file (it may be a link): aiplam only writes regular files in %s; "+
-			"replace it with the file itself", file, DirName)
+	if err := CheckWritable(file); err != nil {
+		return err
 	}
 	var buf bytes.Buffer
 	buf.WriteString(header)

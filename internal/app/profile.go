@@ -467,6 +467,9 @@ func (a *App) changeProfiles(updated *config.Config, removed, added, stay []*pro
 	case len(removed) > 0:
 		a.printf("Disabling %s\n", profileNames(removed))
 	}
+	if err := config.CheckWritable(config.ConfigFile(a.Managed)); err != nil {
+		return err
+	}
 	if err := playbook.Apply(plan, a.printAction); err != nil {
 		return fmt.Errorf("%w; the enabled profiles were not changed", err)
 	}
