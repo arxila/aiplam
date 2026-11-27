@@ -885,3 +885,28 @@ func TestIgnoresCaseWithBothNames(t *testing.T) {
 		t.Error("a folder holding both a and A ignores case")
 	}
 }
+
+// TestUnresolvableLinkInTheWay checks that a link whose target cannot be resolved, where a link must go, is reported as
+// in the way, like any other link.
+func TestUnresolvableLinkInTheWay(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows reads link targets as text: they always resolve")
+	}
+	s := newSandbox(t)
+	s.skill("x-a")
+	dir := s.link(".agents/skills")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("loop", filepath.Join(dir, "loop")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "loop")+"/../x", filepath.Join(dir, "x-a")); err != nil {
+		t.Fatal(err)
+	}
+	g := s.group("p", pb("x", nil))
+	plan, err := Transition(nil, []Group{g}, scopeOf(g))
+	if c := plan.Conflicts(); err != nil || len(c) != 1 || c[0].Cause != OtherLink || c[0].Name != "x-a" {
+		t.Fatalf("conflicts %+v, %v; want the link in the way", c, err)
+	}
+}

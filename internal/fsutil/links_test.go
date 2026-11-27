@@ -110,6 +110,33 @@ func TestLinks(t *testing.T) {
 	}
 }
 
+// TestRemoveLinkWhateverItsTarget checks that a link whose target cannot be resolved can still be removed.
+func TestRemoveLinkWhateverItsTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows reads link targets as text: they always resolve")
+	}
+	root := Canonical(t.TempDir())
+	if err := os.Symlink("loop", filepath.Join(root, "loop")); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(filepath.Join(root, "loop")+"/../x", link); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Inspect(link); err == nil {
+		t.Fatal("the link's target resolves: the test needs one that does not")
+	}
+	if err := RemoveLink(link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(link); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the link is still there: %v", err)
+	}
+	if err := RemoveLink(filepath.Join(root, "missing")); err == nil {
+		t.Fatal("removed a link that does not exist")
+	}
+}
+
 func TestLock(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".lock")
 	unlock, err := Lock(path)

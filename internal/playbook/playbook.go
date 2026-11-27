@@ -512,7 +512,9 @@ func Transition(from, to []Group, scope map[Key]bool) (Plan, error) {
 					state, current := fsutil.Missing, ""
 					if !removed[k] {
 						var err error
-						if state, current, err = fsutil.Inspect(link); err != nil {
+						// A link whose target cannot be resolved is in the way like any other (current is its
+						// target as written).
+						if state, current, err = fsutil.Inspect(link); err != nil && state != fsutil.Link {
 							return plan, err
 						}
 					}
@@ -767,17 +769,18 @@ func Revert(actions []Action) error {
 		a := actions[i]
 		var err error
 		switch a.Kind {
+		// A link whose target cannot be resolved is something else in the place: not the link made, nor a gap to fill.
 		case Create:
-			if state, current, ierr := fsutil.Inspect(a.Link); ierr != nil {
+			if state, current, ierr := fsutil.Inspect(a.Link); ierr != nil && state != fsutil.Link {
 				err = ierr
-			} else if state == fsutil.Link && sameFolder(current, a.Source) {
+			} else if ierr == nil && state == fsutil.Link && sameFolder(current, a.Source) {
 				err = fsutil.RemoveLink(a.Link)
 			}
 			if err == nil {
 				err = removeDirs(a.madeDirs)
 			}
 		case Remove:
-			if state, _, ierr := fsutil.Inspect(a.Link); ierr != nil {
+			if state, _, ierr := fsutil.Inspect(a.Link); ierr != nil && state != fsutil.Link {
 				err = ierr
 			} else if state == fsutil.Missing {
 				if err = os.MkdirAll(filepath.Dir(a.Link), 0o755); err == nil {

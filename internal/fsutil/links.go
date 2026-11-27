@@ -41,7 +41,8 @@ const (
 
 // Inspect returns what exists at path and, for a link, its target as an absolute path (relative link targets are
 // resolved against the link's folder, with links resolved, as the system does; see linkPath). The target may not
-// exist (a broken link).
+// exist (a broken link). When the target cannot be resolved, it returns Link, the target as written (made absolute),
+// and the error.
 func Inspect(path string) (LinkState, string, error) {
 	fi, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -55,8 +56,7 @@ func Inspect(path string) (LinkState, string, error) {
 	}
 	target, err := os.Readlink(path)
 	if err != nil {
-		if runtime.GOOS == "windows" && fi.Mode()&os.ModeSymlink == 0 {
-			// An irregular file that is not a readable reparse point (for example a deduplicated file).
+		if notReparsePoint(fi) {
 			return NotLink, "", nil
 		}
 		return Link, "", err
@@ -64,10 +64,11 @@ func Inspect(path string) (LinkState, string, error) {
 	if !filepath.IsAbs(target) {
 		target = Canonical(filepath.Dir(path)) + string(filepath.Separator) + target
 	}
-	if target, err = linkPath(target); err != nil {
-		return Link, "", err
+	resolved, err := linkPath(target)
+	if err != nil {
+		return Link, target, err
 	}
-	return Link, target, nil
+	return Link, resolved, nil
 }
 
 // linkPath returns a link's absolute target, as written, cleaned as the system reads it: on Linux and macOS, a '..'
@@ -96,6 +97,25 @@ func linkPath(target string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, elems[len(elems)-1]), nil
+}
+
+// isLink reports whether path is a link (a symbolic link or a junction), as Inspect sees it, without looking at its
+// target.
+func isLink(path string) bool {
+	fi, err := os.Lstat(path)
+	if err != nil || !isLinkMode(fi.Mode()) {
+		return false
+	}
+	if _, err := os.Readlink(path); err != nil && notReparsePoint(fi) {
+		return false
+	}
+	return true
+}
+
+// notReparsePoint reports whether fi, of a file whose link target cannot be read, is not a link at all: on Windows, an
+// irregular file that is not a readable reparse point (for example a deduplicated file).
+func notReparsePoint(fi os.FileInfo) bool {
+	return runtime.GOOS == "windows" && fi.Mode()&os.ModeSymlink == 0
 }
 
 // isSeparator reports whether r is a path separator.
@@ -155,13 +175,10 @@ func FileLinksAllowed() bool {
 	return fileLinksAllowed()
 }
 
-// RemoveLink removes the link at path, never its target's content. It fails when path is not a link.
+// RemoveLink removes the link at path, never its target's content. It fails when path is not a link. Its target
+// does not matter: it is not resolved (a link whose target cannot be resolved can be removed too).
 func RemoveLink(path string) error {
-	state, _, err := Inspect(path)
-	if err != nil {
-		return err
-	}
-	if state != Link {
+	if !isLink(path) {
 		return &os.PathError{Op: "remove link", Path: path, Err: errors.New("not a symbolic link or junction")}
 	}
 	// os.Remove deletes a symbolic link itself (to a folder or a file), and on Windows removes a junction with

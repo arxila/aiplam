@@ -61,7 +61,8 @@ make dist       # dist/aiplam-<version>-<os>-<arch>.tar.gz (.zip for Windows) pe
 ```
 
 Signing `SHA256SUMS` needs the Arxila release key: without it, run `make SIGN_KEY= dist` for an unsigned build.
-`make dist` also needs `python3`, to check the archives' headers.
+`make dist` also needs `tar`, `gzip`, `zip`, `unzip` and `python3` (to check the archives' headers), and checks
+that they are there before deleting an earlier build.
 
 ## Quick start
 
