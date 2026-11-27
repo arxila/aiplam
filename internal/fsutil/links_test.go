@@ -219,6 +219,19 @@ func TestResolve(t *testing.T) {
 				t.Errorf("Resolve(%q) = %q, %v; want %q", rooted, got, err, real)
 			}
 		}
+		// '..' after a link applies to the text, as Windows reads it.
+		deep, inside := filepath.Join(root, "other", "deep"), filepath.Join(root, "inside")
+		for _, dir := range []string{deep, inside} {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := CreateLink(filepath.Join(inside, "hop"), deep); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := Resolve(inside + `\hop\..\z`); err != nil || !SamePath(got, filepath.Join(inside, "z")) {
+			t.Errorf("Resolve(inside/hop/../z) = %q, %v; want %q", got, err, filepath.Join(inside, "z"))
+		}
 		return // symbolic links need developer mode
 	}
 	if err := os.Symlink(filepath.Join(root, "gone"), filepath.Join(root, "broken")); err != nil {

@@ -687,8 +687,10 @@ func TestTargetFoldersInAnotherCase(t *testing.T) {
 	}
 }
 
-// TestLinksReadAsTheSystemDoes checks that a link whose target holds '..' after a link is taken for where it really
-// leads: one that only seems, as text, to point to an artifact of the playbook does not belong to it.
+// TestLinksReadAsTheSystemDoes checks that a link whose target holds '..' after a link is taken for where the system
+// takes it. On Linux and macOS, '..' applies to where that link leads, so a link that only seems, as text, to point to
+// an artifact of the playbook does not belong to it. Windows reads the target as text, so there it does lead to the
+// artifact, and belongs to the playbook.
 func TestLinksReadAsTheSystemDoes(t *testing.T) {
 	s := newSandbox(t)
 	s.skill("x-a")
@@ -705,6 +707,12 @@ func TestLinksReadAsTheSystemDoes(t *testing.T) {
 		t.Fatal(err)
 	}
 	g := s.group("p", pb("x", nil))
+	if runtime.GOOS == "windows" {
+		if plan := s.transition([]Group{g}, nil, scopeOf(g)); actions(plan, Remove) != "x-a" {
+			t.Errorf("removal of the playbook removes %q, want its link x-a", actions(plan, Remove))
+		}
+		return
+	}
 	if plan := s.transition([]Group{g}, nil, scopeOf(g)); actions(plan, Remove) != "" {
 		t.Errorf("removal of the playbook removes %q", actions(plan, Remove))
 	}

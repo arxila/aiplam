@@ -50,9 +50,10 @@ const maxLinkHops = 255
 // Resolve returns the absolute, cleaned form of path with the symbolic links (and, on Windows, junctions) of the part
 // of it that exists resolved: where the path would lead, once the missing folders are created. It follows the links
 // itself, one path element at a time, as filepath.EvalSymlinks does not follow junctions since Go 1.23, and applies
-// each '..' (in path, or in a link's target) to the folder reached so far, which holds no links, as the system does:
-// never to the text of the path, where it would cancel a link before it. It fails when an existing part cannot be
-// resolved (a link it cannot read, a loop of links, or a folder it cannot read).
+// each '..' (in path, or in a link's target) as the system does: on Linux and macOS, to the folder reached so far,
+// which holds no links (never to the text of the path, where it would cancel a link before it); on Windows, which
+// reads paths and link targets as text first, to their text (see windowsText). It fails when an existing part cannot
+// be resolved (a link it cannot read, a loop of links, or a folder it cannot read).
 func Resolve(path string) (string, error) {
 	if !filepath.IsAbs(path) {
 		cwd, err := os.Getwd()
@@ -66,6 +67,7 @@ func Resolve(path string) (string, error) {
 			path = cwd + string(filepath.Separator) + path // not filepath.Join, which would apply '..' as text
 		}
 	}
+	path = windowsText(path)
 	volume := filepath.VolumeName(path)
 	// resolved exists and holds no links; missing holds the names below it that do not exist (yet).
 	resolved := volume + string(filepath.Separator)
@@ -116,6 +118,11 @@ func Resolve(path string) (string, error) {
 		}
 		// The target replaces the link: an absolute target (or, on Windows, one rooted on the link's drive) starts
 		// again from its root, and its elements are resolved before the rest of the path.
+		if runtime.GOOS == "windows" && !filepath.IsAbs(target) && filepath.VolumeName(target) == "" &&
+			(target == "" || !os.IsPathSeparator(target[0])) {
+			target = filepath.Join(resolved, target) // relative to the link's folder, read as text (see windowsText)
+		}
+		target = windowsText(target)
 		targetVolume := filepath.VolumeName(target)
 		rest := target[len(targetVolume):]
 		if targetVolume != "" || (rest != "" && os.IsPathSeparator(rest[0])) {
@@ -127,6 +134,15 @@ func Resolve(path string) (string, error) {
 		pending = append(splitPath(rest), pending...)
 	}
 	return filepath.Join(append([]string{normalized(resolved)}, missing...)...), nil
+}
+
+// windowsText returns path cleaned as text on Windows, which applies '..' in a path (and in a link's target, relative
+// to the link's folder) to its text, before following any link; elsewhere, it returns path as it is.
+func windowsText(path string) string {
+	if runtime.GOOS == "windows" {
+		return filepath.Clean(path)
+	}
+	return path
 }
 
 // splitPath returns the elements of path, without its volume name, as written (with '.' and '..' kept).

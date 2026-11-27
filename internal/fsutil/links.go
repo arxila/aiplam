@@ -67,10 +67,14 @@ func Inspect(path string) (LinkState, string, error) {
 	return Link, linkPath(target), nil
 }
 
-// linkPath returns a link's absolute target, as written, cleaned as the system reads it: a '..' that follows a link in
-// it applies to where that link leads, not to the text before it. Its folder is resolved as Canonical does (when it
-// exists), and its last name is kept, as the target itself may be a link, or missing. Without '..', it is only cleaned.
+// linkPath returns a link's absolute target, as written, cleaned as the system reads it: on Linux and macOS, a '..'
+// that follows a link in it applies to where that link leads, not to the text before it; so its folder is resolved as
+// Canonical does (when it exists), and its last name is kept, as the target itself may be a link, or missing. Windows
+// reads it as text (see windowsText), and so does it without '..'.
 func linkPath(target string) string {
+	if runtime.GOOS == "windows" {
+		return filepath.Clean(target)
+	}
 	elems := splitPath(target[len(filepath.VolumeName(target)):])
 	dotDot := false
 	for _, elem := range elems {

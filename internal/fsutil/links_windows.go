@@ -54,23 +54,26 @@ func createLink(link, target string) error {
 
 // onNetwork reports whether path is on a network share: a UNC path (\\server\share\...), or a mapped network drive.
 func onNetwork(path string) bool {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return false
+	p := strings.ToUpper(path)
+	if !strings.HasPrefix(p, `\\`) { // \\server\share, \\?\... and \\.\... are absolute already
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return false
+		}
+		p = strings.ToUpper(abs)
 	}
-	volume := strings.ToUpper(filepath.VolumeName(abs))
 	switch {
-	case strings.HasPrefix(volume, `\\?\UNC\`):
+	case strings.HasPrefix(p, `\\?\UNC\`), strings.HasPrefix(p, `\\.\UNC\`):
 		return true
-	case strings.HasPrefix(volume, `\\?\`), strings.HasPrefix(volume, `\\.\`):
-		volume = volume[len(`\\?\`):]
-	case strings.HasPrefix(volume, `\\`):
+	case strings.HasPrefix(p, `\\?\`), strings.HasPrefix(p, `\\.\`):
+		p = p[len(`\\?\`):]
+	case strings.HasPrefix(p, `\\`):
 		return true
 	}
-	if len(volume) != 2 || volume[1] != ':' {
+	if len(p) < 2 || p[1] != ':' {
 		return false
 	}
-	root, err := windows.UTF16PtrFromString(volume + `\`)
+	root, err := windows.UTF16PtrFromString(p[:2] + `\`)
 	return err == nil && windows.GetDriveType(root) == windows.DRIVE_REMOTE
 }
 
