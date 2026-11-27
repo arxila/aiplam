@@ -117,9 +117,14 @@ func New() (*App, error) {
 		return nil, fmt.Errorf("cannot determine the current folder: %w", err)
 	}
 	// Resolve links (for example /var -> /private/var on macOS) so that home matches the canonical paths of the
-	// folders under it.
+	// folders under it; and so is APPDATA (which also gets long names instead of short ones, on Windows), so that
+	// paths under it are shown under home ('~\...') when it is inside it, as usual.
+	appData := os.Getenv("APPDATA")
+	if appData != "" {
+		appData = fsutil.Canonical(appData)
+	}
 	a := &App{Home: fsutil.Canonical(home), Cwd: cwd, Stdout: os.Stdout, Stderr: os.Stderr, Git: gitinfo.NewReader(),
-		AppData: os.Getenv("APPDATA"), GOOS: runtime.GOOS}
+		AppData: appData, GOOS: runtime.GOOS}
 	if sandbox := os.Getenv("AIPLAM_SANDBOX"); sandbox != "" {
 		a.Sandbox = fsutil.Canonical(sandbox)
 	}
