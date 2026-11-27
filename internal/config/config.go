@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -445,8 +446,8 @@ func Profiles(managed string) ([]string, error) {
 	return profiles, nil
 }
 
-// ProfileExists reports whether a profile's file exists: anything at its path, even a broken link (which no command
-// may then replace, see save).
+// ProfileExists reports whether a profile's file exists: anything at its path, even a broken link, so that no command
+// takes its name for a free one.
 func ProfileExists(managed, profile string) bool {
 	_, err := os.Lstat(ProfileFile(managed, profile))
 	return err == nil
@@ -559,7 +560,7 @@ func SaveConfig(managed string, conf *Config) error {
 		copied.Enabled = []string{}
 		conf = &copied
 	}
-	return save(ConfigFile(managed), conf,
+	return save(managed, ConfigFile(managed), conf,
 		"# aiplam (AI Playbook Manager) configuration of this managed folder.\n"+
 			"# enabled: the profiles whose playbooks are linked; change them with 'aiplam profile enable',\n"+
 			"#   'aiplam profile disable' and 'aiplam profile switch'.\n")
@@ -577,7 +578,7 @@ func SaveProfile(managed string, s *Profile) error {
 		}
 		s = &copied
 	}
-	return save(ProfileFile(managed, s.Name), s, fmt.Sprintf(
+	return save(managed, ProfileFile(managed, s.Name), s, fmt.Sprintf(
 		"# aiplam (AI Playbook Manager) profile '%s'.\n"+
 			"# agent: the agent template the target folders were taken from, or '%s' if they were given by hand.\n"+
 			"#   aiplam only uses it to warn ('aiplam status', 'aiplam list') when the target folders no longer match\n"+
@@ -590,23 +591,56 @@ func SaveProfile(managed string, s *Profile) error {
 		s.Name, CustomAgent, CustomAgent))
 }
 
-// CheckWritable returns an error when saving would refuse to replace what is at file: only a regular file is replaced,
-// never a link (which saving would replace with a file, leaving what it leads to behind), nor anything else. Commands
-// check it before changing any link, so that saving does not fail afterwards for this.
-func CheckWritable(file string) error {
-	if info, err := os.Lstat(file); err == nil && !info.Mode().IsRegular() {
-		return fmt.Errorf("'%s' is not a regular file (it may be a link): aiplam only writes regular files in %s; "+
-			"replace it with the file itself", file, DirName)
-	}
-	return nil
+// CheckWritable returns an error when saving file, a configuration file of the managed folder managed, would be
+// refused (see writePath). Commands check it before changing any link, so that saving does not fail afterwards for
+// this.
+func CheckWritable(managed, file string) error {
+	_, err := writePath(managed, file)
+	return err
 }
 
-func save(file string, v any, header string) error {
+// writePath returns the file that saving file writes: file itself when it is a regular file, or nothing is there; or,
+// when it is a link (as dotfiles managers such as GNU Stow, dotbot or rcm make them), the file it leads to, so that
+// the link stays, as long as that file is inside the managed folder, where aiplam keeps everything it writes, and is
+// a regular file (or does not exist yet). Anything else is refused.
+func writePath(managed, file string) (string, error) {
+	info, err := os.Lstat(file)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return file, nil
+	case err != nil:
+		return "", err
+	case info.Mode().IsRegular():
+		return file, nil
+	case info.Mode()&os.ModeSymlink == 0:
+		return "", fmt.Errorf("'%s' is not a regular file: aiplam only replaces regular files in %s", file, DirName)
+	}
+	target, err := fsutil.Resolve(file)
+	if err != nil {
+		return "", fmt.Errorf("'%s' is a link that cannot be resolved: %w", file, err)
+	}
+	top, err := fsutil.Resolve(managed)
+	if err != nil {
+		return "", err
+	}
+	if !fsutil.Inside(target, top) {
+		return "", fmt.Errorf("'%s' is a link leading outside the managed folder '%s', to '%s': aiplam only writes "+
+			"inside it; keep the file it leads to inside the managed folder, or replace the link with the file itself",
+			file, managed, target)
+	}
+	if info, err := os.Stat(target); err == nil && !info.Mode().IsRegular() {
+		return "", fmt.Errorf("'%s' is a link to '%s', which is not a regular file", file, target)
+	}
+	return target, nil
+}
+
+func save(managed, file string, v any, header string) error {
 	dir := filepath.Dir(file)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	if err := CheckWritable(file); err != nil {
+	file, err := writePath(managed, file)
+	if err != nil {
 		return err
 	}
 	var buf bytes.Buffer
@@ -619,11 +653,12 @@ func save(file string, v any, header string) error {
 	if err := enc.Close(); err != nil {
 		return err
 	}
-	// The new content goes to a file next to it, which then replaces it: a crash leaves either the old file or the new
-	// one, complete. The temporary file is created with the usual permissions (0644 minus the umask), unlike
-	// os.CreateTemp's 0600, and then given those of the file it replaces, if any, so that a file made private stays
-	// so. Its name includes the process id, so that concurrent runs do not share it. A file with that name can only be
-	// left by a process that crashed (with a process id since reused): it is replaced.
+	// The new content goes to a file next to it (next to the file a link leads to, which so stays a link), which then
+	// replaces it: a crash leaves either the old file or the new one, complete. The temporary file is created with the
+	// usual permissions (0644 minus the umask), unlike os.CreateTemp's 0600, and then given those of the file it
+	// replaces, if any, so that a file made private stays so. Its name includes the process id, so that concurrent runs
+	// do not share it. A file with that name can only be left by a process that crashed (with a process id since
+	// reused): it is replaced.
 	tmpName := fmt.Sprintf("%s.%d.tmp", file, os.Getpid())
 	_ = os.Remove(tmpName)
 	tmp, err := os.OpenFile(tmpName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)

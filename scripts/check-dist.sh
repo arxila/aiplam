@@ -93,10 +93,16 @@ try:
                 is_file = not is_dir and (mode == 0 or stat.S_ISREG(mode))
                 if info.filename.rstrip("/") == top and not is_dir or info.filename.rstrip("/") != top and not is_file:
                     print("holds %s as %s" % (info.filename, kind(is_dir, is_file)))
+            damaged = archive.testzip()  # reads every entry, checking its CRC
+            if damaged:
+                print("holds %s damaged (its content does not match its CRC)" % damaged)
         sys.exit(0)
     with tarfile.open(path) as archive:
         members = archive.getmembers()
         headers = [archive.pax_headers] + [member.pax_headers for member in members]
+        for member in members:  # read in full, so that gzip checks the whole archive
+            if member.isfile():
+                archive.extractfile(member).read()
 except Exception as error:
     print("cannot be read: %s" % error)
     sys.exit(0)
@@ -114,6 +120,7 @@ for m in members:
 	fi
 	case $archive in
 		*.tar.gz)
+			gzip -t "$file" 2>/dev/null || fail "$archive is damaged (gzip finds its content wrong)"
 			if ! tar -tvzf "$file" | grep -q "^-rwx.*$name/$exe\$"; then
 				fail "$archive: $name/$exe is not executable"
 			fi

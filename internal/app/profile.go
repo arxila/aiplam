@@ -259,7 +259,12 @@ func (a *App) profileAdd(name, agent string, targets config.Targets) error {
 				"told apart", other, a.profileFile(other))
 		}
 	}
-	if err := config.SaveProfile(a.Managed, &config.Profile{Name: name, Agent: agent, Targets: targets}); err != nil {
+	// The target folders as they are on disk (once links are resolved), as every later command checks them.
+	if err := a.checkNewTargets(targets); err != nil {
+		return err
+	}
+	prof := &config.Profile{Name: name, Agent: agent, Targets: targets}
+	if err := config.SaveProfile(a.Managed, prof); err != nil {
 		return err
 	}
 	a.printf("Created profile '%s' (%s), with agent %s, not enabled. Target folders:\n%s", name, a.profileFile(name),
@@ -467,7 +472,7 @@ func (a *App) changeProfiles(updated *config.Config, removed, added, stay []*pro
 	case len(removed) > 0:
 		a.printf("Disabling %s\n", profileNames(removed))
 	}
-	if err := config.CheckWritable(config.ConfigFile(a.Managed)); err != nil {
+	if err := config.CheckWritable(a.Managed, config.ConfigFile(a.Managed)); err != nil {
 		return err
 	}
 	if err := playbook.Apply(plan, a.printAction); err != nil {

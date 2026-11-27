@@ -56,8 +56,12 @@ vet:
 # SHA256SUMS.asc. When HEAD is tagged, the tag must match the version. scripts/check-dist.sh then checks that the
 # archives hold exactly these files, and nothing of the machine that built them, and that SIGN_KEY signed SHA256SUMS.
 # They are built in $(DIST).new, which only replaces $(DIST) once all of that passed: a failed build leaves the previous
-# one as it was.
+# one as it was. A $(DIST).old without $(DIST) (a build stopped while replacing it) is the previous one: put back first.
 dist:
+	@if [ -e $(DIST).old ] && [ ! -e $(DIST) ]; then \
+		mv $(DIST).old $(DIST) || exit 1; \
+		echo "$(DIST) put back from $(DIST).old, left by a build that was stopped"; \
+	fi
 	@[ -n "$(VERSION)" ] || { echo "cannot read the version from internal/app/app.go: run 'make VERSION=x.y.z dist'" >&2; exit 1; }
 	@if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then \
 		tags=$$(git tag --points-at HEAD 'v*') || exit 1; \

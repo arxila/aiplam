@@ -725,8 +725,10 @@ validates:
 - `.lock`, which keeps two commands from changing the managed folder at once, and a `.gitignore` that keeps `.lock`
   (and the temporary files of interrupted saves) out of git when the `.aiplam` folder is committed.
 
-These files must be regular files: aiplam reads them through links, but never writes through one, so a command that
-would change a file that is a link (or replace a broken one) fails, and changes nothing.
+These files can be links, as dotfiles managers (GNU Stow, dotbot, rcm...) make them, when what they lead to is inside
+the managed folder (for the user managed folder, the home folder: a dotfiles repository anywhere in it): aiplam saves
+the file a link leads to, and the link stays. A command that would change a file linked from outside the managed
+folder fails, and changes nothing, as aiplam only writes inside it. A broken link is never taken for a missing file.
 
 Paths in the profile files:
 

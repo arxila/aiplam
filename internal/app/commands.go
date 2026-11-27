@@ -194,6 +194,10 @@ func (a *App) cmdInit(args []string) (err error) {
 				config.ConfigName+config.FileExt, profile)
 		}
 	}
+	// The target folders as they are on disk (once links are resolved), as every later command checks them.
+	if err := a.checkNewTargets(targets); err != nil {
+		return err
+	}
 	a.showManaged()
 	// On a failure, the profiles already written are removed, so that init can simply be run again.
 	var written []string

@@ -599,7 +599,12 @@ func (a *App) hint(command string) string {
 	case a.user || (a.elsewhere && a.isUser()):
 		return "aiplam " + command + " --user"
 	case a.elsewhere:
-		return "cd " + shellPath(runtime.GOOS, a.pretty(a.Managed), a.Managed) + " && aiplam " + command
+		// On Windows, pushd: unlike cd in cmd, it also changes the drive, and PowerShell has it too.
+		cd := "cd "
+		if runtime.GOOS == "windows" {
+			cd = "pushd "
+		}
+		return cd + shellPath(runtime.GOOS, a.pretty(a.Managed), a.Managed) + " && aiplam " + command
 	}
 	return "aiplam " + command
 }
@@ -691,6 +696,25 @@ func (a *App) newProfileState(prof *config.Profile, enabled bool) (*profileState
 		s.targets = append(s.targets, playbook.Target{Kind: t.Kind, Folder: t.Folder, Dir: dir, Stop: stop})
 	}
 	return s, nil
+}
+
+// checkNewTargets fails when a target folder of a profile being created leads where target folders must not, once
+// links are resolved (see newProfileState), so that a profile is never saved that later commands refuse. Those that
+// cannot be located yet (under %APPDATA%, while APPDATA is not set) are checked when they are used.
+func (a *App) checkNewTargets(targets config.Targets) error {
+	for _, t := range targets {
+		dir, stop, err := config.TargetDir(a.Managed, t.Folder, a.AppData)
+		if err != nil {
+			continue
+		}
+		if err := a.checkInside(dir, stop, "target folder '"+t.Folder+"'", "links"); err != nil {
+			return err
+		}
+		if err := a.checkNotConfig(dir, t.Folder); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // checkNotConfig fails when dir, a target folder (as folder in its profile), once links are resolved, is the managed
@@ -1072,7 +1096,7 @@ func (a *App) cleanup(plan playbook.Plan) {
 // changed.
 func (a *App) checkWritable(profiles []*profileState) error {
 	for _, s := range profiles {
-		if err := config.CheckWritable(config.ProfileFile(a.Managed, s.name)); err != nil {
+		if err := config.CheckWritable(a.Managed, config.ProfileFile(a.Managed, s.name)); err != nil {
 			return err
 		}
 	}

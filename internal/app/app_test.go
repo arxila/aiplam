@@ -836,6 +836,53 @@ func TestUnreadablePlaybookFolder(t *testing.T) {
 	}
 }
 
+// TestUnreadableMovedPlaybookFolder checks the same as TestUnreadablePlaybookFolder for a playbook moved after its
+// links were made, its former folder now a link to the new one: its links still lead through the former one.
+func TestUnreadableMovedPlaybookFolder(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a folder the current user cannot search")
+	}
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init", "-u", "-a", "standard")
+	pb := e.playbook("pb", "x-a")
+	e.mustRun(ExitOK, "add", "x", pb, "-u")
+	moved := filepath.Join(e.root, "moved")
+	if err := os.Rename(pb, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := symlink(t, moved, pb); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(moved, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(moved, 0o755) })
+	e.mustFail(ExitFailure, []string{"cannot tell whether", "is a link of playbook x"}, "profile", "disable", "default",
+		"-u")
+	if _, err := os.Lstat(filepath.Join(e.homeSkills(), "x-a")); err != nil {
+		t.Fatalf("the link was removed: %v", err)
+	}
+}
+
+// TestNewTargetFoldersCheckedOnDisk checks that a profile is not created with a target folder that, once links are
+// resolved, leads where target folders must not: later commands would refuse it.
+func TestNewTargetFoldersCheckedOnDisk(t *testing.T) {
+	e := newEnv(t)
+	project := e.mkdir(filepath.Join(e.root, "project"))
+	if err := symlink(t, config.DirName, filepath.Join(project, "target")); err != nil {
+		t.Fatal(err)
+	}
+	e.mustFail(ExitFailure, []string{"lies inside " + config.DirName}, "init", project, "-f", "skills:target")
+	e.assertMissing(config.ConfigFile(project))
+	e.mustRun(ExitOK, "init", project, "-a", "standard")
+	e.app.Cwd = project
+	e.mustFail(ExitFailure, []string{"lies inside " + config.DirName}, "profile", "add", "other", "-f",
+		"skills:target")
+	if config.ProfileExists(project, "other") {
+		t.Fatal("the profile was created")
+	}
+}
+
 // TestRemoveBrokenProfileInAnotherCase checks that removing a profile whose file is a broken link, named in another
 // case on a disk that ignores case, disables it too.
 func TestRemoveBrokenProfileInAnotherCase(t *testing.T) {
@@ -945,13 +992,38 @@ func TestUndoReportsEverything(t *testing.T) {
 	}
 }
 
-// TestConfigurationFileLinks checks that configuration files that are links are read, but never replaced: not even a
-// broken one.
+// TestConfigurationFileLinks checks configuration files that are links, as dotfiles managers (GNU Stow, dotbot, rcm...)
+// make them: saved through the link, which stays, when what it leads to is inside the managed folder; refused, before
+// changing any link, when it leads outside it. A broken one is never taken for a missing file.
 func TestConfigurationFileLinks(t *testing.T) {
 	e := newEnv(t)
 	isLink := func(path string) bool {
 		info, err := os.Lstat(path)
 		return err == nil && info.Mode()&os.ModeSymlink != 0
+	}
+	read := func(path string) string {
+		t.Helper()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	// moveAndLink moves file to target and puts a link to it (with a relative target, as dotfiles managers make them)
+	// in its place.
+	moveAndLink := func(file, target string) {
+		t.Helper()
+		e.mkdir(filepath.Dir(target))
+		if err := os.Rename(file, target); err != nil {
+			t.Fatal(err)
+		}
+		rel, err := filepath.Rel(filepath.Dir(file), target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := symlink(t, rel, file); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	// A broken link where a profile's file goes: init takes it for an existing profile.
@@ -965,51 +1037,71 @@ func TestConfigurationFileLinks(t *testing.T) {
 		t.Fatal("the broken link was replaced")
 	}
 
-	// A profile file that is a link to a file: commands that read it work, those that would change it fail, before
-	// changing any link.
+	// The profile and configuration files linked from a dotfiles folder inside the managed folder: saved through the
+	// links, which stay.
 	other := e.mkdir(filepath.Join(e.root, "other"))
 	e.mustRun(ExitOK, "init", other, "-a", "standard")
 	e.app.Cwd = other
 	kept := e.playbook("kept", "k-a")
 	e.mustRun(ExitOK, "add", "k", kept)
 	keptLink := filepath.Join(other, ".agents", "skills", "k-a")
-	file := config.ProfileFile(other, "default")
-	shared := filepath.Join(e.mkdir(filepath.Join(other, "shared")), "default.yaml")
-	if err := os.Rename(file, shared); err != nil {
-		t.Fatal(err)
-	}
-	if err := symlink(t, filepath.Join("..", "shared", "default.yaml"), file); err != nil {
-		t.Fatal(err)
-	}
-	before, err := os.ReadFile(shared)
-	if err != nil {
-		t.Fatal(err)
-	}
-	e.mustRun(ExitOK, "status")
+	file, conf := config.ProfileFile(other, "default"), config.ConfigFile(other)
+	sharedFile := filepath.Join(other, "dotfiles", "aiplam", "default.yaml")
+	sharedConf := filepath.Join(other, "dotfiles", "aiplam", "aiplam-config.yaml")
+	moveAndLink(file, sharedFile)
+	moveAndLink(conf, sharedConf)
 	pb := e.playbook("pb", "x-a")
-	// Refused before changing any link: nothing is undone.
+	e.mustRun(ExitOK, "add", "x", pb)
+	if !isLink(file) || !strings.Contains(read(sharedFile), "name: x") {
+		t.Fatalf("the profile was not saved through its link (still a link: %v):\n%s", isLink(file), read(sharedFile))
+	}
+	e.assertLink(filepath.Join(other, ".agents", "skills", "x-a"), filepath.Join(pb, "skills", "x-a"))
+	e.mustRun(ExitOK, "profile", "disable", "default")
+	if !isLink(conf) || strings.Contains(read(sharedConf), "- default") {
+		t.Fatalf("the configuration was not saved through its link (still a link: %v):\n%s", isLink(conf),
+			read(sharedConf))
+	}
+	e.mustRun(ExitOK, "profile", "enable", "default")
+	e.mustRun(ExitOK, "remove", "x")
+	e.mustRun(ExitOK, "status")
+
+	// Links leading outside the managed folder: refused before changing any link (nothing is undone), and the files
+	// they lead to are left as they are.
+	outsideFile := filepath.Join(e.mkdir(filepath.Join(e.root, "dotfiles")), "default.yaml")
+	if err := os.Remove(file); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(sharedFile, outsideFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := symlink(t, outsideFile, file); err != nil {
+		t.Fatal(err)
+	}
+	before := read(outsideFile)
 	refused := func(args ...string) {
 		t.Helper()
 		code, out, errOut := e.run(args...)
-		if code != ExitFailure || !contains(errOut, "is not a regular file") || contains(out+errOut, "undone") {
+		if code != ExitFailure || !contains(errOut, "leading outside the managed folder") ||
+			contains(out+errOut, "undone") {
 			t.Fatalf("aiplam %s: exit %d\n%s%s", strings.Join(args, " "), code, out, errOut)
 		}
 	}
+	e.mustRun(ExitOK, "status")
 	refused("add", "x", pb)
 	refused("remove", "k")
-	after, err := os.ReadFile(shared)
-	if !isLink(file) || err != nil || string(after) != string(before) {
-		t.Fatalf("the profile file or its link changed: link %v, %v", isLink(file), err)
+	if !isLink(file) || read(outsideFile) != before {
+		t.Fatalf("the profile file or its link changed: link %v", isLink(file))
 	}
 	e.assertMissing(filepath.Join(other, ".agents", "skills", "x-a"))
 	e.assertLink(keptLink, filepath.Join(kept, "skills", "k-a"))
-
-	// The same for the aiplam configuration file.
-	conf := config.ConfigFile(other)
-	if err := os.Rename(conf, filepath.Join(other, "shared", "conf.yaml")); err != nil {
+	outsideConf := filepath.Join(e.root, "dotfiles", "aiplam-config.yaml")
+	if err := os.Remove(conf); err != nil {
 		t.Fatal(err)
 	}
-	if err := symlink(t, filepath.Join("..", "shared", "conf.yaml"), conf); err != nil {
+	if err := os.Rename(sharedConf, outsideConf); err != nil {
+		t.Fatal(err)
+	}
+	if err := symlink(t, outsideConf, conf); err != nil {
 		t.Fatal(err)
 	}
 	refused("profile", "disable", "default")
@@ -1198,8 +1290,8 @@ func TestHintsNameTheManagedFolder(t *testing.T) {
 	e.app.Cwd = e.home
 	out, _ := e.mustRun(ExitOK, "list", project)
 	want := "'cd ~/project && aiplam add <name> <playbookfolder>'"
-	if runtime.GOOS == "windows" { // cmd does not expand "~": the absolute path
-		want = "'cd " + project + " && aiplam add <name> <playbookfolder>'"
+	if runtime.GOOS == "windows" { // cmd does not expand "~": the absolute path; and pushd changes the drive too
+		want = "'pushd " + project + " && aiplam add <name> <playbookfolder>'"
 	}
 	if !contains(out, want) {
 		t.Fatalf("unexpected hint:\n%s", out)
@@ -1463,7 +1555,11 @@ func TestQuotedHintsAndGitNote(t *testing.T) {
 	project := e.mkdir(filepath.Join(e.home, "My Projects", "p"))
 	e.mustRun(ExitOK, "init", project, "-a", "standard")
 	out, _ := e.mustRun(ExitOK, "list", project)
-	if !contains(out, `'cd "`+project+`" && aiplam add`) {
+	cd := "cd "
+	if runtime.GOOS == "windows" {
+		cd = "pushd "
+	}
+	if !contains(out, `'`+cd+`"`+project+`" && aiplam add`) {
 		t.Fatalf("unexpected hint:\n%s", out)
 	}
 	for _, c := range []struct{ goos, pretty, abs, want string }{

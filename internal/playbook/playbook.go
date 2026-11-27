@@ -101,18 +101,25 @@ func (e Entry) Owns(kind, name, current string) bool {
 }
 
 // MayOwn reports whether a link named name in the target folder of kind, whose target cannot be resolved (target is
-// its target as written, made absolute), may belong to the playbook: whether that target, read as text, is an entry
-// of the same name in the playbook's folder for the kind (see Owns). That is all that can be told of such a link: its
-// playbook's folder may be one that cannot be read for now.
+// its target as written, made absolute), may belong to the playbook: whether that target, read as text, or resolved
+// as far as it can be (see fsutil.ResolveAsFar: for example, through the playbook's former path, now a link to it),
+// is an entry of the same name in the playbook's folder for the kind (see Owns). That is all that can be told of such
+// a link: its playbook's folder may be one that cannot be read for now.
 func (e Entry) MayOwn(kind, name, target string) bool {
 	clean := filepath.Clean(target)
 	if !config.MatchFormat(e.Format(kind), name) || !fsutil.SameName(filepath.Base(clean), name) {
 		return false
 	}
 	folder, _ := e.Source(kind)
-	dir := filepath.Dir(clean)
-	return fsutil.SamePath(dir, e.SourceDir(kind)) ||
-		fsutil.SamePath(dir, filepath.Join(e.Dir, filepath.FromSlash(folder)))
+	sources := []string{e.SourceDir(kind), filepath.Join(e.Dir, filepath.FromSlash(folder))}
+	for _, dir := range []string{filepath.Dir(clean), fsutil.ResolveAsFar(filepath.Dir(clean))} {
+		for _, source := range sources {
+			if fsutil.SamePath(dir, source) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // MayOwner returns the entry, among entries, that a link in the target folder of kind, whose target cannot be
@@ -720,9 +727,7 @@ func Apply(plan Plan, report func(Action)) error {
 		if err != nil {
 			rerr := removeDirs(a.madeDirs)
 			a.madeDirs = nil
-			if verr := Revert(done); rerr == nil {
-				rerr = verr
-			}
+			rerr = errors.Join(rerr, Revert(done)) // both, when both failed
 			if rerr != nil {
 				return fmt.Errorf("%w; undoing the changes already made also failed: %v", err, rerr)
 			}

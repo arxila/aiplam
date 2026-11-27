@@ -34,9 +34,10 @@ set -eu
 # Nothing from the caller's environment that changes what git does (another repository, templates, settings): not for
 # the example repositories, nor in the sandbox's shell (which also gets no system settings, and its own XDG folder for
 # global ones, see below).
-unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_TEMPLATE_DIR \
-  GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_CEILING_DIRECTORIES GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM \
-  2>/dev/null || true
+# Every GIT_* variable, whichever git reads (GIT_DIR, GIT_COMMON_DIR, GIT_TEMPLATE_DIR, GIT_CONFIG_*...).
+for variable in $(env | sed -n 's/^\(GIT_[A-Za-z0-9_]*\)=.*/\1/p'); do
+  unset "$variable"
+done
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
 bin=${1:-$repo/aiplam}
@@ -103,7 +104,8 @@ case $shell in
   /*) ;;
   ?*) shell=$(cd "$(dirname "$shell")" && pwd)/$(basename "$shell") ;;
 esac
-[ -n "$shell" ] && [ -f "$shell" ] && [ -x "$shell" ] ||
+# Tried first (a script whose interpreter is missing is executable, yet cannot start).
+[ -n "$shell" ] && [ -f "$shell" ] && [ -x "$shell" ] && "$shell" -c true </dev/null >/dev/null 2>&1 ||
   { echo "cannot start the shell '${SHELL:-/bin/sh}': set SHELL to one that can be" >&2; exit 1; }
 trap - EXIT
 cd "$sandbox"

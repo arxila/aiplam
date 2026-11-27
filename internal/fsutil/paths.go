@@ -55,6 +55,18 @@ const maxLinkHops = 255
 // reads paths and link targets as text first, to their text (see windowsText). It fails when an existing part cannot
 // be resolved (a link it cannot read, a loop of links, or a folder it cannot read).
 func Resolve(path string) (string, error) {
+	return resolve(path, false)
+}
+
+// ResolveAsFar returns path resolved as Resolve does, as far as it can be: from where a part of it cannot be resolved
+// (a folder it cannot read, a loop of links...), the rest is kept as written (cleaned as text). It is for telling
+// where a link may lead when Resolve fails.
+func ResolveAsFar(path string) string {
+	resolved, _ := resolve(path, true)
+	return resolved
+}
+
+func resolve(path string, asFar bool) (string, error) {
 	if !filepath.IsAbs(path) {
 		cwd, err := os.Getwd()
 		if err != nil {
@@ -99,6 +111,10 @@ func Resolve(path string) (string, error) {
 			continue
 		}
 		if err != nil {
+			if asFar {
+				return filepath.Join(append(append([]string{normalized(resolved)}, missing...),
+					append([]string{elem}, pending...)...)...), nil
+			}
 			return "", fmt.Errorf("cannot resolve '%s': %w", next, err)
 		}
 		if !isLinkMode(fi.Mode()) {
@@ -111,9 +127,15 @@ func Resolve(path string) (string, error) {
 				resolved = next // an irregular file that is not a readable reparse point (see Inspect)
 				continue
 			}
+			if asFar {
+				return filepath.Join(append([]string{normalized(resolved), elem}, pending...)...), nil
+			}
 			return "", fmt.Errorf("cannot resolve '%s': %w", next, err)
 		}
 		if hops++; hops > maxLinkHops {
+			if asFar {
+				return filepath.Join(append([]string{normalized(resolved), elem}, pending...)...), nil
+			}
 			return "", fmt.Errorf("cannot resolve '%s': too many links", next)
 		}
 		// The target replaces the link: an absolute target (or, on Windows, one rooted on the link's drive) starts
