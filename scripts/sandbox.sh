@@ -106,8 +106,8 @@ case $shell in
 esac
 # Tried first (a script whose interpreter is missing is executable, yet cannot start), already in the sandbox, with its
 # environment, and without the files that non-interactive shells run at start (BASH_ENV, ENV): nothing of the caller's
-# runs outside the sandbox.
-unset BASH_ENV ENV
+# runs outside the sandbox. Nor ZDOTDIR, so that zsh reads the sandbox's start-up files, not the caller's.
+unset BASH_ENV ENV ZDOTDIR
 cd "$sandbox"
 export HOME=$sandbox PATH=$sandbox/bin:$PATH AIPLAM_SANDBOX=$sandbox XDG_CONFIG_HOME=$sandbox/.config \
   GIT_CONFIG_NOSYSTEM=1

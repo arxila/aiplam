@@ -573,3 +573,41 @@ func TestCheckWritableLinks(t *testing.T) {
 		}
 	}
 }
+
+// TestSaveThroughLinkNeedsConfigurationFolder checks that saving through a link writes its temporary file in the
+// .aiplam folder, and fails (rather than writing it next to the file the link leads to) when it cannot.
+func TestSaveThroughLinkNeedsConfigurationFolder(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a folder the current user cannot write to")
+	}
+	managed := fsutil.Canonical(t.TempDir())
+	if err := SaveConfig(managed, &Config{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveProfile(managed, &Profile{Name: "p"}); err != nil {
+		t.Fatal(err)
+	}
+	backing := filepath.Join(managed, "dotfiles", "p.yaml")
+	if err := os.MkdirAll(filepath.Dir(backing), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(ProfileFile(managed, "p"), backing); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..", "dotfiles", "p.yaml"), ProfileFile(managed, "p")); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveProfile(managed, &Profile{Name: "p", Agent: CustomAgent}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(Dir(managed), 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(Dir(managed), 0o755) })
+	if err := SaveProfile(managed, &Profile{Name: "p"}); err == nil {
+		t.Error("saved without the .aiplam folder for the temporary file")
+	}
+	if items, _ := os.ReadDir(filepath.Dir(backing)); len(items) != 1 {
+		t.Errorf("files next to the backing file: %d", len(items))
+	}
+}

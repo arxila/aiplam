@@ -987,3 +987,27 @@ func TestRevertReportsLinksNotPutBack(t *testing.T) {
 		t.Errorf("the same link back: %v", err)
 	}
 }
+
+// TestRevertWantsTheSameLink checks that undoing a removal does not take a link to the same place in the end, but by
+// another name, for the link removed: here, the artifact is a link inside the playbook to another name.
+func TestRevertWantsTheSameLink(t *testing.T) {
+	s := newSandbox(t)
+	real := filepath.Dir(s.file("pb/shared/x-real/SKILL.md"))
+	source := filepath.Join(s.pb, "skills", "x-alias")
+	if err := os.MkdirAll(filepath.Dir(source), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := symlink(t, filepath.Join("..", "shared", "x-real"), source); err != nil {
+		t.Fatal(err)
+	}
+	link := s.link(".agents/skills/x-alias")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsutil.CreateLink(link, real); err != nil {
+		t.Fatal(err)
+	}
+	if err := Revert([]Action{{Kind: Remove, Link: link, Source: source}}); err == nil {
+		t.Error("a link to the same place by another name: taken for the link removed")
+	}
+}

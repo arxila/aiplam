@@ -38,6 +38,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"syscall"
 	"unicode"
 
 	"go.yaml.in/yaml/v3"
@@ -632,10 +633,43 @@ func writePath(managed, file string) (string, error) {
 	if info, err := os.Stat(target); err != nil || !info.Mode().IsRegular() {
 		return "", fmt.Errorf("'%s' is a link to '%s', which is not a regular file that exists", file, target)
 	}
-	if err := otherConfiguration(managed, target); err != nil {
-		return "", fmt.Errorf("'%s' is a link to '%s': %w", file, target, err)
+	// Every file the link goes through on its way, and the one it leads to: none may be another managed folder's.
+	hops, err := linkHops(file)
+	if err != nil {
+		return "", fmt.Errorf("'%s' is a link that cannot be resolved: %w", file, err)
+	}
+	for _, hop := range append(hops, target) {
+		if err := otherConfiguration(managed, hop); err != nil {
+			return "", fmt.Errorf("'%s' is a link to '%s': %w", file, hop, err)
+		}
 	}
 	return target, nil
+}
+
+// linkHops returns the files that the link file leads to in turn, one link after the other, each with the links of its
+// folder resolved, until one that is not a link (which is not returned).
+func linkHops(file string) ([]string, error) {
+	var hops []string
+	for p := file; len(hops) < 255; {
+		info, err := os.Lstat(p)
+		if err != nil || info.Mode()&os.ModeSymlink == 0 {
+			return hops, nil
+		}
+		next, err := os.Readlink(p)
+		if err != nil {
+			return nil, err
+		}
+		if !filepath.IsAbs(next) {
+			next = filepath.Join(filepath.Dir(p), next)
+		}
+		dir, err := fsutil.Resolve(filepath.Dir(next))
+		if err != nil {
+			return nil, err
+		}
+		p = filepath.Join(dir, filepath.Base(next))
+		hops = append(hops, p)
+	}
+	return nil, errors.New("too many links")
 }
 
 // otherConfiguration fails when target lies in the configuration folder of another managed folder (a folder nested in
@@ -679,13 +713,21 @@ func save(managed, file string, v any, header string) error {
 	// The new content goes to a temporary file, which then replaces the file: a crash leaves either the old file or the
 	// new one, complete. The temporary file is in the .aiplam folder (whose .gitignore covers such files), also when
 	// file is the file a link leads to (which so stays a link) elsewhere; but next to that file when it cannot be moved
-	// from there (another disk).
+	// from there because it is on another disk (and only then).
 	data := buf.Bytes()
 	err = replace(filepath.Join(Dir(managed), fmt.Sprintf("%s.%d.tmp", filepath.Base(file), os.Getpid())), file, data)
-	if err != nil && filepath.Dir(file) != Dir(managed) {
+	if err != nil && crossDevice(err) {
 		err = replace(fmt.Sprintf("%s.%d.tmp", file, os.Getpid()), file, data)
 	}
 	return err
+}
+
+// crossDevice reports whether err is that of moving a file to another disk (EXDEV; ERROR_NOT_SAME_DEVICE on Windows).
+func crossDevice(err error) bool {
+	if runtime.GOOS == "windows" {
+		return errors.Is(err, syscall.Errno(17))
+	}
+	return errors.Is(err, syscall.EXDEV)
 }
 
 // replace writes data to the temporary file tmpName and moves it to file. The temporary file is created with the usual

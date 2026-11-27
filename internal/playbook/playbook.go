@@ -276,6 +276,8 @@ type Action struct {
 	madeDirs []madeDir
 	// linkKind is, for a Remove, the kind of the link removed, so that undoing it makes the same kind of link again.
 	linkKind fsutil.LinkKind
+	// top is, for a Create, the folder of the playbook its source must lie in (see stillInside).
+	top string
 }
 
 // Plan is a set of link changes.
@@ -528,7 +530,7 @@ func Transition(from, to []Group, scope map[Key]bool) (Plan, error) {
 				for _, it := range its {
 					link, k := filepath.Join(t.Dir, it.Name), key(t.Dir, it.Name)
 					act := Action{Artifact: t.Kind, Name: it.Name, Link: link, Source: it.Source, Stop: t.Stop,
-						Playbook: e.Label(), ID: e.ID, Profile: e.Profile}
+						Playbook: e.Label(), ID: e.ID, Profile: e.Profile, top: e.Dir}
 					// Every other want of the same place: other playbooks, or this one through another target folder
 					// that is the same folder.
 					var others []string
@@ -695,6 +697,13 @@ func foundSwapped(dir, name string) (found, ok bool) {
 	return errA == nil && errB == nil && os.SameFile(a, b), true
 }
 
+// sameLink reports whether a link's target, current (as Inspect returns it), is source: the same name in the same
+// folder, as ownership is decided (see Owns); not merely a path to the same place in the end.
+func sameLink(current, source string) bool {
+	return fsutil.SameName(filepath.Base(current), filepath.Base(source)) &&
+		fsutil.SamePath(fsutil.Canonical(filepath.Dir(current)), fsutil.Canonical(filepath.Dir(source)))
+}
+
 // sameFolder reports whether two paths lead to the same place once links are resolved, so that a link made through
 // a path that has since become a link (for example, a playbook moved and linked from its old location) still counts.
 func sameFolder(a, b string) bool {
@@ -753,22 +762,36 @@ func Apply(plan Plan, report func(Action)) error {
 }
 
 // stillInside fails when the folder of a Create's link no longer leads inside its Stop folder (the managed folder, or
-// %APPDATA%), once links are resolved: a link made by the plan may lead there.
+// %APPDATA%), or its source no longer inside its playbook folder, once links are resolved: a link made by the plan may
+// lead elsewhere.
 func stillInside(a *Action) error {
-	if a.Stop == "" {
-		return nil
+	if a.Stop != "" {
+		if err := leadsInside(filepath.Dir(a.Link), a.Stop, "makes links inside it"); err != nil {
+			return err
+		}
 	}
-	dir, err := fsutil.Resolve(filepath.Dir(a.Link))
+	if a.top != "" {
+		if err := leadsInside(a.Source, a.top, "links artifacts inside it"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// leadsInside fails when path, once links are resolved, does not lead inside top; does says what aiplam does inside
+// top, for the error.
+func leadsInside(path, top, does string) error {
+	resolved, err := fsutil.Resolve(path)
 	if err != nil {
 		return err
 	}
-	stop, err := fsutil.Resolve(a.Stop)
+	resolvedTop, err := fsutil.Resolve(top)
 	if err != nil {
 		return err
 	}
-	if !fsutil.Inside(dir, stop) {
-		return fmt.Errorf("'%s' now leads outside '%s', to '%s', through a link made by this command: aiplam only "+
-			"makes links inside it", filepath.Dir(a.Link), a.Stop, dir)
+	if !fsutil.Inside(resolved, resolvedTop) {
+		return fmt.Errorf("'%s' now leads outside '%s', to '%s', through a link made by this command: aiplam only %s",
+			path, top, resolved, does)
 	}
 	return nil
 }
@@ -856,7 +879,7 @@ func Revert(actions []Action) error {
 			// A link that cannot be resolved where the link was made: it cannot be told whether it is that link.
 			if state, current, ierr := fsutil.Inspect(a.Link); ierr != nil {
 				err = ierr
-			} else if state == fsutil.Link && sameFolder(current, a.Source) {
+			} else if state == fsutil.Link && sameLink(current, a.Source) {
 				err = fsutil.RemoveLink(a.Link)
 			}
 			if err == nil {
@@ -872,7 +895,7 @@ func Revert(actions []Action) error {
 				if err = os.MkdirAll(filepath.Dir(a.Link), 0o755); err == nil {
 					err = fsutil.RestoreLink(a.Link, a.Source, a.linkKind)
 				}
-			case ierr == nil && state == fsutil.Link && sameFolder(current, a.Source):
+			case ierr == nil && state == fsutil.Link && sameLink(current, a.Source):
 				// the same link is back
 			default:
 				err = fmt.Errorf("%s was not put back, as something else is there now", a.Link)

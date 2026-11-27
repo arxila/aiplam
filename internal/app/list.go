@@ -113,13 +113,13 @@ func (a *App) cmdList(args []string) error {
 
 	for _, s := range st.enabled {
 		a.printf("\nProfile %s (agent %s)\n", s.name, s.prof.Agent)
-		linked := false
+		linked, unread := false, false
 		for _, t := range s.targets {
 			items, err := os.ReadDir(t.Dir)
 			if err != nil {
 				if !errors.Is(err, os.ErrNotExist) {
 					a.warnf("cannot read target folder '%s': %s", a.pretty(t.Dir), err)
-					failed = true
+					failed, unread = true, true
 				}
 				continue
 			}
@@ -165,6 +165,8 @@ func (a *App) cmdList(args []string) error {
 		}
 		switch {
 		case linked:
+		case unread:
+			a.printf("  links in target folders that cannot be read are not listed (see above)\n")
 		case len(s.entries) == 0:
 			a.printf("  no playbooks are registered: register one with '%s'\n",
 				a.withProfile(st, s.name, "add <name> <playbookfolder>"))

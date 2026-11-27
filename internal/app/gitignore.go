@@ -93,11 +93,15 @@ func (a *App) warnUnignored(links []ownedLink, failures bool) bool {
 	var inRepo []string
 	byPath := map[string]ownedLink{}
 	// The links inside the repository: those inside the managed folder are named in its .gitignore, and the others
-	// (under %APPDATA%, when the repository holds it) in the repository's, by where they are (however their target
-	// folder is written).
+	// (under %APPDATA%, when the repository holds it) in the repository's, by where they are, with the links of their
+	// folders resolved (however their target folder is written): git does not look through links to folders, and
+	// refuses to check a path that goes through one.
 	ignoreFiles := map[string]string{} // by link
 	prefixes := map[string]string{}    // by link: the part of its line before its pattern
 	for _, l := range links {
+		if dir, err := fsutil.Resolve(filepath.Dir(l.path)); err == nil {
+			l.path = filepath.Join(dir, filepath.Base(l.path))
+		}
 		if !fsutil.Within(l.path, repo) {
 			continue
 		}

@@ -747,6 +747,38 @@ func TestAppData(t *testing.T) {
 	}
 }
 
+// TestUnignoredLinksThroughFolderLink checks that links in a target folder reached through a link to a folder are
+// checked with git where they are (git refuses to check a path through a link), and that the lines name that place.
+func TestUnignoredLinksThroughFolderLink(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not available")
+	}
+	e := newEnv(t)
+	project := e.mkdir(filepath.Join(e.root, "project"))
+	e.git(project, "init", "-q")
+	e.mkdir(filepath.Join(project, "real-claude"))
+	if err := symlink(t, "real-claude", filepath.Join(project, ".claude")); err != nil {
+		t.Fatal(err)
+	}
+	e.mustRun(ExitOK, "init", project, "-f", "skills:.claude/skills")
+	e.app.Cwd = project
+	_, errOut := e.mustRun(ExitOK, "add", "x", e.playbook("pb", "x-a"))
+	line := "/real-claude/skills/x-*"
+	if !contains(errOut, "\n  "+line) {
+		t.Fatalf("unexpected warning:\n%s", errOut)
+	}
+	if err := os.WriteFile(filepath.Join(project, ".gitignore"), []byte(line+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	check := exec.Command("git", "-C", project, "check-ignore", "-q", filepath.Join("real-claude", "skills", "x-a"))
+	if err := check.Run(); err != nil {
+		t.Fatalf("the suggested line does not make git ignore the link: %v", err)
+	}
+	if _, errOut := e.mustRun(ExitOK, "status"); contains(errOut, "cannot check") || contains(errOut, "not ignored") {
+		t.Fatalf("status still warns:\n%s", errOut)
+	}
+}
+
 // TestUnignoredLinksOutsideManagedFolder checks that links outside the managed folder, but inside its git repository
 // (under %APPDATA%, when the repository holds it), are reported, with lines for the repository's .gitignore.
 func TestUnignoredLinksOutsideManagedFolder(t *testing.T) {
@@ -902,6 +934,29 @@ func TestLinkMadeRedirectsAnotherTarget(t *testing.T) {
 	e.assertMissing(filepath.Join(project, "a", "x-dir"))
 }
 
+// TestLinkMadeRedirectsLaterSource checks that a link made by a command cannot lead a later artifact of the same
+// command outside its playbook folder: here, the managed folder lies inside the playbook folder, and an artifact is a
+// link through the place where an earlier artifact's link is made.
+func TestLinkMadeRedirectsLaterSource(t *testing.T) {
+	e := newEnv(t)
+	pb := e.mkdir(filepath.Join(e.root, "pb"))
+	managed := e.mkdir(filepath.Join(pb, "m"))
+	outside := e.file("outside.md")
+	e.mkdir(filepath.Join(pb, "skills", "x-a"))
+	if err := symlink(t, outside, filepath.Join(pb, "skills", "x-a", "inner")); err != nil {
+		t.Fatal(err)
+	}
+	if err := symlink(t, filepath.Join("..", "m", ".agents", "skills", "x-a", "inner"),
+		filepath.Join(pb, "skills", "x-b")); err != nil {
+		t.Fatal(err)
+	}
+	e.mustRun(ExitOK, "init", managed, "-a", "standard")
+	e.app.Cwd = managed
+	e.mustFail(ExitFailure, []string{"now leads outside", "undone"}, "add", "x", pb)
+	e.assertMissing(filepath.Join(managed, ".agents", "skills", "x-a"))
+	e.assertMissing(filepath.Join(managed, ".agents", "skills", "x-b"))
+}
+
 // TestUnreadableMovedPlaybookFolderPlainLink checks the same as TestUnreadableMovedPlaybookFolder for a link whose
 // target holds no '..' (as one made by hand, or for a playbook that was inside its target folder).
 func TestUnreadableMovedPlaybookFolderPlainLink(t *testing.T) {
@@ -964,6 +1019,40 @@ func TestProfileLinkIntoNestedManagedFolder(t *testing.T) {
 	}
 }
 
+// TestProfileLinkThroughNestedProfile checks the same as TestProfileLinkIntoNestedManagedFolder when the nested
+// managed folder's profile is itself a link: the link goes through it.
+func TestProfileLinkThroughNestedProfile(t *testing.T) {
+	e := newEnv(t)
+	parent := e.mkdir(filepath.Join(e.root, "parent"))
+	nested := e.mkdir(filepath.Join(parent, "nested"))
+	e.mustRun(ExitOK, "init", parent, "-a", "standard")
+	e.mustRun(ExitOK, "init", nested, "-a", "standard")
+	nestedFile := config.ProfileFile(nested, "default")
+	backing := filepath.Join(e.mkdir(filepath.Join(nested, "shared")), "default.yaml")
+	if err := os.Rename(nestedFile, backing); err != nil {
+		t.Fatal(err)
+	}
+	if err := symlink(t, filepath.Join("..", "shared", "default.yaml"), nestedFile); err != nil {
+		t.Fatal(err)
+	}
+	file := config.ProfileFile(parent, "default")
+	if err := os.Remove(file); err != nil {
+		t.Fatal(err)
+	}
+	if err := symlink(t, filepath.Join("..", "nested", config.DirName, "default.yaml"), file); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(backing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.app.Cwd = parent
+	e.mustFail(ExitFailure, []string{"configuration of the managed folder"}, "add", "x", e.playbook("pb", "x-a"))
+	if after, err := os.ReadFile(backing); err != nil || string(after) != string(before) {
+		t.Fatalf("the nested managed folder's profile changed: %v", err)
+	}
+}
+
 // TestListReportsUnreadableTargets checks that list reports a target folder it cannot read, instead of showing
 // nothing linked.
 func TestListReportsUnreadableTargets(t *testing.T) {
@@ -977,7 +1066,11 @@ func TestListReportsUnreadableTargets(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(e.homeSkills(), 0o755) })
-	e.mustFail(ExitFailure, []string{"cannot read target folder '~/.agents/skills'"}, "list", "-u")
+	e.mustFail(ExitFailure, []string{"cannot read target folder '~/.agents/skills'", "cannot be read are not listed"},
+		"list", "-u")
+	if _, out, _ := e.run("list", "-u"); contains(out, "nothing is linked") {
+		t.Fatalf("list says nothing is linked:\n%s", out)
+	}
 }
 
 // TestNewTargetFoldersBelowFiles checks that a profile is not created with a target folder below a file.
