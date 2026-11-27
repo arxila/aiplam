@@ -234,7 +234,8 @@ func (a *App) cmdStatus(args []string) error {
 	var registered []string
 	seen := map[string]bool{}
 	var dirs []string
-	for _, s := range append(append([]*profileState{}, st.enabled...), others...) {
+	all := append(append([]*profileState{}, st.enabled...), others...)
+	for _, s := range all {
 		for _, e := range s.entries {
 			registered = append(registered, e.Dir)
 		}
@@ -254,8 +255,15 @@ func (a *App) cmdStatus(args []string) error {
 			link := filepath.Join(dir, item.Name())
 			state, current, err := fsutil.Inspect(link)
 			if err != nil && state == fsutil.Link {
-				problem("link %s -> %s cannot be resolved (%v): it belongs to no playbook; remove it by hand",
-					a.pretty(link), a.pretty(current), err)
+				if e := mayOwner(all, link, item.Name(), current); e != nil {
+					problem("link %s -> %s cannot be resolved (%v): it may be a link of playbook %s, whose folder "+
+						"may not be readable; check that it can be read", a.pretty(link), a.pretty(current), err,
+						e.Label())
+				} else {
+					problem("link %s -> %s cannot be resolved (%v): aiplam cannot tell whose link it is; check it, and "+
+						"remove it if nothing needs it (that does not remove what it leads to)", a.pretty(link),
+						a.pretty(current), err)
+				}
 				continue
 			}
 			if err != nil || state != fsutil.Link || ownedBy(st.enabled, link, item.Name(), current) {
@@ -300,6 +308,21 @@ func (a *App) cmdStatus(args []string) error {
 
 // ownedBy reports whether a link belongs to a playbook of the enabled profiles, for the kind of the target folder it is
 // in.
+// mayOwner returns the playbook, among those of profiles, that a link whose target cannot be resolved may belong to
+// (see playbook.MayOwn), or nil.
+func mayOwner(profiles []*profileState, link, name, target string) *playbook.Entry {
+	for _, s := range profiles {
+		for _, t := range s.targets {
+			if fsutil.SamePath(t.Dir, filepath.Dir(link)) {
+				if e := playbook.MayOwner(s.entries, t.Kind, name, target); e != nil {
+					return e
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func ownedBy(enabled []*profileState, link, name, current string) bool {
 	for _, s := range enabled {
 		for _, t := range s.targets {

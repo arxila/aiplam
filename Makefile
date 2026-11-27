@@ -100,7 +100,15 @@ dist:
 		echo "SHA256SUMS is not signed (SIGN_KEY is empty): it must be signed before it is published"; \
 	fi
 	@PLATFORMS="$(PLATFORMS)" ./scripts/check-dist.sh $(DIST).new $(BINARY) $(VERSION) $(SIGN_KEY)
-	@rm -rf $(DIST) $(BINARY) && mv $(DIST).new $(DIST)
+	@# The previous build is moved aside, and only removed once the new one is in place (put back if that fails).
+	@rm -rf $(DIST).old; \
+	if [ -e $(DIST) ]; then mv $(DIST) $(DIST).old || exit 1; fi; \
+	if mv $(DIST).new $(DIST); then \
+		rm -rf $(DIST).old $(BINARY); \
+	else \
+		[ ! -e $(DIST).old ] || mv $(DIST).old $(DIST); \
+		exit 1; \
+	fi
 	@echo "the release archives are in $(DIST)"
 
 # Signs the draft release that the Release workflow created for VERSION, after checking its attestations and archives
@@ -110,7 +118,7 @@ release-sign:
 	PLATFORMS="$(PLATFORMS)" ./scripts/sign-release.sh $(VERSION) $(SIGN_KEY)
 
 clean:
-	rm -rf $(DIST) $(DIST).new $(BINARY)
+	rm -rf $(DIST) $(DIST).new $(DIST).old $(BINARY)
 
 # A shell with HOME set to a temporary folder holding copies of testdata/playbooks (see scripts/sandbox.sh).
 sandbox: build

@@ -682,12 +682,43 @@ func (a *App) newProfileState(prof *config.Profile, enabled bool) (*profileState
 		if err == nil {
 			err = a.checkInside(dir, stop, "target folder '"+t.Folder+"'", "links")
 		}
+		if err == nil {
+			err = a.checkNotConfig(dir, t.Folder)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("profile '%s': %w", prof.Name, err)
 		}
 		s.targets = append(s.targets, playbook.Target{Kind: t.Kind, Folder: t.Folder, Dir: dir, Stop: stop})
 	}
 	return s, nil
+}
+
+// checkNotConfig fails when dir, a target folder (as folder in its profile), once links are resolved, is the managed
+// folder itself or lies inside its .aiplam folder, as the rules for target folders forbid however it is written: a
+// folder under %APPDATA% can be either, when %APPDATA% holds the managed folder.
+func (a *App) checkNotConfig(dir, folder string) error {
+	resolved, err := fsutil.Resolve(dir)
+	if err != nil {
+		return err
+	}
+	top, err := fsutil.Resolve(a.Managed)
+	if err != nil {
+		return err
+	}
+	conf, err := fsutil.Resolve(config.Dir(a.Managed))
+	if err != nil {
+		return err
+	}
+	if info, err := os.Stat(resolved); err == nil {
+		if topInfo, err := os.Stat(top); err == nil && os.SameFile(info, topInfo) {
+			return fmt.Errorf("target folder '%s' is the managed folder '%s' itself", folder, a.pretty(a.Managed))
+		}
+	}
+	if fsutil.Inside(resolved, conf) {
+		return fmt.Errorf("target folder '%s' lies inside %s ('%s')", folder, config.DirName,
+			a.pretty(config.Dir(a.Managed)))
+	}
+	return nil
 }
 
 // checkInside fails when dir, once the links on its way are resolved, does not lead inside top (the managed folder, or

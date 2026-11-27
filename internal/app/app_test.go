@@ -735,6 +735,37 @@ func TestAppData(t *testing.T) {
 	project := e.mkdir(filepath.Join(e.home, "project"))
 	e.mustFail(ExitUsage, []string{"can only be used in the user managed folder"}, "init", project, "-f",
 		"skills:%APPDATA%/x")
+
+	// %APPDATA% holding the managed folder: a target folder under it cannot be the managed folder, nor lie in .aiplam.
+	e.app.AppData = e.root
+	for folder, msg := range map[string]string{
+		"%APPDATA%/home":           "is the managed folder",
+		"%APPDATA%/home/.aiplam/x": "lies inside .aiplam",
+	} {
+		e.writeProfile(e.home, "default", "name: default\nagent: custom\ntargets:\n  skills: '"+folder+"'\n")
+		e.mustFail(ExitFailure, []string{msg}, "status")
+	}
+}
+
+// TestUnignoredLinksOutsideManagedFolder checks that links outside the managed folder, but inside its git repository
+// (under %APPDATA%, when the repository holds it), are reported, with lines for the repository's .gitignore.
+func TestUnignoredLinksOutsideManagedFolder(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not available")
+	}
+	e := newEnv(t)
+	e.app.GOOS = "windows"
+	e.git(e.root, "init", "-q")
+	e.app.AppData = e.mkdir(filepath.Join(e.root, "appdata"))
+	e.mustRun(ExitOK, "init", "-u", "-f", "skills:.agents/skills,rules:%APPDATA%/tool/rules")
+	pb := e.playbook("pb", "x-a")
+	e.file("pb/rules/x-r.md")
+	_, errOut := e.mustRun(ExitOK, "add", "x", pb)
+	want := "these lines to '~/.gitignore':\n  /.agents/skills/x-*\nand these lines to '" +
+		filepath.Join(e.root, ".gitignore") + "' (aiplam never changes them):\n  /appdata/tool/rules/x-*"
+	if !contains(errOut, want) {
+		t.Fatalf("unexpected warning, want:\n%s\ngot:\n%s", want, errOut)
+	}
 }
 
 func TestArtifactsStayInsidePlaybook(t *testing.T) {
@@ -777,6 +808,32 @@ func TestPlaybookBehindSymlink(t *testing.T) {
 	e.mustRun(ExitOK, "update")
 	e.mustRun(ExitOK, "remove", "x")
 	e.assertMissing(filepath.Join(e.homeSkills(), "x-a"))
+}
+
+// TestUnreadablePlaybookFolder checks that a playbook's links are neither left behind nor called unrelated when its
+// folder cannot be read for now: their targets cannot be resolved, so whose they are cannot be told.
+func TestUnreadablePlaybookFolder(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a folder the current user cannot search")
+	}
+	e := newEnv(t)
+	e.mustRun(ExitOK, "init", "-u", "-a", "standard")
+	pb := e.playbook("pb", "x-a")
+	e.mustRun(ExitOK, "add", "x", pb, "-u")
+	link := filepath.Join(e.homeSkills(), "x-a")
+	if err := os.Chmod(pb, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(pb, 0o755) })
+	e.mustFail(ExitFailure, []string{"may be a link of playbook x"}, "status", "-u")
+	e.mustFail(ExitFailure, []string{"cannot tell whether", "is a link of playbook x"}, "profile", "disable", "default",
+		"-u")
+	if _, err := os.Lstat(link); err != nil {
+		t.Fatalf("the link was removed: %v", err)
+	}
+	if got := e.enabled(e.home); got != "default" {
+		t.Fatalf("enabled profiles: %q", got)
+	}
 }
 
 // TestRemoveBrokenProfileInAnotherCase checks that removing a profile whose file is a broken link, named in another

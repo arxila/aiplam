@@ -100,6 +100,32 @@ func (e Entry) Owns(kind, name, current string) bool {
 		fsutil.SamePath(fsutil.Canonical(filepath.Dir(current)), e.SourceDir(kind))
 }
 
+// MayOwn reports whether a link named name in the target folder of kind, whose target cannot be resolved (target is
+// its target as written, made absolute), may belong to the playbook: whether that target, read as text, is an entry
+// of the same name in the playbook's folder for the kind (see Owns). That is all that can be told of such a link: its
+// playbook's folder may be one that cannot be read for now.
+func (e Entry) MayOwn(kind, name, target string) bool {
+	clean := filepath.Clean(target)
+	if !config.MatchFormat(e.Format(kind), name) || !fsutil.SameName(filepath.Base(clean), name) {
+		return false
+	}
+	folder, _ := e.Source(kind)
+	dir := filepath.Dir(clean)
+	return fsutil.SamePath(dir, e.SourceDir(kind)) ||
+		fsutil.SamePath(dir, filepath.Join(e.Dir, filepath.FromSlash(folder)))
+}
+
+// MayOwner returns the entry, among entries, that a link in the target folder of kind, whose target cannot be
+// resolved, may belong to (see MayOwn), or nil.
+func MayOwner(entries []Entry, kind, name, target string) *Entry {
+	for i := range entries {
+		if entries[i].MayOwn(kind, name, target) {
+			return &entries[i]
+		}
+	}
+	return nil
+}
+
 // Owner returns the entry, among entries, that a link in the target folder of kind belongs to (see Owns), or nil.
 func Owner(entries []Entry, kind, name, current string) *Entry {
 	for i := range entries {
@@ -437,8 +463,13 @@ func Transition(from, to []Group, scope map[Key]bool) (Plan, error) {
 					if err != nil && state != fsutil.Link {
 						return plan, err
 					}
-					// A link whose target cannot be resolved is not one of the playbook's (those lead into its
-					// folder for the kind, which resolves): it is left as it is (status reports it).
+					// A link whose target cannot be resolved may still be the playbook's, when its folder cannot be
+					// read for now: then it can be neither kept nor removed. When even its target as written leads
+					// elsewhere, it is not the playbook's, and is left as it is (status reports it).
+					if err != nil && e.MayOwn(t.Kind, name, current) {
+						return plan, fmt.Errorf("cannot tell whether %s is a link of playbook %s, as its target cannot be "+
+							"resolved (%w): check that the playbook folder can be read", link, e.Label(), err)
+					}
 					if err != nil || state != fsutil.Link || !e.Owns(t.Kind, name, current) {
 						continue
 					}
@@ -677,8 +708,8 @@ func Apply(plan Plan, report func(Action)) error {
 			err = os.MkdirAll(filepath.Dir(a.Link), 0o755)
 			var merr error
 			a.madeDirs, merr = made(missing) // also those made before failing
-			if err == nil {
-				err = merr
+			if merr != nil {
+				err = errors.Join(err, merr) // both, when making the folders failed too
 			}
 			if err == nil {
 				err = fsutil.CreateLink(a.Link, a.Source)

@@ -22,6 +22,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -91,17 +92,30 @@ func (a *App) warnUnignored(links []ownedLink, failures bool) bool {
 	}
 	var inRepo []string
 	byPath := map[string]ownedLink{}
-	// Only those that the managed folder's .gitignore can name: inside the repository, and inside the managed folder
-	// (not those under %APPDATA%, unless it is inside it).
-	folders := map[string]string{}
+	// The links inside the repository: those inside the managed folder are named in its .gitignore, and the others
+	// (under %APPDATA%, when the repository holds it) in the repository's, by where they are (however their target
+	// folder is written).
+	ignoreFiles := map[string]string{} // by link
+	prefixes := map[string]string{}    // by link: the part of its line before its pattern
 	for _, l := range links {
-		rel, err := filepath.Rel(a.Managed, filepath.Dir(l.path))
-		if err != nil || !filepath.IsLocal(rel) || !fsutil.Within(l.path, repo) {
+		if !fsutil.Within(l.path, repo) {
 			continue
+		}
+		base := a.Managed
+		if rel, err := filepath.Rel(a.Managed, filepath.Dir(l.path)); err != nil || !filepath.IsLocal(rel) {
+			base = repo
+		}
+		rel, err := filepath.Rel(base, filepath.Dir(l.path))
+		if err != nil || !filepath.IsLocal(rel) {
+			continue
+		}
+		prefix := "/"
+		if rel != "." {
+			prefix += gitignoreFolder(filepath.ToSlash(rel)) + "/"
 		}
 		inRepo = append(inRepo, l.path)
 		byPath[l.path] = l
-		folders[l.path] = filepath.ToSlash(rel) // where it is, however its target folder is written
+		ignoreFiles[l.path], prefixes[l.path] = filepath.Join(base, ".gitignore"), prefix
 	}
 	if len(inRepo) == 0 {
 		return false
@@ -117,22 +131,38 @@ func (a *App) warnUnignored(links []ownedLink, failures bool) bool {
 	if len(unignored) == 0 {
 		return false
 	}
-	var lines []string
+	var files []string             // the .gitignore files to change, in order: the managed folder's first
+	lines := map[string][]string{} // by file
 	seen := map[string]bool{}
 	for _, p := range unignored {
-		l := byPath[p]
-		if line := "/" + gitignoreFolder(folders[p]) + "/" + gitignoreLine(l); !seen[line] {
-			seen[line] = true
-			lines = append(lines, line)
+		file := ignoreFiles[p]
+		if line := prefixes[p] + gitignoreLine(byPath[p]); !seen[file+"\x00"+line] {
+			seen[file+"\x00"+line] = true
+			if lines[file] == nil {
+				files = append(files, file)
+			}
+			lines[file] = append(lines[file], line)
 		}
 	}
+	sort.SliceStable(files, func(i, j int) bool {
+		return fsutil.Within(files[i], a.Managed) && !fsutil.Within(files[j], a.Managed)
+	})
 	var b strings.Builder
 	b.WriteString(plural(len(unignored), "link", "links") + " that aiplam made " + verb(len(unignored), "is", "are") +
 		" not ignored by git, so " + verb(len(unignored), "it", "they") + " could be committed; but links belong to " +
-		"each machine (they lead to where each one keeps its playbooks, and a Windows clone cannot use them). Add " +
-		"these lines to '" + a.pretty(filepath.Join(a.Managed, ".gitignore")) + "' (aiplam never changes it):")
-	for _, line := range lines {
-		b.WriteString("\n  " + line)
+		"each machine (they lead to where each one keeps its playbooks, and a Windows clone cannot use them). Add ")
+	for i, file := range files {
+		if i > 0 {
+			b.WriteString("\nand ")
+		}
+		b.WriteString("these lines to '" + a.pretty(file) + "'")
+		if i == len(files)-1 {
+			b.WriteString(" (aiplam never changes " + verb(len(files), "it", "them") + ")")
+		}
+		b.WriteString(":")
+		for _, line := range lines[file] {
+			b.WriteString("\n  " + line)
+		}
 	}
 	var committed []string
 	for _, p := range unignored {

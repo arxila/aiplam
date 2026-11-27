@@ -75,15 +75,26 @@ for archive in $archives; do
 		fail "$archive holds other entries than expected:"
 		printf '%s\n' "$actual" | sed 's/^/    /' >&2
 	fi
-	case $archive in
-		*.tar.gz)
-			# Read from the headers with Python's tarfile: extended attributes are in pax headers (SCHILY.xattr.*,
-			# LIBARCHIVE.xattr.*), not to be searched for in the whole archive, where a file could hold those words;
-			# and owners are in each entry's header, whatever tar's listing shows them like.
-			problems=$(python3 -I -c '
-import sys, tarfile
+	# Read from the headers with Python's tarfile and zipfile: the top folder must be a folder and every other entry a
+	# regular file (not a link); in a .tar.gz, extended attributes are in pax headers (SCHILY.xattr.*, LIBARCHIVE.xattr.*),
+	# not to be searched for in the whole archive, where a file could hold those words, and owners are in each entry's
+	# header, whatever tar's listing shows them like.
+	problems=$(python3 -I -c '
+import stat, sys, tarfile, zipfile
+path, top = sys.argv[1], sys.argv[2]
+def kind(is_dir, is_file):
+    return "a folder" if is_dir else "a regular file" if is_file else "something else (such as a link)"
 try:
-    with tarfile.open(sys.argv[1]) as archive:
+    if path.endswith(".zip"):
+        with zipfile.ZipFile(path) as archive:
+            for info in archive.infolist():
+                mode = info.external_attr >> 16
+                is_dir = info.is_dir()
+                is_file = not is_dir and (mode == 0 or stat.S_ISREG(mode))
+                if info.filename.rstrip("/") == top and not is_dir or info.filename.rstrip("/") != top and not is_file:
+                    print("holds %s as %s" % (info.filename, kind(is_dir, is_file)))
+        sys.exit(0)
+    with tarfile.open(path) as archive:
         members = archive.getmembers()
         headers = [archive.pax_headers] + [member.pax_headers for member in members]
 except Exception as error:
@@ -92,13 +103,17 @@ except Exception as error:
 if any("xattr" in key for h in headers for key in h):
     print("records extended attributes")
 for m in members:
+    if m.name.rstrip("/") == top and not m.isdir() or m.name.rstrip("/") != top and not m.isfile():
+        print("holds %s as %s" % (m.name, kind(m.isdir(), m.isfile())))
     if m.uid != 0 or m.gid != 0 or m.uname not in ("", "root") or m.gname not in ("", "root", "wheel"):
         print("records %s as owned by %s:%s (%d:%d), not root" % (m.name, m.uname, m.gname, m.uid, m.gid))
-' "$file")
-			if [ -n "$problems" ]; then
-				printf '%s\n' "$problems" | while IFS= read -r problem; do echo "check-dist: $archive $problem" >&2; done
-				failed=1
-			fi
+' "$file" "$name")
+	if [ -n "$problems" ]; then
+		printf '%s\n' "$problems" | while IFS= read -r problem; do echo "check-dist: $archive $problem" >&2; done
+		failed=1
+	fi
+	case $archive in
+		*.tar.gz)
 			if ! tar -tvzf "$file" | grep -q "^-rwx.*$name/$exe\$"; then
 				fail "$archive: $name/$exe is not executable"
 			fi
