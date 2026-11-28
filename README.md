@@ -14,12 +14,12 @@ projects.
    playbook folder (a git clone,                managed folder (here, the
    checked out at tag v1.2.0)                   home folder, ~)
   ┌────────────────────────────────┐           ┌─────────────────────────────────────┐
-  │ ~/Workspace/acme-ai-playbook/  │           │ ~/.aiplam/   aiplam's configuration │
+  │ ~/Workspace/acme-ai-playbook/  │           │  ~/.aiplam/  aiplam's configuration │
   │ ├── skills/                    │           │                                     │
-  │ │   ├── acme-deploy/     ◄─────┼───────────┼── ~/.claude/skills/acme-deploy      │
-  │ │   └── acme-review/     ◄─────┼───────────┼── ~/.claude/skills/acme-review      │
+  │ │   ├── acme-deploy/     ◄─────┼───────────┼─ ~/.claude/skills/acme-deploy       │
+  │ │   └── acme-review/     ◄─────┼───────────┼─ ~/.claude/skills/acme-review       │
   │ └── subagents/                 │   links   │                                     │
-  │     └── acme-reviewer.md ◄─────┼─ made by ─┼── ~/.claude/agents/acme-reviewer.md │
+  │     └── acme-reviewer.md ◄─────┼─ made by ─┼─ ~/.claude/agents/acme-reviewer.md  │
   │                                │  aiplam   │                                     │
   └────────────────────────────────┘           └─────────────────────────────────────┘
                                                                   ▲
