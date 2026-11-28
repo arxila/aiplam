@@ -11,21 +11,23 @@ projects.
 - Updating a playbook is switching its clone to another tag and running `aiplam update`.
 
 ```text
-   playbook folder (a git clone,                           managed folder (here, the home folder, ~)
-   checked out at tag v1.2.0)
-  ┌───────────────────────────────────┐                   ┌────────────────────────────────────────────┐
-  │ ~/Workspace/acme-ai-playbook/     │                   │    ~/.aiplam/       aiplam's configuration │
-  │ ├── skills/                       │                   │                                            │
-  │ │   ├── acme-deploy/   ◄──────────┼───────────────────┼─── ~/.claude/skills/acme-deploy            │
-  │ │   └── acme-review/   ◄──────────┼───────────────────┼─── ~/.claude/skills/acme-review            │
-  │ └── subagents/                    │   links made by   │                                            │
-  │     └── acme-reviewer.md  ◄───────┼───── aiplam ──────┼─── ~/.claude/agents/acme-reviewer.md       │
-  └───────────────────────────────────┘                   └────────────────────────────────────────────┘
-                                                                              ▲
-                                                                              │ reads its skills and subagents
-                                                                       ┌──────┴──────┐
-                                                                       │ Claude Code │
-                                                                       └─────────────┘
+   playbook folder (a git clone,                managed folder (here, the
+   checked out at tag v1.2.0)                   home folder, ~)
+  ┌────────────────────────────────┐           ┌─────────────────────────────────────┐
+  │ ~/Workspace/acme-ai-playbook/  │           │ ~/.aiplam/   aiplam's configuration │
+  │ ├── skills/                    │           │                                     │
+  │ │   ├── acme-deploy/     ◄─────┼───────────┼── ~/.claude/skills/acme-deploy      │
+  │ │   └── acme-review/     ◄─────┼───────────┼── ~/.claude/skills/acme-review      │
+  │ └── subagents/                 │   links   │                                     │
+  │     └── acme-reviewer.md ◄─────┼─ made by ─┼── ~/.claude/agents/acme-reviewer.md │
+  │                                │  aiplam   │                                     │
+  └────────────────────────────────┘           └─────────────────────────────────────┘
+                                                                  ▲
+                                                                  │ reads its skills
+                                                                  │ and subagents
+                                                           ┌──────┴──────┐
+                                                           │ Claude Code │
+                                                           └─────────────┘
 ```
 
 `aiplam` never clones, fetches, pulls or switches a playbook's checkout: choosing versions is the developer's job. It
