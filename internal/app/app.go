@@ -40,7 +40,7 @@ import (
 )
 
 // sourceVersion is the version of this source code. The Makefile reads it from here.
-const sourceVersion = "1.0.0"
+const sourceVersion = "1.0.1-dev"
 
 // Version is aiplam's version: the one set at build time with -ldflags "-X arxila.io/aiplam/internal/app.Version=..."
 // (as the Makefile does), or else the module version recorded by the go command (for example, by 'go install
